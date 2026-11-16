@@ -1,0 +1,279 @@
+package com.simon.harmonichackernews.ios
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import com.simon.harmonichackernews.app.HarmonicAppComposition
+import com.simon.harmonichackernews.app.HarmonicSceneComposition
+import com.simon.harmonichackernews.network.CloudSummaryDefaults
+import com.simon.harmonichackernews.presentation.UserMessageDuration
+import com.simon.harmonichackernews.platform.TextDocumentCallback
+import com.simon.harmonichackernews.settings.AiSummaryTextSetting
+import com.simon.harmonichackernews.settings.DataSettingsCounts
+import com.simon.harmonichackernews.settings.DataSettingsDialogState
+import com.simon.harmonichackernews.settings.DataSettingsRuntimeEffect
+import com.simon.harmonichackernews.ui.settings.AddBookmarksToFavoritesDialog
+import com.simon.harmonichackernews.ui.settings.AiModelSelectorRoute
+import com.simon.harmonichackernews.ui.settings.AiSummaryBaseUrlDialog
+import com.simon.harmonichackernews.ui.settings.AiSummarySettingsDialog
+import com.simon.harmonichackernews.ui.settings.AiSummarySettingsRoute
+import com.simon.harmonichackernews.ui.settings.AiSummaryTextDialog
+import com.simon.harmonichackernews.ui.settings.ClearAiModelsConfirmationDialog
+import com.simon.harmonichackernews.ui.settings.DataSettingsRoute
+import com.simon.harmonichackernews.ui.settings.ImportBookmarksDialog
+import com.simon.harmonichackernews.ui.settings.ManagedLocalModelPanel
+import com.simon.harmonichackernews.ui.settings.LocalModelsRoute
+import com.simon.harmonichackernews.ui.settings.MessageActionDialog
+import com.simon.harmonichackernews.ui.settings.PortableSettingsDetail
+import com.simon.harmonichackernews.ui.settings.ResetSettingsConfirmationDialog
+import com.simon.harmonichackernews.ui.settings.SettingsSection
+import com.simon.harmonichackernews.ui.settings.handleDataSettingsAction
+import com.simon.harmonichackernews.ui.settings.WebLinksSettingsCapabilities
+import com.simon.harmonichackernews.resources.Res
+import com.simon.harmonichackernews.resources.ic_smartphone
+import platform.UIKit.UIDevice
+
+@Composable
+internal fun IosSettingsDetail(
+    section: SettingsSection,
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    singlePane: Boolean,
+    onBack: () -> Unit,
+    onNavigate: (SettingsSection, Boolean) -> Unit,
+) {
+    val appIcon = rememberIosAppIconPainter()
+    PortableSettingsDetail(
+        section = section,
+        app = app,
+        scene = scene,
+        singlePane = singlePane,
+        onBack = onBack,
+        onNavigate = onNavigate,
+        appIcon = appIcon,
+        webLinksCapabilities = WebLinksSettingsCapabilities(
+            adBlocking = false,
+            readerMode = true,
+            closeWebViewOnBack = false,
+        ),
+        debugPlatformLabel = "iOS version",
+        debugPlatformIcon = Res.drawable.ic_smartphone,
+        debugPlatformVersion = UIDevice.currentDevice.systemName + " " +
+            UIDevice.currentDevice.systemVersion,
+        debugNotificationsMessage =
+            "Reply notifications and Android notification fixtures do not apply to iOS.",
+        aiSettings = {
+            IosAiSettings(
+                app, scene, singlePane, onBack,
+                onArticleCategoriesRequested = { onNavigate(SettingsSection.ArticleCategories, true) },
+            )
+        },
+        dataSettings = { IosDataSettings(app, scene, singlePane, onBack) },
+        readerPreview = { reading, _ -> IosReaderModePreview(reading) },
+    )
+}
+
+@Composable
+private fun IosAiSettings(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onArticleCategoriesRequested: () -> Unit,
+) {
+    var refresh by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val settingsRuntime = remember(app, scope) {
+        app.createLocalSummarySettingsRuntime(scope)
+    }
+    val availabilityState by settingsRuntime.state.collectAsState()
+    val localModels = app.localModels
+    val managerState = localModels?.cachedState?.collectAsState()?.value
+
+    LaunchedEffect(settingsRuntime, managerState, refresh) {
+        settingsRuntime.resolve()
+    }
+    DisposableEffect(settingsRuntime) {
+        onDispose(settingsRuntime::dispose)
+    }
+
+    AiSummarySettingsRoute(
+        repository = app.aiSummarySettings,
+        modelDefaults = app.aiModelDefaults,
+        localSummarizationSupported = availabilityState.supported,
+        localAvailabilityResolved = availabilityState.availabilityResolved,
+        localConfigurationReady = availabilityState.configurationReady,
+        localModeAvailable = availabilityState.available,
+        selectedLocalModelId = managerState?.selectedModelId,
+        showNavigation = showNavigation,
+        contentVersion = refresh + managerState.hashCode() + availabilityState.revision,
+        onBack = onBack,
+        onArticleCategoriesRequested = onArticleCategoriesRequested,
+        onLocalModeUnavailable = {
+            scene.userMessages.show(
+                availabilityState.failure
+                    ?: "Local summarization is unavailable on this device",
+                UserMessageDuration.LONG,
+            )
+        },
+        localModelsContent = {
+            if (localModels != null && managerState != null) {
+                LocalModelsRoute(
+                    localModels = localModels,
+                    managerState = managerState,
+                    nanoAvailabilityResolved = availabilityState.availabilityResolved,
+                    nanoAvailable = availabilityState.nanoAvailable,
+                    nanoBaseModelName = availabilityState.nanoBaseModelName,
+                    managedModelStatus = availabilityState.statusMessage,
+                    onChanged = { refresh++ },
+                    onMessage = { scene.userMessages.show(it, UserMessageDuration.LONG) },
+                )
+            } else {
+                ManagedLocalModelPanel(
+                    title = "Apple Intelligence",
+                    status = when {
+                        !availabilityState.availabilityResolved -> "Checking availability…"
+                        availabilityState.available -> "Available · system managed"
+                        else -> availabilityState.failure ?: "Not available"
+                    },
+                    available = availabilityState.available,
+                )
+            }
+        },
+        dialogContent = { dialog, dismiss ->
+            when (dialog) {
+                AiSummarySettingsDialog.BaseUrl -> AiSummaryBaseUrlDialog(dismiss)
+                AiSummarySettingsDialog.ApiKey -> AiSummaryTextDialog(
+                    setting = AiSummaryTextSetting.API_KEY,
+                    title = "API Key",
+                    hint = "API Key",
+                    defaultValue = "",
+                    minLines = 1,
+                    maxLines = 1,
+                    textSizeSp = 16,
+                    trimValue = true,
+                    allowEmpty = true,
+                    showReset = false,
+                    onDismiss = dismiss,
+                    onSaved = { refresh++ },
+                )
+                AiSummarySettingsDialog.Model -> AiModelSelectorRoute(onDismiss = dismiss)
+                AiSummarySettingsDialog.SystemPrompt -> AiSummaryTextDialog(
+                    setting = AiSummaryTextSetting.SYSTEM_PROMPT,
+                    title = "System prompt",
+                    hint = "System prompt",
+                    defaultValue = CloudSummaryDefaults.SYSTEM_PROMPT,
+                    minLines = 5,
+                    maxLines = 10,
+                    textSizeSp = 15,
+                    trimValue = false,
+                    allowEmpty = true,
+                    showReset = true,
+                    onDismiss = dismiss,
+                    onSaved = { refresh++ },
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun IosDataSettings(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val runtime = remember(app, scope) {
+        app.createDataSettingsRuntime(scope) {
+            app.platform.timeFormatting.localDate(app.nowMillis())
+        }
+    }
+    val state by runtime.state.collectAsState()
+
+    LaunchedEffect(runtime) {
+        runtime.effects.collect { effect ->
+            when (effect) {
+                is DataSettingsRuntimeEffect.CreateExportDocument -> {
+                    checkNotNull(app.platform.textDocuments).exportText(
+                        effect.filename,
+                        effect.content,
+                        object : TextDocumentCallback {
+                            override fun complete(content: String?, errorMessage: String?) {
+                                errorMessage?.let { scene.userMessages.show(it, UserMessageDuration.LONG) }
+                            }
+                        },
+                    )
+                }
+                DataSettingsRuntimeEffect.OpenImportDocument,
+                DataSettingsRuntimeEffect.OpenSettingsImportDocument -> {
+                    checkNotNull(app.platform.textDocuments).importText(
+                        object : TextDocumentCallback {
+                            override fun complete(content: String?, errorMessage: String?) {
+                                if (errorMessage != null) {
+                                    scene.userMessages.show(errorMessage, UserMessageDuration.LONG)
+                                } else if (content != null) {
+                                    if (effect == DataSettingsRuntimeEffect.OpenSettingsImportDocument) runtime.importSettings(content)
+                                    else runtime.importBookmarks(content)
+                                }
+                            }
+                        },
+                    )
+                }
+                DataSettingsRuntimeEffect.OpenAppLinkSettings ->
+                    scene.userMessages.show("iOS link handling is controlled by your browser and OS")
+                DataSettingsRuntimeEffect.SettingsReset -> app.appearance.refreshSelection()
+                is DataSettingsRuntimeEffect.Message -> scene.userMessages.show(effect.text)
+            }
+        }
+    }
+
+    DataSettingsRoute(
+        repository = app.settings,
+        counts = DataSettingsCounts(
+            state.snapshot.bookmarkCount,
+            state.snapshot.historyCount,
+            state.snapshot.postCacheCount,
+            state.snapshot.tintCacheCount,
+            state.snapshot.aiModelBytes,
+            hiddenPostCount = state.snapshot.hiddenPostCount,
+        ),
+        loggedIn = state.snapshot.loggedIn,
+        showNavigation = showNavigation,
+        showAppLinkSettings = false,
+        onBack = onBack,
+        contentVersion = state.revision,
+        onAction = runtime::handleDataSettingsAction,
+    )
+
+    when (state.dialog) {
+        DataSettingsDialogState.IMPORT -> ImportBookmarksDialog(
+            onDismiss = { runtime.showDialog(null) },
+            onImport = runtime::requestImport,
+        )
+        DataSettingsDialogState.RESET -> ResetSettingsConfirmationDialog(
+            onReset = runtime::resetSettings,
+            onDismiss = { runtime.showDialog(null) },
+        )
+        DataSettingsDialogState.LINKS -> MessageActionDialog(
+            message = "iOS link handling is configured in your operating system and browser.",
+            onDismiss = { runtime.showDialog(null) },
+        )
+        DataSettingsDialogState.AI_MODELS -> ClearAiModelsConfirmationDialog(
+            modelNames = state.snapshot.aiModelNames,
+            onClear = runtime::clearAiModels,
+            onDismiss = { runtime.showDialog(null) },
+        )
+        null -> Unit
+    }
+    state.favoriteIds?.let { ids ->
+        AddBookmarksToFavoritesDialog(ids.toIntArray(), runtime::dismissFavorites)
+    }
+}

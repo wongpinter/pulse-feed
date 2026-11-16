@@ -1,0 +1,522 @@
+@file:OptIn(ExperimentalSharedTransitionApi::class)
+
+package com.simon.harmonichackernews.ui.content
+
+import androidx.compose.animation.animateContentSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextGeometricTransform
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.resources.Res
+import com.simon.harmonichackernews.resources.ic_comment
+import com.simon.harmonichackernews.resources.ic_comment_filled
+import com.simon.harmonichackernews.resources.ic_whatshot
+import com.simon.harmonichackernews.settings.StoryPreviewMode
+import com.simon.harmonichackernews.ui.common.HazeGlassAppearance
+import com.simon.harmonichackernews.ui.common.onSecondaryClick
+import com.simon.harmonichackernews.ui.common.sharedHazeBackground
+import dev.chrisbanes.haze.HazeState
+import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.DrawableResource
+import org.jetbrains.compose.resources.painterResource
+
+private val StoryMetricPillShape = RoundedCornerShape(50)
+
+private val StoryMetricPillHeight = 25.dp
+
+/** Shared image badge surface for Stories and the comments header. */
+@Composable
+internal fun Modifier.storyImageMetricBackground(hazeState: HazeState): Modifier =
+    sharedHazeBackground(
+        hazeState = hazeState,
+        surfaceColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.60f),
+        shape = StoryMetricPillShape,
+        blurRadius = 4.dp,
+        glassAppearance = HazeGlassAppearance.FloatingButton,
+    )
+
+@Composable
+internal fun StoryMetricPill(
+    icon: DrawableResource,
+    text: String?,
+    contentDescription: String,
+    typography: ContentTypography,
+    dimAlpha: Float,
+    hazeState: HazeState? = null,
+    iconSize: Dp,
+    iconSlotWidth: Dp = iconSize,
+    iconScale: Float = 1f,
+    startPadding: Dp = 5.dp,
+    endPadding: Dp = 7.dp,
+    iconTextSpacing: Dp = 2.dp,
+    /** Tints the icon with the accent color, e.g. for stories the user has commented on. */
+    highlighted: Boolean = false,
+    animateSize: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    val container = colors.surfaceContainerHighest
+    val foreground = colors.onSurface
+    val backgroundModifier = if (hazeState == null) {
+        Modifier
+            .clip(StoryMetricPillShape)
+            .background(container.copy(alpha = 0.92f))
+            .border(1.dp, colors.outlineVariant, StoryMetricPillShape)
+    } else {
+        Modifier.storyImageMetricBackground(hazeState)
+    }
+    Row(
+        modifier = modifier
+            .graphicsLayer(alpha = dimAlpha)
+            .then(backgroundModifier)
+            .then(if (animateSize) Modifier.animateContentSize(
+                contentTween(), alignment = Alignment.CenterEnd,
+            ) else Modifier)
+            .height(if (hazeState != null) 22.dp else StoryMetricPillHeight)
+            .padding(
+                start = if (hazeState != null) (startPadding - 1.dp).coerceAtLeast(0.dp) else startPadding,
+                end = if (hazeState != null) endPadding - 1.dp else endPadding,
+            )
+            .clearAndSetSemantics { this.contentDescription = contentDescription },
+        horizontalArrangement = Arrangement.spacedBy(if (text == null) 0.dp else iconTextSpacing),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.width(iconSlotWidth),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(icon),
+                contentDescription = null,
+                modifier = Modifier
+                    .size(iconSize)
+                    .graphicsLayer(scaleX = iconScale, scaleY = iconScale),
+                tint = if (highlighted) colors.primary else foreground,
+            )
+        }
+        if (text != null) {
+            Text(
+                text = text,
+                color = foreground,
+                fontFamily = typography.storyMetaFamily,
+                fontWeight = FontWeight.Medium,
+                fontSize = if (hazeState != null) 11.sp else 12.sp,
+                lineHeight = if (hazeState != null) 13.sp else 14.sp,
+                maxLines = 1,
+                style = storyRowTextStyle,
+            )
+        }
+    }
+}
+
+internal fun compactStoryMetric(value: Int): String {
+    val count = value.coerceAtLeast(0)
+    return when {
+        count >= 1_000_000 -> "${(count + 500_000) / 1_000_000}m"
+        count >= 10_000 -> "${(count + 500) / 1_000}k"
+        count >= 1_000 -> {
+            val whole = count / 1_000
+            val tenth = count % 1_000 / 100
+            if (tenth == 0) "${whole}k" else "$whole.${tenth}k"
+        }
+        else -> count.toString()
+    }
+}
+
+@Composable
+internal fun StoryMeta(
+    model: StoryRowModel,
+    style: StoryRowStyle,
+    typography: ContentTypography,
+    dimAlpha: Float,
+    tintBaseColorArgb: Int,
+    paletteTintConfigKey: String,
+    extractTint: Boolean,
+    onTintExtracted: (Int) -> Unit,
+    animateChanges: Boolean,
+    modifier: Modifier,
+    wrapContent: Boolean = false,
+    placementAnimation: StoryRowPlacementAnimation? = null,
+) {
+    val showMetaPoints = style.showPoints &&
+        style.previewImageMode != StoryPreviewMode.MEDIUM
+    val domainSuffix = model.domain
+        .takeIf {
+            model.domainWithoutTopLevel.isNotEmpty() &&
+                it.startsWith(model.domainWithoutTopLevel)
+        }
+        ?.removePrefix(model.domainWithoutTopLevel)
+        .orEmpty()
+    if (!animateChanges && placementAnimation == null) {
+        val metaText = remember(
+            model.points,
+            model.domainWithoutTopLevel,
+            domainSuffix,
+            model.age,
+            showMetaPoints,
+            style.compactPoints,
+            style.includeTopLevelDomain,
+        ) {
+            AnnotatedString(
+                buildString {
+                    if (showMetaPoints) {
+                        if (style.compactPoints) append('+')
+                        append(model.points)
+                        if (!style.compactPoints) append(" points")
+                        append(" • ")
+                    }
+                    append(model.domainWithoutTopLevel)
+                    if (style.includeTopLevelDomain) append(domainSuffix)
+                    append(" • ")
+                    append(model.age)
+                },
+            )
+        }
+        StoryMetaRow(
+            model = model,
+            style = style,
+            typography = typography,
+            dimAlpha = dimAlpha,
+            tintBaseColorArgb = tintBaseColorArgb,
+            paletteTintConfigKey = paletteTintConfigKey,
+            extractTint = extractTint,
+            onTintExtracted = onTintExtracted,
+            metaText = metaText,
+            wrapContent = wrapContent,
+            metaSize = typography.storyMetaSize,
+            placementAnimation = placementAnimation,
+            animateChanges = animateChanges,
+            modifier = modifier,
+        )
+        return
+    }
+    val animatedMetaSize by animateFloatAsState(
+        targetValue = typography.storyMetaSize,
+        animationSpec = contentTween(),
+        label = "story meta size",
+    )
+    val metaSize = if (placementAnimation == null) animatedMetaSize else typography.storyMetaSize
+    val animateMetadata = animateChanges || placementAnimation?.visibility?.metadataAnimating == true
+    val pointsVisibilityProgress = remember(model.points) {
+        Animatable(if (showMetaPoints) 1f else 0f)
+    }
+    val plusProgress = remember(model.points) {
+        Animatable(if (style.compactPoints) 1f else 0f)
+    }
+    val pointsWordProgress = remember(model.points) {
+        Animatable(if (style.compactPoints) 0f else 1f)
+    }
+    var renderPoints by remember(model.points) {
+        mutableStateOf(showMetaPoints)
+    }
+    LaunchedEffect(showMetaPoints, animateMetadata) {
+        if (!animateMetadata) {
+            pointsVisibilityProgress.snapTo(if (showMetaPoints) 1f else 0f)
+            renderPoints = showMetaPoints
+        } else if (showMetaPoints) {
+            renderPoints = true
+            pointsVisibilityProgress.animateTo(1f, contentTween())
+        } else {
+            pointsVisibilityProgress.animateTo(0f, contentTween())
+            renderPoints = false
+        }
+    }
+    LaunchedEffect(style.compactPoints, animateMetadata) {
+        if (!animateMetadata) {
+            plusProgress.snapTo(if (style.compactPoints) 1f else 0f)
+            pointsWordProgress.snapTo(if (style.compactPoints) 0f else 1f)
+        } else if (style.compactPoints) {
+            launch { plusProgress.animateTo(1f, contentTween()) }
+            launch { pointsWordProgress.animateTo(0f, contentTween()) }
+        } else {
+            launch { plusProgress.animateTo(0f, contentTween()) }
+            launch { pointsWordProgress.animateTo(1f, contentTween()) }
+        }
+    }
+    val targetIncludesTopLevelDomain = style.includeTopLevelDomain && domainSuffix.isNotEmpty()
+    val topLevelDomainProgress = remember(domainSuffix) {
+        Animatable(if (targetIncludesTopLevelDomain) 1f else 0f)
+    }
+    var renderTopLevelDomain by remember(domainSuffix) {
+        mutableStateOf(targetIncludesTopLevelDomain)
+    }
+    LaunchedEffect(targetIncludesTopLevelDomain, animateMetadata) {
+        if (!animateMetadata) {
+            topLevelDomainProgress.snapTo(if (targetIncludesTopLevelDomain) 1f else 0f)
+            renderTopLevelDomain = targetIncludesTopLevelDomain
+        } else if (targetIncludesTopLevelDomain) {
+            // Keep the full string in one Text while the TLD fades in so wrapping is based on
+            // the final content instead of a row of independently measured text fragments.
+            renderTopLevelDomain = true
+            topLevelDomainProgress.animateTo(1f, contentTween())
+        } else {
+            topLevelDomainProgress.animateTo(0f, contentTween())
+            renderTopLevelDomain = false
+        }
+    }
+    val metaText = buildAnnotatedString {
+        if (if (animateMetadata) renderPoints else showMetaPoints) {
+            val pointsVisibility = if (animateMetadata) pointsVisibilityProgress.value else 1f
+            val plusVisibility = pointsVisibility * if (animateMetadata) plusProgress.value else if (style.compactPoints) 1f else 0f
+            append("+")
+            addStyle(
+                SpanStyle(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = plusVisibility),
+                    textGeometricTransform = TextGeometricTransform(
+                        scaleX = plusVisibility.coerceAtLeast(0.001f),
+                    ),
+                ),
+                start = length - 1,
+                end = length,
+            )
+            val pointsNumberStart = length
+            append(model.points.toString())
+            addStyle(
+                SpanStyle(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = pointsVisibility),
+                    textGeometricTransform = TextGeometricTransform(
+                        scaleX = pointsVisibility.coerceAtLeast(0.001f),
+                    ),
+                ),
+                start = pointsNumberStart,
+                end = length,
+            )
+            val pointsWordVisibility = pointsVisibility * if (animateMetadata) pointsWordProgress.value else if (style.compactPoints) 0f else 1f
+            val pointsWordStart = length
+            append(" points")
+            addStyle(
+                SpanStyle(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = pointsWordVisibility),
+                    textGeometricTransform = TextGeometricTransform(
+                        scaleX = pointsWordVisibility.coerceAtLeast(0.001f),
+                    ),
+                ),
+                start = pointsWordStart,
+                end = length,
+            )
+            val separatorStart = length
+            append(" • ")
+            addStyle(
+                SpanStyle(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = pointsVisibility),
+                    textGeometricTransform = TextGeometricTransform(
+                        scaleX = pointsVisibility.coerceAtLeast(0.001f),
+                    ),
+                ),
+                start = separatorStart,
+                end = length,
+            )
+        }
+        append(model.domainWithoutTopLevel)
+        if (if (animateMetadata) renderTopLevelDomain else targetIncludesTopLevelDomain) {
+            val suffixStart = length
+            append(domainSuffix)
+            addStyle(
+                SpanStyle(
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                        alpha = if (animateMetadata) topLevelDomainProgress.value else 1f,
+                    ),
+                    textGeometricTransform = TextGeometricTransform(
+                        scaleX = if (animateMetadata) topLevelDomainProgress.value.coerceAtLeast(0.001f) else 1f,
+                    ),
+                ),
+                start = suffixStart,
+                end = length,
+            )
+        }
+        append(" • ${model.age}")
+    }
+    StoryMetaRow(
+        model = model,
+        style = style,
+        typography = typography,
+        dimAlpha = dimAlpha,
+        tintBaseColorArgb = tintBaseColorArgb,
+        paletteTintConfigKey = paletteTintConfigKey,
+        extractTint = extractTint,
+        onTintExtracted = onTintExtracted,
+        metaText = metaText,
+        wrapContent = wrapContent,
+        metaSize = metaSize,
+        placementAnimation = placementAnimation,
+        animateChanges = animateChanges,
+        modifier = modifier,
+    )
+}
+
+@Composable
+private fun StoryMetaRow(
+    model: StoryRowModel,
+    style: StoryRowStyle,
+    typography: ContentTypography,
+    dimAlpha: Float,
+    tintBaseColorArgb: Int,
+    paletteTintConfigKey: String,
+    extractTint: Boolean,
+    onTintExtracted: (Int) -> Unit,
+    metaText: AnnotatedString,
+    wrapContent: Boolean,
+    metaSize: Float,
+    placementAnimation: StoryRowPlacementAnimation?,
+    animateChanges: Boolean,
+    modifier: Modifier,
+) {
+    Row(modifier = (if (wrapContent) modifier else modifier.fillMaxWidth())
+        .graphicsLayer { alpha = dimAlpha }, verticalAlignment = Alignment.CenterVertically) {
+        StoryVisibility(
+            visible = style.showFavicon,
+            animate = animateChanges || placementAnimation != null,
+            enter = fadeIn(contentTween()) + expandHorizontally(
+                animationSpec = contentTween(),
+                expandFrom = Alignment.Start,
+            ),
+            exit = fadeOut(contentTween()) + shrinkHorizontally(
+                animationSpec = contentTween(),
+                shrinkTowards = Alignment.Start,
+            ),
+        ) {
+            StoryFavicon(
+                model = model,
+                // The complete metadata row fades once, including its site icon.
+                dimAlpha = 1f,
+                tintBaseColorArgb = tintBaseColorArgb,
+                paletteTintConfigKey = paletteTintConfigKey,
+                extractTint = extractTint,
+                onTintExtracted = onTintExtracted,
+            )
+        }
+        Text(
+            text = metaText,
+            modifier = (if (wrapContent) Modifier else Modifier.weight(1f))
+                .animateStoryRowTextSize(placementAnimation, metaSize),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontFamily = typography.storyMetaFamily,
+            fontSize = metaSize.sp,
+            style = storyRowTextStyle,
+        )
+    }
+}
+
+@Composable
+internal fun StoryCommentRail(
+    model: StoryRowModel,
+    style: StoryRowStyle,
+    typography: ContentTypography,
+    dimAlpha: Float,
+    onClick: (() -> Unit)?,
+    onLongClick: (() -> Unit)?,
+    animateChanges: Boolean,
+    modifier: Modifier = Modifier,
+    placementAnimation: StoryRowPlacementAnimation? = null,
+) {
+    val foreground = MaterialTheme.colorScheme.onSurface
+    val countSize = if (animateChanges) {
+        val animatedCountSize by animateFloatAsState(
+            targetValue = typography.storyCommentCountSize,
+            animationSpec = contentTween(),
+            label = "story comment count size",
+        )
+        animatedCountSize
+    } else {
+        typography.storyCommentCountSize
+    }
+    Column(
+        modifier = Modifier
+            .width(60.dp)
+            .fillMaxHeight()
+            .then(modifier)
+            .graphicsLayer { alpha = dimAlpha }
+            .combinedClickable(
+                enabled = onClick != null,
+                onClickLabel = "Open comments",
+                onLongClick = onLongClick,
+                onClick = { onClick?.invoke() },
+            ).onSecondaryClick { onLongClick?.invoke() }
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Open comments, ${model.commentCount} comments" +
+                    if (style.commented) ", you commented" else ""
+            }
+            .padding(horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        StoryRowMovingContent(placementAnimation, "comments") {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    painter = painterResource(
+                        when {
+                            style.commented -> Res.drawable.ic_comment_filled
+                            style.useHotnessIcon -> Res.drawable.ic_whatshot
+                            else -> Res.drawable.ic_comment
+                        },
+                    ),
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = if (style.commented) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                StoryVisibility(
+                    visible = style.showCommentCount && !style.compact,
+                    animate = animateChanges,
+                ) {
+                    Text(
+                        text = model.commentCount.toString(),
+                        modifier = Modifier.animateStoryRowTextSize(placementAnimation, countSize)
+                            .storySettingsAlpha(placementAnimation, "comment-count"),
+                        color = foreground,
+                        fontFamily = typography.family,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = countSize.sp,
+                        textAlign = TextAlign.Center,
+                        style = storyRowTextStyle,
+                    )
+                }
+            }
+        }
+    }
+}

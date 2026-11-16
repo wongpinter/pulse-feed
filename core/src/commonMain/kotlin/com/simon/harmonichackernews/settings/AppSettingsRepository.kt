@@ -1,0 +1,295 @@
+package com.simon.harmonichackernews.settings
+
+import com.simon.harmonichackernews.StoryType
+import com.simon.harmonichackernews.StoryTypeMenuPolicy
+import com.simon.harmonichackernews.data.LinkPreviewType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.shareIn
+
+/** Typed story toggles accepted by [StoredSettingsMutator]. */
+enum class StoryBooleanPreference(internal val storageKey: String) {
+    SHOW_DIVIDERS(UserPreferenceKeys.STORY_DIVIDERS),
+    HEADER_PILL_ELEVATION(UserPreferenceKeys.STORIES_HEADER_PILL_ELEVATION),
+    BORDERLESS_LARGE_IMAGE(UserPreferenceKeys.STORY_PREVIEW_IMAGE_BORDERLESS),
+    TINT_CARD_USING_PREVIEW(UserPreferenceKeys.TINT_CARD_USING_PREVIEW),
+    COMPACT_VIEW(UserPreferenceKeys.COMPACT_VIEW),
+    SHOW_SUMMARY(UserPreferenceKeys.SHOW_STORY_SUMMARY),
+    SHOW_THUMBNAILS(UserPreferenceKeys.THUMBNAILS),
+    SHOW_POINTS(UserPreferenceKeys.SHOW_POINTS),
+    COMPACT_POINTS(UserPreferenceKeys.COMPACT_POINTS),
+    INCLUDE_TOP_LEVEL_DOMAIN(UserPreferenceKeys.INCLUDE_TOP_LEVEL_DOMAIN),
+    SHOW_COMMENTS_COUNT(UserPreferenceKeys.SHOW_COMMENTS_COUNT),
+    SHOW_INDEX(UserPreferenceKeys.SHOW_INDEX),
+    LEFT_ALIGN(UserPreferenceKeys.LEFT_ALIGN),
+    ALWAYS_OPEN_COMMENTS(UserPreferenceKeys.ALWAYS_OPEN_COMMENTS),
+    PAGINATION(UserPreferenceKeys.PAGINATION_MODE),
+    HIDE_CLICKED(UserPreferenceKeys.HIDE_CLICKED),
+    SWIPE_TO_HIDE(UserPreferenceKeys.SWIPE_TO_HIDE),
+    GRAY_OUT_CLICKED(UserPreferenceKeys.GRAY_OUT_CLICKED),
+    MARK_SCROLLED_POSTS_READ(UserPreferenceKeys.MARK_SCROLLED_POSTS_READ),
+    HIDE_JOBS(UserPreferenceKeys.HIDE_JOBS),
+}
+
+enum class StoryStringPreference { DISPLAY_STYLE, CATEGORY_TAG_LOCATION }
+
+enum class CommentBooleanPreference(internal val storageKey: String) {
+    HIGHLIGHT_QUOTES(UserPreferenceKeys.HIGHLIGHT_QUOTES),
+    QUOTE_PADDING(UserPreferenceKeys.QUOTE_PADDING),
+    ROUNDED_DEPTH_INDICATORS(UserPreferenceKeys.ROUNDED_DEPTH_INDICATORS),
+    CONTINUOUS_DEPTH_INDICATORS(UserPreferenceKeys.CONTINUOUS_DEPTH_INDICATORS),
+    COLLECT_REFERENCE_LINKS(UserPreferenceKeys.COLLECT_LINKS_IN_COMMENTS),
+    HIGHLIGHT_METADATA(UserPreferenceKeys.HIGHLIGHT_COMMENT_META),
+    SHOW_DIVIDERS(UserPreferenceKeys.COMMENT_DIVIDERS),
+    MARK_NEW_COMMENTS(UserPreferenceKeys.MARK_NEW_COMMENTS),
+    TOP_LEVEL_DEPTH_INDICATOR(UserPreferenceKeys.TOP_LEVEL_THREAD_INDICATORS),
+    SHOW_SCROLLBAR(UserPreferenceKeys.COMMENTS_SCROLLBAR),
+    ANIMATE_CHANGES(UserPreferenceKeys.COMMENTS_ANIMATION),
+    HEADER_TINT(UserPreferenceKeys.COMMENTS_HEADER_TINT),
+    HEADER_DOMAIN(UserPreferenceKeys.COMMENTS_HEADER_DOMAIN),
+    HEADER_CATEGORIES(UserPreferenceKeys.COMMENTS_HEADER_CATEGORIES),
+    HEADER_FAVICON(UserPreferenceKeys.COMMENTS_HEADER_FAVICON),
+    HEADER_POINTS(UserPreferenceKeys.COMMENTS_HEADER_POINTS),
+    COMBINE_HEADER_ACTIONS(UserPreferenceKeys.COMMENTS_COMBINE_HEADER_ACTIONS),
+    HEADER_PREVIEW_IMAGE(UserPreferenceKeys.COMMENTS_HEADER_PREVIEW_IMAGE),
+    SHOW_UP_BUTTON(UserPreferenceKeys.COMMENTS_SHOW_UP_BUTTON),
+    PEEK_STORY_HEADER(UserPreferenceKeys.COMMENTS_PEEK_STORY_HEADER),
+    COLLAPSE_PARENT(UserPreferenceKeys.COLLAPSE_PARENT),
+    COLLAPSE_TOP_LEVEL(UserPreferenceKeys.COLLAPSE_TOP_LEVEL),
+    HIDE_DELAYED_COMMENTS(UserPreferenceKeys.HIDE_DELAYED_COMMENTS),
+    HIDE_DEAD_COMMENTS(UserPreferenceKeys.HIDE_DEAD_COMMENTS),
+    HIDE_FLAGGED_COMMENTS(UserPreferenceKeys.HIDE_FLAGGED_COMMENTS),
+    SWAP_LONG_PRESS_TAP(UserPreferenceKeys.COMMENTS_SWAP_LONG),
+    SWIPE_BACK(UserPreferenceKeys.COMMENTS_DISABLE_SWIPE_BACK),
+    SHOW_NAVIGATION_BUTTONS(UserPreferenceKeys.SCROLL_NAVIGATION),
+    SMOOTH_SCROLL(UserPreferenceKeys.COMMENTS_SMOOTH_SCROLL),
+}
+
+enum class ReadingBooleanPreference(internal val storageKey: String) {
+    INTEGRATED_WEB_VIEW(UserPreferenceKeys.WEBVIEW),
+    CLOSE_WEB_VIEW_ON_BACK(UserPreferenceKeys.CLOSE_WEBVIEW_ON_BACK),
+    MATCH_WEB_VIEW_THEME(UserPreferenceKeys.WEBVIEW_MATCH_THEME),
+    BLOCK_ADS(UserPreferenceKeys.WEBVIEW_ADBLOCK),
+    READER_MODE_ENABLED(UserPreferenceKeys.READER_MODE_ENABLED),
+    LINK_PREVIEWS_ENABLED(UserPreferenceKeys.LINK_PREVIEWS_ENABLED),
+    READER_MODE_DEFAULT(UserPreferenceKeys.READER_MODE_DEFAULT),
+    PULL_TO_OPEN_BROWSER(UserPreferenceKeys.PULL_TO_OPEN_BROWSER),
+    EXTERNAL_BROWSER(UserPreferenceKeys.EXTERNAL_BROWSER),
+    REDIRECT_NITTER(UserPreferenceKeys.REDIRECT_NITTER),
+}
+
+enum class AppearanceBooleanPreference(internal val storageKey: String) {
+    APPLY_FONT_EVERYWHERE(UserPreferenceKeys.APPLY_FONT_EVERYWHERE),
+    SPECIAL_NIGHTTIME(UserPreferenceKeys.SPECIAL_NIGHTTIME),
+    TRANSPARENT_STATUS_BAR(UserPreferenceKeys.TRANSPARENT_STATUS_BAR),
+    COMPACT_HEADER(UserPreferenceKeys.COMPACT_HEADER),
+}
+
+enum class GeneralBooleanPreference(internal val storageKey: String) {
+    BOOKMARKS_ENABLED(UserPreferenceKeys.BOOKMARKS_ENABLED),
+    SHOW_CHANGELOG(UserPreferenceKeys.SHOW_CHANGELOG),
+}
+
+enum class DebugBooleanPreference(internal val storageKey: String) {
+    ALWAYS_SHOW_TAP_TO_REFRESH(UserPreferenceKeys.ALWAYS_SHOW_TAP_TO_REFRESH),
+    SHOW_WIDGET_DEBUG_INFO("show_widget_debug_info"),
+    MOCK_AI_ANSWERS("pref_debug_mock_ai_answers"),
+}
+
+/**
+ * Observable, platform-neutral settings facade.
+ *
+ * The platform owns the [KeyValueStore] and supplies change notifications through [UserSettings].
+ * Every read and write remains typed here, so UI code never needs a platform preferences API.
+ */
+class AppSettingsRepository(
+    private val reader: UserSettings,
+    private val mutator: StoredSettingsMutator,
+    scope: CoroutineScope? = null,
+) {
+    constructor(
+        store: KeyValueStore,
+        changes: Flow<Unit>,
+        theme: () -> String? = { null },
+        showCommentsUpButtonByDefault: Boolean = false,
+        preloadCommentsFromStoriesByDefault: Boolean = false,
+        defaultSurfaceEffectMode: SurfaceEffectMode = SurfaceEffectMode.Frosted,
+        scope: CoroutineScope? = null,
+    ) : this(
+        reader = StoredUserSettings(
+            store,
+            changes,
+            theme,
+            showCommentsUpButtonByDefault,
+            preloadCommentsFromStoriesByDefault,
+            defaultSurfaceEffectMode,
+        ),
+        mutator = StoredSettingsMutator(store),
+        scope = scope,
+    )
+
+    fun snapshot(): AppSettings = AppSettings(
+        story = reader.story,
+        comments = reader.comments,
+        reading = reader.reading,
+        cache = reader.cache,
+        general = reader.general,
+        appearance = reader.appearance,
+        debug = reader.debug,
+    )
+
+    private val snapshotUpdates: Flow<AppSettings> = flow {
+        emit(snapshot())
+        reader.changes.collect { emit(snapshot()) }
+    }.distinctUntilChanged()
+
+    // Application hosts share one projection. Unscoped previews/tests keep a cold flow;
+    // starting observation never opens storage while merely constructing the graph.
+    val updates: Flow<AppSettings> = if (scope == null) snapshotUpdates else snapshotUpdates.shareIn(
+        scope,
+        started = SharingStarted.WhileSubscribed(replayExpirationMillis = 0),
+        replay = 1,
+    )
+
+    fun setStoryBoolean(preference: StoryBooleanPreference, value: Boolean) =
+        mutator.setStoryBoolean(preference, value)
+
+    fun setStoryString(preference: StoryStringPreference, value: String) =
+        mutator.setStoryString(preference, value)
+
+    fun setStoryPreviewMode(value: StoryPreviewMode) = mutator.setStoryPreviewMode(value)
+
+    fun setStorySpacing(value: Int) = mutator.setStorySpacing(value)
+
+    fun setCommentSpacing(value: Int) = mutator.setCommentSpacing(value)
+
+    fun setStoryTextSize(value: Float) = mutator.setStoryTextSize(value)
+    fun setHotness(value: Int) = mutator.setHotness(value)
+    fun setPreferredStoryType(value: String) = mutator.setPreferredStoryType(value)
+    fun setAdditionalFrontpages(value: Set<String>) = mutator.setAdditionalFrontpages(value)
+    fun setFrontpageOrder(value: List<String>) = mutator.setFrontpageOrder(value)
+    fun setVisibleFrontpageOrder(value: List<StoryType>) {
+        val story = reader.story
+        setFrontpageOrder(StoryTypeMenuPolicy.mergeVisibleOrder(
+            story.additionalFrontpages,
+            story.frontpageOrder,
+            value,
+        ))
+    }
+    fun setFaviconProvider(value: String) = mutator.setFaviconProvider(value)
+    fun resetStoryLayout() = mutator.resetStoryLayout()
+    fun setFont(value: String) = mutator.setFont(value)
+    fun setFont(value: AppFont) = mutator.setFont(value)
+
+    fun setCommentBoolean(preference: CommentBooleanPreference, value: Boolean) =
+        mutator.setCommentBoolean(preference, value)
+
+    fun setCollectedLinksMode(mode: CollectedLinksMode) = mutator.setCollectedLinksMode(mode)
+
+    fun resetCommentsHeaderButtons() = mutator.resetCommentsHeaderButtons()
+
+    fun setCommentsHeaderButton(button: CommentsHeaderButton, shown: Boolean) =
+        mutator.setCommentsHeaderButton(button, shown)
+
+    fun setCommentsHeaderImage(value: CommentsHeaderImage) = mutator.setCommentsHeaderImage(value)
+    fun setCommentsHeaderTint(value: CommentsHeaderTint) = mutator.setCommentsHeaderTint(value)
+
+    fun setCommentsHeaderMetaInfo(value: CommentsHeaderMetaInfo) = mutator.setCommentsHeaderMetaInfo(value)
+
+    fun setCommentsHeaderLayout(value: CommentsHeaderLayout) = mutator.setCommentsHeaderLayout(value)
+    fun setCommentsHeaderEdge(value: CommentsHeaderEdge) = mutator.setCommentsHeaderEdge(value)
+
+    fun setCommentDisplayStyle(value: String) = mutator.setCommentDisplayStyle(value)
+    fun setCommentDisplayStyle(value: DisplayStyle) = mutator.setCommentDisplayStyle(value)
+    fun setCommentTextSize(value: Float) = mutator.setCommentTextSize(value)
+    fun setCommentSorting(value: String) = mutator.setCommentSorting(value)
+    fun setCommentSorting(value: CommentSortingPreference) = mutator.setCommentSorting(value)
+    fun setCommentsProvider(value: String) = mutator.setCommentsProvider(value)
+    fun setCommentsProvider(value: CommentsProvider) = mutator.setCommentsProvider(value)
+    fun setCommentsVolumeNavigation(value: String) = mutator.setCommentsVolumeNavigation(value)
+    fun setCommentsVolumeNavigation(value: CommentVolumeNavigationMode) =
+        mutator.setCommentsVolumeNavigation(value)
+    fun setCommentDepthIndicatorMode(value: String) = mutator.setCommentDepthIndicatorMode(value)
+    fun setCommentDepthIndicatorsEnabled(enabled: Boolean) =
+        mutator.setCommentDepthIndicatorsEnabled(enabled, reader.comments.depthIndicatorMode)
+    fun setQuoteSpacing(value: QuoteSpacing) = mutator.setQuoteSpacing(value)
+
+    fun setQuoteHighlightColor(value: QuoteHighlightColor) = mutator.setQuoteHighlightColor(value)
+    fun setQuoteHighlightStyle(value: QuoteHighlightStyle) = mutator.setQuoteHighlightStyle(value)
+
+    fun setCommentIndicatorThickness(value: CommentIndicatorThickness) = mutator.setCommentIndicatorThickness(value)
+    fun setUserAvatarOptions(value: UserAvatarOptions) = mutator.setUserAvatarOptions(value)
+    fun setUserAvatarsEnabled(enabled: Boolean) = mutator.setUserAvatarsEnabled(enabled)
+    fun setCommentsPreload(mode: WebViewPreloadMode, minimumBattery: Int) =
+        mutator.setCommentsPreload(mode, minimumBattery)
+
+    fun setReadingBoolean(preference: ReadingBooleanPreference, value: Boolean) =
+        mutator.setReadingBoolean(preference, value)
+
+    fun setNitterInstanceUrl(value: String): Boolean = mutator.setNitterInstanceUrl(value)
+
+    fun setLinkPreviewEnabled(type: LinkPreviewType, enabled: Boolean) =
+        mutator.setLinkPreviewEnabled(type, enabled)
+
+    fun setReaderModeLineHeight(value: ReaderLineHeight) = mutator.setReaderModeLineHeight(value)
+    fun setReaderModeFontSize(value: Int) = mutator.setReaderModeFontSize(value)
+    fun setReaderModeFont(value: String) = mutator.setReaderModeFont(value)
+    fun setReaderModeFont(value: AppFont) = mutator.setReaderModeFont(value)
+    fun setWebViewPreload(mode: String, minimumBattery: Int) =
+        mutator.setWebViewPreload(mode, minimumBattery)
+    fun setWebViewPreload(mode: WebViewPreloadMode, minimumBattery: Int) =
+        mutator.setWebViewPreload(mode, minimumBattery)
+
+    fun setArchiveRedirectDomains(domains: List<String>) =
+        mutator.setArchiveRedirectDomains(domains)
+
+    fun setAppearanceBoolean(preference: AppearanceBooleanPreference, value: Boolean) =
+        mutator.setAppearanceBoolean(preference, value)
+
+    fun setSplitRatio(orientation: SplitOrientation, value: Float) =
+        mutator.setSplitRatio(orientation, value)
+
+    fun setExtraSidePadding(value: ExtraSidePadding) = mutator.setExtraSidePadding(value)
+
+    fun setStoryListSelector(value: StoryListSelector) = mutator.setStoryListSelector(value)
+
+    fun setStoriesHeaderPill(value: StoriesHeaderPill) = mutator.setStoriesHeaderPill(value)
+
+    fun setColorScheme(value: String) = mutator.setColorScheme(value)
+    fun setColorStyle(value: ColorSchemeStyle) = mutator.setColorStyle(value)
+    fun setNighttimeColorStyle(value: ColorSchemeStyle) = mutator.setNighttimeColorStyle(value)
+    fun setNighttimeColorScheme(value: String) = mutator.setNighttimeColorScheme(value)
+    fun setFollowSystemTheme(value: Boolean) = mutator.setFollowSystem(value)
+    fun setManualDarkTheme(value: Boolean) = mutator.setManualDark(value)
+
+
+    fun setGeneralBoolean(preference: GeneralBooleanPreference, value: Boolean) =
+        mutator.setGeneralBoolean(preference, value)
+
+    fun setDebugBoolean(preference: DebugBooleanPreference, value: Boolean) =
+        mutator.setDebugBoolean(preference, value)
+
+    fun setStoryLoadFailurePercent(value: Int) = mutator.setStoryLoadFailurePercent(value)
+
+    fun setSurfaceEffectMode(value: SurfaceEffectMode) = mutator.setSurfaceEffectMode(value)
+    fun setGlassParameter(parameter: GlassParameter, value: Float) = mutator.setGlassParameter(parameter, value)
+    fun setGlassSwitch(option: GlassSwitch, value: Boolean) = mutator.setGlassSwitch(option, value)
+    fun setGlassSurfaceProfile(value: GlassSurfaceProfile) = mutator.setGlassSurfaceProfile(value)
+    fun resetGlassPreferences() = mutator.resetGlassPreferences()
+
+    fun setStoriesToCache(value: Int) = reader.setStoriesToCache(value)
+    fun applyWelcomePreset(expressive: Boolean) = mutator.applyWelcomePreset(expressive)
+
+    fun setPaletteTint(
+        mode: String?,
+        strength: Int,
+        colorfulness: Int,
+        tone: Int,
+        avoidBackgroundColor: Boolean = PaletteTintPreferences.DEFAULT_AVOID_BACKGROUND_COLOR,
+    ): Boolean = mutator.setPaletteTint(mode, strength, colorfulness, tone, avoidBackgroundColor)
+
+    fun clearPaletteTint(): Boolean = mutator.clearPaletteTint()
+}

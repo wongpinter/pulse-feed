@@ -1,0 +1,388 @@
+package com.simon.harmonichackernews.ui.comments
+
+
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Animatable
+import androidx.compose.material3.MaterialTheme
+import com.simon.harmonichackernews.resources.*
+
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import com.simon.harmonichackernews.ui.common.relativeTimeOnResume
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.platform.LocalHapticFeedback
+import org.jetbrains.compose.resources.painterResource
+import com.simon.harmonichackernews.settings.UserTagColor
+import com.simon.harmonichackernews.ui.content.userTagColor
+import com.simon.harmonichackernews.ui.content.annotatedUserTagLabel
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextGeometricTransform
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import com.simon.harmonichackernews.settings.CommentsHeaderMetaInfo
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import com.simon.harmonichackernews.adapters.CommentDisplaySettings
+import com.simon.harmonichackernews.presentation.StoryListItemSnapshot
+import com.simon.harmonichackernews.ui.content.AnnotatedLinkGestureState
+import com.simon.harmonichackernews.ui.content.ContentMotionEasing
+import com.simon.harmonichackernews.ui.content.contentTween
+import com.simon.harmonichackernews.ui.content.detectAnnotatedLinkLongPress
+import com.simon.harmonichackernews.ui.content.rememberContentTypography
+import com.simon.harmonichackernews.ui.content.ReferenceLinkRow
+import com.simon.harmonichackernews.ui.content.rememberReferenceLinkLabel
+import com.simon.harmonichackernews.ui.content.trimmedCommentText
+import com.simon.harmonichackernews.ui.content.htmlAnnotatedString
+import com.simon.harmonichackernews.ui.content.hasCommentLinks
+import com.simon.harmonichackernews.ui.content.preparedCommentText
+import com.simon.harmonichackernews.ui.content.referenceBlockTopPadding
+import com.simon.harmonichackernews.utils.CollectedReferenceLinks
+import com.simon.harmonichackernews.network.FaviconUrlBuilder
+
+@Composable
+fun HeaderLinkInfo(
+    story: StoryListItemSnapshot,
+    settings: CommentDisplaySettings,
+    faviconPreview: Painter? = null,
+    posterTag: String = "",
+    posterTagColor: UserTagColor = UserTagColor.Theme,
+    animateSettingsPreview: Boolean = false,
+) {
+    if (!story.loaded) return
+    val hasLink = story.isLink && !story.isComment && !story.url.isNullOrBlank()
+    val onImage = settings.headerMetaInfo == CommentsHeaderMetaInfo.ON_IMAGE
+    val showDomain = hasLink && settings.showHeaderDomain
+    val showInfo = showDomain || onImage || (hasLink && settings.combineHeaderActions)
+    val colors = MaterialTheme.colorScheme
+    val typography = rememberContentTypography(preferredFont = settings.font)
+    val domain = remember(story.url) {
+        runCatching { story.getDisplayDomain(true) }.getOrDefault("")
+    }
+    val favicon = remember(story.url, settings.faviconProvider) {
+        runCatching {
+            FaviconUrlBuilder.faviconUrl(story.url.orEmpty(), settings.faviconProvider)
+        }.getOrNull()
+    }
+    androidx.compose.animation.AnimatedVisibility(
+        visible = showInfo,
+        enter = fadeIn(tween(140, delayMillis = 80)) + androidx.compose.animation.expandVertically(contentTween(), clip = false),
+        exit = fadeOut(tween(80)) + androidx.compose.animation.shrinkVertically(tween(220, delayMillis = 80, easing = ContentMotionEasing), clip = false),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(top = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = settings.showFavicons && showDomain,
+                // Match Stories' simultaneous fade and width change in the settings preview.
+                enter = if (animateSettingsPreview) fadeIn(contentTween()) + androidx.compose.animation.expandHorizontally(
+                    animationSpec = contentTween(), expandFrom = Alignment.Start,
+                ) else fadeIn(tween(100, delayMillis = 120)) + androidx.compose.animation.expandHorizontally(
+                    animationSpec = contentTween(),
+                    expandFrom = Alignment.Start,
+                    clip = false,
+                ),
+                exit = if (animateSettingsPreview) fadeOut(contentTween()) + androidx.compose.animation.shrinkHorizontally(
+                    animationSpec = contentTween(), shrinkTowards = Alignment.Start,
+                ) else fadeOut(tween(80)) + androidx.compose.animation.shrinkHorizontally(
+                    animationSpec = tween(220, delayMillis = 80, easing = ContentMotionEasing),
+                    shrinkTowards = Alignment.Start,
+                    clip = false,
+                ),
+            ) {
+                if (faviconPreview != null) {
+                    Image(
+                        painter = faviconPreview,
+                        contentDescription = "Site icon",
+                        modifier = Modifier.padding(end = 4.dp).size(17.dp).clip(RoundedCornerShape(3.dp)),
+                    )
+                } else {
+                    var faviconLoaded by remember(favicon) { mutableStateOf(false) }
+                    val fallback = painterResource(Res.drawable.ic_public)
+                    AsyncImage(
+                        model = favicon,
+                        placeholder = fallback,
+                        fallback = fallback,
+                        error = fallback,
+                        colorFilter = if (faviconLoaded) null else ColorFilter.tint(colors.onSurfaceVariant),
+                        onLoading = { faviconLoaded = false },
+                        onSuccess = { faviconLoaded = true },
+                        onError = { faviconLoaded = false },
+                        contentDescription = "Site icon",
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .size(17.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                    )
+                }
+            }
+            val label = if (onImage) {
+                val author = if (posterTag.isBlank()) story.by.orEmpty() else "${story.by.orEmpty()} ($posterTag)"
+                listOfNotNull(
+                    domain?.takeIf { showDomain && it.isNotBlank() },
+                    relativeTimeOnResume(story.createdAtEpochSeconds),
+                    author.takeIf { it.isNotBlank() },
+                ).joinToString(" \u00b7 ")
+            } else if (settings.combineHeaderActions) {
+                listOfNotNull(domain?.takeIf { showDomain && it.isNotBlank() },
+                    relativeTimeOnResume(story.createdAtEpochSeconds)).joinToString(" \u00b7 ")
+            } else domain.orEmpty()
+            val text: @Composable (AnnotatedString, Modifier) -> Unit = { visibleLabel, modifier ->
+                Text(
+                    text = visibleLabel,
+                    modifier = modifier,
+                    color = colors.onSurfaceVariant,
+                    fontFamily = typography.family,
+                    fontWeight = if (onImage) FontWeight.Medium else FontWeight.Normal,
+                    fontSize = typography.commentsHeaderMetaSize.sp,
+                    style = LocalCommentsPreviewPlatform.current.textStyle,
+                    maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+            if (animateSettingsPreview) {
+                val suffix = if (onImage || settings.combineHeaderActions) {
+                    listOfNotNull(
+                        relativeTimeOnResume(story.createdAtEpochSeconds),
+                        story.by.orEmpty().takeIf { onImage && it.isNotBlank() }?.let {
+                            if (posterTag.isBlank()) it else "$it ($posterTag)"
+                        },
+                    ).joinToString(" \u00b7 ")
+                } else ""
+                text(previewHeaderLinkLabel(domain.orEmpty(), showDomain,
+                    if (onImage) annotatedUserTagLabel(suffix, posterTag, userTagColor(posterTagColor))
+                    else AnnotatedString(suffix)), Modifier.weight(1f))
+            } else {
+                AnimatedContent(
+                    targetState = if (onImage) {
+                        annotatedUserTagLabel(label, posterTag, userTagColor(posterTagColor))
+                    } else AnnotatedString(label),
+                    transitionSpec = {
+                        (fadeIn(tween(100, delayMillis = 80)) togetherWith fadeOut(tween(80)))
+                            .using(SizeTransform(clip = false) { _, _ -> contentTween() })
+                    },
+                    label = "header domain and age",
+                    modifier = Modifier.weight(1f),
+                ) { text(it, Modifier) }
+            }
+        }
+    }
+}
+
+/** Like Stories metadata, keep one Text and collapse only the optional span. */
+@Composable
+private fun previewHeaderLinkLabel(domain: String, visible: Boolean, suffix: AnnotatedString): AnnotatedString {
+    val showDomain = visible && domain.isNotBlank()
+    val progress = remember(domain) { Animatable(if (showDomain) 1f else 0f) }
+    var renderDomain by remember(domain) { mutableStateOf(showDomain) }
+    LaunchedEffect(showDomain) {
+        if (showDomain) renderDomain = true
+        progress.animateTo(if (showDomain) 1f else 0f, contentTween())
+        if (!showDomain) renderDomain = false
+    }
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    return buildAnnotatedString {
+        if (renderDomain) {
+            append(domain)
+            if (suffix.isNotEmpty()) append(" \u00b7 ")
+            addStyle(SpanStyle(color = color.copy(alpha = progress.value),
+                textGeometricTransform = TextGeometricTransform(scaleX = progress.value.coerceAtLeast(0.001f))),
+                0, length)
+        }
+        append(suffix)
+    }
+}
+
+@Composable
+fun HeaderStoryBody(
+    story: StoryListItemSnapshot,
+    settings: CommentDisplaySettings,
+    suppressedReferenceUrl: String?,
+    onReferenceLongClick: (
+        CollectedReferenceLinks.ReferenceLink,
+        androidx.compose.ui.geometry.Rect,
+        GraphicsLayer?,
+    ) -> Unit,
+    onLinkLongClick: (String, String, androidx.compose.ui.geometry.Rect) -> Unit,
+) {
+    if (story.text.isNullOrBlank()) return
+    val typography = rememberContentTypography(
+        preferredFont = settings.font,
+        commentTextSize = settings.preferredTextSize,
+    )
+    val references = remember(story.text, settings.collectReferenceLinks) {
+        if (settings.collectReferenceLinks) CollectedReferenceLinks.parse(story.text) else null
+    }
+    val contentBlocks = references
+        ?.takeIf(CollectedReferenceLinks.Result::hasLinks)
+        ?.contentBlocks
+        ?: listOf(CollectedReferenceLinks.ContentBlock.text(story.text))
+    val interleaved = references?.hasInterleavedLinks() == true
+    SelectionContainer {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(top = 4.dp, bottom = 3.dp),
+        ) {
+            contentBlocks.forEachIndexed { index, block ->
+                if (interleaved) Spacer(Modifier.height(referenceBlockTopPadding(contentBlocks, index)))
+                val link = block.getLink()
+                if (link == null) {
+                    HeaderStoryTextBlock(
+                        bodyHtml = block.bodyHtml.orEmpty(),
+                        trimParagraphEdges = interleaved,
+                        fontFamily = typography.family,
+                        fontSize = typography.commentTextSize,
+                        onLinkLongClick = onLinkLongClick,
+                    )
+                } else {
+                    DisableSelection {
+                        HeaderReferenceRow(
+                            link = link,
+                            settings = settings,
+                            topPadding = if (interleaved) 0.dp else 4.dp,
+                            suppressed = link.url == suppressedReferenceUrl,
+                            onLongClick = onReferenceLongClick,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun HeaderStoryTextBlock(
+    bodyHtml: String,
+    trimParagraphEdges: Boolean,
+    fontFamily: FontFamily,
+    fontSize: Float,
+    onLinkLongClick: (String, String, androidx.compose.ui.geometry.Rect) -> Unit,
+) {
+    val platform = LocalCommentsPreviewPlatform.current
+    val colors = MaterialTheme.colorScheme
+    val prepared = remember(bodyHtml, trimParagraphEdges) {
+        preparedCommentText(bodyHtml, highlightQuotes = true, retainQuoteDecoration = false).let {
+            if (trimParagraphEdges) it.trimmedCommentText() else it
+        }
+    }
+    val hasLinks = remember(prepared) { prepared.hasCommentLinks() }
+    val linkGestureState = if (hasLinks) remember(bodyHtml) { AnnotatedLinkGestureState() } else null
+    val annotated = if (linkGestureState != null) {
+        val linkListener = remember(platform.openLink, linkGestureState) {
+            LinkInteractionListener { link ->
+                if (link is LinkAnnotation.Url &&
+                    !linkGestureState.consumeSuppressedLinkClick()
+                ) {
+                    platform.openLink(link.url)
+                }
+            }
+        }
+        remember(bodyHtml, colors.primary, linkListener, trimParagraphEdges) {
+            htmlAnnotatedString(bodyHtml, colors.primary, linkListener).let {
+                if (trimParagraphEdges) it.trimmedCommentText() else it
+            }
+        }
+    } else prepared
+    val geometry = if (hasLinks) remember(annotated) { HeaderTextLinkGeometry() } else null
+    val linkModifier = if (geometry != null && linkGestureState != null) {
+        Modifier.onPlaced { geometry.coordinates = it }
+            .detectAnnotatedLinkLongPress(
+                text = annotated,
+                layoutResult = { geometry.layout },
+                coordinates = { geometry.coordinates },
+                linkGestureState = linkGestureState,
+                hapticFeedback = LocalHapticFeedback.current,
+                onLongPress = onLinkLongClick,
+            )
+    } else Modifier
+
+    if (annotated.isNotEmpty()) {
+        Text(
+            text = annotated,
+            modifier = linkModifier,
+            color = colors.onSurface,
+            fontFamily = fontFamily,
+            fontSize = fontSize.sp,
+            style = platform.textStyle,
+            onTextLayout = if (geometry != null) { { geometry.layout = it } } else { _ -> },
+        )
+    }
+}
+
+private class HeaderTextLinkGeometry {
+    var layout: TextLayoutResult? = null
+    var coordinates: LayoutCoordinates? = null
+}
+
+@Composable
+private fun HeaderReferenceRow(
+    link: CollectedReferenceLinks.ReferenceLink,
+    settings: CommentDisplaySettings,
+    topPadding: Dp,
+    suppressed: Boolean,
+    onLongClick: (
+        CollectedReferenceLinks.ReferenceLink,
+        androidx.compose.ui.geometry.Rect,
+        GraphicsLayer?,
+    ) -> Unit,
+) {
+    val platform = LocalCommentsPreviewPlatform.current
+    val typography = rememberContentTypography(
+        preferredFont = settings.font,
+        commentTextSize = settings.preferredTextSize,
+    )
+    ReferenceLinkRow(
+        topPadding = topPadding,
+        marker = link.markerLabel.orEmpty(),
+        label = rememberReferenceLinkLabel(link, settings.expandedReferenceLinks),
+        typography = typography,
+        expandedUrl = link.url.orEmpty().takeIf { settings.expandedReferenceLinks },
+        faviconUrl = runCatching {
+            FaviconUrlBuilder.faviconUrl(link.url.orEmpty(), settings.faviconProvider)
+        }.getOrNull(),
+        suppressed = suppressed,
+        onClick = { platform.openLink(link.url) },
+        onLongClick = { bounds, layer -> onLongClick(link, bounds, layer) },
+    )
+}

@@ -1,0 +1,585 @@
+package com.simon.harmonichackernews.desktop
+
+import com.simon.harmonichackernews.ui.session.commentsViewModel
+import com.simon.harmonichackernews.ui.navigation.RegisterDestinationController
+import com.simon.harmonichackernews.ui.navigation.RetainedDestinationControllers
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import coil3.compose.AsyncImage
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.adapters.CommentDisplaySettings
+import com.simon.harmonichackernews.app.HarmonicAppComposition
+import com.simon.harmonichackernews.app.HarmonicSceneComposition
+import com.simon.harmonichackernews.app.createStoryLinkPreviewSession
+import com.simon.harmonichackernews.navigation.MainStoryRequest
+import com.simon.harmonichackernews.network.FaviconUrlBuilder
+import com.simon.harmonichackernews.network.StoryLinkPreviewSession
+import com.simon.harmonichackernews.network.WebPageExtractor
+import com.simon.harmonichackernews.network.NitterPreview
+import com.simon.harmonichackernews.data.NitterInfo
+import com.simon.harmonichackernews.platform.ExternalLinkRequest
+import com.simon.harmonichackernews.platform.accountOrNull
+import com.simon.harmonichackernews.presentation.CommentsPlatformEffect
+import com.simon.harmonichackernews.presentation.WebContentPolicy
+import com.simon.harmonichackernews.ui.comments.CommentLinkPreviewOverlayState
+import com.simon.harmonichackernews.ui.comments.CommentsScreenController
+import com.simon.harmonichackernews.ui.comments.CommentsFeatureBinding
+import com.simon.harmonichackernews.ui.comments.CommentsHeaderPresentationFactory
+import com.simon.harmonichackernews.ui.comments.CommentsPlatformPresentation
+import com.simon.harmonichackernews.ui.comments.CommentsPreviewPlatform
+import com.simon.harmonichackernews.ui.comments.ReferenceSummaryUiState
+import com.simon.harmonichackernews.ui.comments.CommentActionOverlay
+import com.simon.harmonichackernews.ui.comments.CommentLinkPreviewOverlay
+import com.simon.harmonichackernews.ui.comments.CommentsHeader
+import com.simon.harmonichackernews.ui.comments.CommentsHazeHost
+import com.simon.harmonichackernews.ui.comments.rememberCommentsListState
+import com.simon.harmonichackernews.ui.comments.CommentsRoute
+import com.simon.harmonichackernews.ui.comments.CommentsSearchDialog
+import com.simon.harmonichackernews.ui.comments.SearchLinkPreviewBackHandler
+import com.simon.harmonichackernews.ui.comments.CommentsUpButton
+import com.simon.harmonichackernews.ui.comments.HeaderPreviewImage
+import com.simon.harmonichackernews.ui.comments.LinkPreviewShimmer
+import com.simon.harmonichackernews.ui.comments.ReferenceCardContent
+import com.simon.harmonichackernews.ui.common.HarmonicTopAppBar
+import com.simon.harmonichackernews.utils.HtmlTextUtils
+import androidx.compose.runtime.mutableStateOf
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+private class DesktopCommentsHost(
+    val binding: CommentsFeatureBinding,
+    private val scope: CoroutineScope,
+) {
+    val store get() = binding.store
+    val controller get() = binding.controller
+    var webViewSession: DesktopCommentsWebViewSession? by mutableStateOf(null)
+    var previews: StoryLinkPreviewSession? = null
+    var externalArticleOpened = false
+    private var summaryJob: Job? = null
+
+    fun summarize(loadIfNeeded: Boolean) {
+        summaryJob?.cancel()
+        val retryGeneration = if (loadIfNeeded) store.summaryPageTextRetryGeneration ?: return else null
+        summaryJob = scope.launch {
+            val text = webViewSession?.readPageText(loadIfNeeded)
+            if (retryGeneration != null) store.completeSummaryPageTextRetry(retryGeneration, text)
+            else store.startSummary(text)
+        }
+    }
+}
+
+@Composable
+internal fun DesktopCommentsContent(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    request: MainStoryRequest,
+    showNavigation: Boolean,
+    webViewForegroundAllowed: Boolean,
+    onClose: () -> Unit,
+    controllers: RetainedDestinationControllers<CommentsScreenController>,
+) {
+    val viewModel = commentsViewModel(scene, request)
+    val scope = rememberCoroutineScope()
+    val integratedBrowserAvailable = remember {
+        desktopEmbeddedBrowserBackend() != DesktopEmbeddedBrowserBackend.UNSUPPORTED
+    }
+    val host = remember(app, scene, request.serial, scope) {
+        DesktopCommentsHost(
+            CommentsFeatureBinding.create(
+                app = app,
+                scene = scene,
+                request = request,
+                scope = scope,
+                sessionState = viewModel.session,
+                canLoadArticleTextOnDemand = integratedBrowserAvailable,
+            ),
+            scope,
+        )
+    }
+    val featureState by host.store.state.collectAsState()
+    val reading = featureState.settings?.reading
+    LaunchedEffect(host, reading, featureState.story?.url, host.webViewSession) {
+        if (reading == null) return@LaunchedEffect
+        coroutineScope {
+            val session = app.createStoryLinkPreviewSession(
+                scope = this,
+                story = host.binding.story,
+                readingPreferences = reading,
+                onPreviewChanged = host.store::refreshStoryPresentation,
+            )
+            host.previews = session
+            val browser = host.webViewSession
+            val extractor = object : WebPageExtractor<NitterInfo> {
+                override val currentUrl get() = browser?.currentUrl()
+                override suspend fun extract(): NitterInfo? = browser?.evaluateResult(NitterPreview.extractionScript)
+                    ?.let { runCatching { NitterPreview.parseJavascriptResult(it) }.getOrNull() }
+            }
+            browser?.onNavigationStarted = { session.prepareLoad(it, extractor) }
+            browser?.onPageFinished = { session.onPageFinished(it, extractor) }
+            browser?.onLoadFailed = session::offlineFallback
+            try {
+                session.loadNetworkPreviews()
+                if (browser?.hasLoadedContent == true && !browser.isLoading && browser.loadError == null) {
+                    session.onPageFinished(browser.currentUrl(), extractor)
+                }
+                awaitCancellation()
+            } finally {
+                session.dispose()
+                browser?.onNavigationStarted = {}
+                browser?.onPageFinished = {}
+                browser?.onLoadFailed = {}
+                if (host.previews === session) host.previews = null
+            }
+        }
+    }
+    val readerState = host.webViewSession?.reader?.state?.collectAsState()?.value
+    val contentInsetRightPx = with(LocalDensity.current) {
+        if (showNavigation) 0 else DesktopWidePaneHorizontalPadding.roundToPx()
+    }
+
+    RegisterDestinationController(controllers, request.serial, host.controller)
+    DisposableEffect(host) {
+        onDispose {
+            host.binding.close()
+        }
+    }
+    LaunchedEffect(featureState, host.controller, contentInsetRightPx, readerState) {
+        host.binding.updateContent(
+            CommentsPlatformPresentation(
+                adBlockActive = false,
+                readerModeAvailable = readerState?.available == true,
+                readerModeEnabled = readerState?.enabled == true,
+                showSheetControls = false,
+                topInsetPx = 0,
+                contentInsetLeftPx = 0,
+                contentInsetRightPx = contentInsetRightPx,
+                integratedWebViewAvailable = integratedBrowserAvailable,
+            ),
+        )
+    }
+    LaunchedEffect(host) {
+        host.store.effects.collect { effect ->
+            host.binding.handleEffect(effect, scene,
+                onSummaryPageTextRetry = { host.summarize(loadIfNeeded = true) }) { platformEffect ->
+                handleDesktopCommentsPlatformEffect(
+                    platformEffect,
+                    app,
+                    scene,
+                    host,
+                )
+            }
+        }
+    }
+    LaunchedEffect(host) {
+        host.binding.updatePresentationCapabilities(isTablet = true)
+        host.binding.loadInitial()
+    }
+
+    val showFloatingUpButton = showNavigation &&
+        host.controller.displaySettings?.showUpButton == true
+    val accountState by app.platform.accounts.accountState.collectAsState()
+    // The browser crossfade and pane layout must not own the thread scroll position.
+    val commentsListState = rememberCommentsListState()
+    val comments: @Composable () -> Unit = {
+        Column(Modifier.fillMaxSize()) {
+            if (showNavigation && !showFloatingUpButton) {
+                HarmonicTopAppBar(
+                    title = "Comments",
+                    onBack = onClose,
+                    toolbarHeight = 56.dp,
+                    navigationHeight = 48.dp,
+                )
+            }
+            Box(Modifier.weight(1f)) {
+                CommentsRoute(
+                    controller = host.controller,
+                    listState = commentsListState,
+                    reserveUpButtonInset = showFloatingUpButton,
+                    pullToRefreshEnabled = false,
+                    headerContent = { settings ->
+                        DesktopCommentsHeader(app, scene, host.controller, settings)
+                    },
+                    searchDialog = { settings ->
+                        CommentsSearchDialog(
+                            preparing = host.controller.searchPreparing,
+                            searchTerm = host.controller.searchQuery,
+                            visibleComments = host.controller.searchResults,
+                            settings = settings,
+                            storyAuthor = host.controller.story.by,
+                            accountUser = host.controller.accountUser,
+                            maxDialogHeight = 720.dp,
+                            onSearchTermChanged = host.controller.listener::onSearchQueryChanged,
+                            onDismiss = {
+                                if (host.controller.linkPreviewOverlay != null) host.controller.requestDismissLinkPreview()
+                                else host.controller.dismissCommentSearch()
+                            },
+                            onCommentSelected = host.controller::selectSearchResult,
+                            onOpenLink = { scene.links.open(it) },
+                            onLinkLongClick = { comment, url, title, bounds ->
+                                host.controller.showReferencePreview(
+                                    url = url,
+                                    title = title,
+                                    sourceBounds = bounds,
+                                    sourceCommentId = comment.id,
+                                )
+                            },
+                            onReferenceLongClick = { comment, link, bounds, sourceContentLayer ->
+                                host.controller.showReferencePreview(
+                                    link = link,
+                                    sourceBounds = bounds,
+                                    sourceCommentId = comment.id,
+                                    sourceContentLayer = sourceContentLayer,
+                                )
+                            },
+                            foreground = {
+                                SearchLinkPreviewBackHandler(host.controller)
+                                DesktopCommentLinkPreview(app, scene, host.controller)
+                            },
+                        )
+                    },
+                    actionOverlay = { settings ->
+                        CommentActionOverlay(
+                            controller = host.controller,
+                            settings = settings,
+                            hasAccount = accountState.accountOrNull != null,
+                            bookmarksEnabled = app.userSettings.general.bookmarksEnabled,
+                            textStyle = TextStyle.Default,
+                            onOpenLink = { scene.links.open(it) },
+                        )
+                    },
+                )
+                if (showFloatingUpButton) {
+                    CommentsUpButton(
+                        onClick = onClose,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(start = 16.dp, top = 8.dp)
+                            .zIndex(101f),
+                    )
+                }
+            }
+        }
+    }
+    val storyUrl = remember(
+        host.controller.story.url,
+        featureState.settings?.reading?.archiveRedirectDomains,
+    ) {
+        WebContentPolicy.resolveUrl(
+            host.controller.story.url,
+            featureState.settings?.reading?.archiveRedirectDomains.orEmpty(),
+        )?.loadUrl
+    }
+    LaunchedEffect(request.serial, integratedBrowserAvailable, storyUrl) {
+        if (!integratedBrowserAvailable && request.destination.showWebsite && storyUrl != null &&
+            !host.externalArticleOpened
+        ) {
+            host.externalArticleOpened = true
+            scene.links.open(storyUrl, preferInApp = false)
+        }
+    }
+    CommentsHazeHost {
+        if (integratedBrowserAvailable && host.controller.integratedWebView && storyUrl != null) {
+            val appearance = app.appearance.selection()
+            DesktopCommentsWebViewScaffold(
+                controller = host.controller,
+                initialUrl = storyUrl,
+                dark = appearance.dark,
+                matchTheme = featureState.settings?.reading?.matchWebViewTheme == true,
+                nativeSurfaceAllowed = webViewForegroundAllowed,
+                onSessionChanged = { host.webViewSession = it },
+                reading = featureState.settings?.reading ?: app.userSettings.reading,
+                onReaderMessage = { scene.userMessages.show(it) },
+                onOpenExternal = { scene.links.open(it, preferInApp = false) },
+                isOnline = app.platform.connectivity::isOnline,
+                loadCachedArticle = { requestedUrl ->
+                    val story = host.controller.story
+                    withContext(Dispatchers.IO) {
+                        val sourceUrl = app.storyCache.articleUrl(story.id)
+                        val navigation = DesktopArticleNavigation(
+                            reading?.archiveRedirectDomains.orEmpty().toList(),
+                            reading?.redirectNitter == true,
+                            reading?.nitterInstanceUrl ?: com.simon.harmonichackernews.network.NitterInstance.DEFAULT_URL,
+                        )
+                        // A linked page's failure must never display the original story's snapshot.
+                        val allowed = listOfNotNull(story.url, sourceUrl, storyUrl, story.url?.let(navigation::resolve))
+                        if (requestedUrl.substringBefore('#') !in allowed.map { it.substringBefore('#') }) null
+                        else app.storyCache.loadArticle(story.id)?.let { html ->
+                            DesktopCachedArticle(sourceUrl ?: story.url ?: requestedUrl, html)
+                        }
+                    }
+                },
+                comments = comments,
+            )
+        } else {
+            DisposableEffect(host) {
+                host.webViewSession = null
+                onDispose { }
+            }
+            comments()
+        }
+    }
+}
+
+private fun handleDesktopCommentsPlatformEffect(
+    effect: CommentsPlatformEffect,
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    host: DesktopCommentsHost,
+) {
+    when (effect) {
+        is CommentsPlatformEffect.OpenUser -> scene.navigation.showUserDialog(effect.userName)
+        is CommentsPlatformEffect.OpenEditor -> scene.navigation.openEditor(effect.destination)
+        CommentsPlatformEffect.RequestLogin -> scene.navigation.showLoginDialog()
+        is CommentsPlatformEffect.ShowMessage -> scene.userMessages.show(effect.message)
+        is CommentsPlatformEffect.ShareText -> {
+            app.platform.sharing.share(effect.text)
+            scene.userMessages.show("Copied share text to clipboard")
+        }
+        is CommentsPlatformEffect.CopyText -> {
+            app.platform.clipboard.copy(effect.label, effect.text)
+            scene.userMessages.show("Text copied to clipboard")
+        }
+        CommentsPlatformEffect.ReloadLinkPreviews -> host.previews?.loadNetworkPreviews()
+        CommentsPlatformEffect.Summarize -> host.summarize(loadIfNeeded = false)
+        is CommentsPlatformEffect.OpenStory -> scene.navigation.openStory(effect.destination)
+        is CommentsPlatformEffect.OpenExternalLink -> {
+            if (
+                effect.preferInApp && host.controller.integratedWebView &&
+                effect.url == host.controller.story.url && host.webViewSession != null
+            ) {
+                host.controller.requestWebsite()
+            } else {
+                scene.links.openExternal(
+                    ExternalLinkRequest(effect.url, preferInApp = effect.preferInApp),
+                )
+            }
+        }
+        CommentsPlatformEffect.ShowSearch -> host.controller.showCommentSearch()
+        CommentsPlatformEffect.DisableAdBlock ->
+            scene.userMessages.show("Ad blocking applies to the Android embedded browser")
+        CommentsPlatformEffect.ReloadWebsite -> host.webViewSession?.reload()
+        CommentsPlatformEffect.OpenWebsiteInBrowser ->
+            host.webViewSession?.currentUrl()?.let {
+                scene.links.open(it, preferInApp = false)
+            }
+        CommentsPlatformEffect.ExpandSheet -> host.controller.requestExpandSheet()
+        CommentsPlatformEffect.ToggleReaderMode ->
+            host.webViewSession?.reader?.toggle()
+        CommentsPlatformEffect.ToggleDarkMode -> host.webViewSession?.toggleInversion()
+    }
+}
+
+@Composable
+private fun DesktopCommentsHeader(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    controller: CommentsScreenController,
+    settings: CommentDisplaySettings,
+) {
+    val tintBase = HarmonicTheme.targetColorScheme.cardBackground.toArgb()
+    val presentation = remember(
+        controller.story,
+        controller.contentVersion,
+        controller.headerPreviewResource,
+        settings,
+        tintBase,
+    ) {
+        CommentsHeaderPresentationFactory.create(
+            story = controller.story,
+            previewResource = controller.headerPreviewResource,
+            faviconProvider = settings.faviconProvider,
+            paletteTintMode = settings.paletteTintMode,
+            tintBaseColor = tintBase,
+            tintStore = app.storyResourceTints,
+            userTags = app.userTags,
+            lastRefreshedMillis = controller.lastRefreshed,
+            formatTime = app.platform.timeFormatting::time,
+        )
+    }
+    val previewPlatform = remember(scene) {
+        CommentsPreviewPlatform(
+            textStyle = TextStyle.Default,
+            openLink = { it?.let(scene.links::open) },
+            downloadPdf = { it?.let { url -> scene.links.open(url, preferInApp = false) } },
+            openCustomTab = { it?.let { url -> scene.links.open(url, preferInApp = false) } },
+            plainText = HtmlTextUtils::plainText,
+        )
+    }
+
+    CommentsHeader(
+        controller = controller,
+        settings = settings,
+        contentVersion = controller.contentVersion,
+        storyPosterTag = presentation.posterTag,
+        storyPosterTagColor = presentation.posterTagColor,
+        tintBaseColor = tintBase,
+        initialTint = presentation.tint.initialTintArgb,
+        headerTopPadding = 32.dp,
+        bookmarksEnabled = app.userSettings.general.bookmarksEnabled,
+        lastRefreshedText = presentation.lastRefreshedText,
+        textStyle = TextStyle.Default,
+        previewPlatform = previewPlatform,
+        linkPreviewsEnabled = app.userSettings.reading.linkPreviewsEnabled,
+        headerPreviewImageDisplayed = settings.showHeaderPreviewImage &&
+            presentation.tint.previewImageAvailable,
+        headerPreviewImage = { imageModifier, _, onTintLoaded ->
+            val imageUrl = presentation.tint.previewImageUrl
+            HeaderPreviewImage(
+                modifier = imageModifier,
+                imageUrl = imageUrl,
+                initiallyFailed = controller.headerPreviewResource?.imageLoadFailed == true,
+                visible = settings.showHeaderPreviewImage,
+                suppressed = controller.headerPreviewSuppressed,
+                tintBaseColorArgb = tintBase,
+                paletteTintConfigKey = presentation.tint.paletteMode,
+                extractTint = settings.tintHeader,
+                onTintExtracted = { tint ->
+                    val canonical = imageUrl?.let { sourceUrl ->
+                        controller.listener.onHeaderPreviewTintExtracted(
+                            sourceUrl,
+                            tintBase,
+                            presentation.tint.paletteMode,
+                            tint,
+                        )
+                    } ?: tint
+                    onTintLoaded(canonical)
+                },
+                onImageResult = { success ->
+                    imageUrl?.let {
+                        controller.listener.onHeaderPreviewImageResult(it, success)
+                    }
+                },
+                onClick = controller.listener::onHeaderClick,
+                onLongClick = { bounds, sourceContentLayer, imageAspectRatio ->
+                    imageUrl?.let { url ->
+                        controller.showImagePreview(
+                            imageUrl = url,
+                            description = "Preview image for ${controller.story.title.orEmpty()}",
+                            sourceBounds = bounds,
+                            sourceContentLayer = sourceContentLayer,
+                            imageAspectRatio = imageAspectRatio,
+                            backgroundColor = tintBase,
+                        )
+                    }
+                },
+            )
+        },
+    )
+}
+
+@Composable
+internal fun DesktopCommentLinkPreview(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    controller: CommentsScreenController,
+) {
+    CommentLinkPreviewOverlay(
+        controller = controller,
+        tablet = true,
+        referenceContent = { state ->
+            DesktopReferencePreview(app, scene, controller, state)
+        },
+    )
+}
+
+@Composable
+private fun DesktopReferencePreview(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    controller: CommentsScreenController,
+    state: CommentLinkPreviewOverlayState.Reference,
+) {
+    val runtime = checkNotNull(controller.referencePreview)
+    val runtimeState by runtime.state.collectAsState()
+
+    LaunchedEffect(runtimeState.url) {
+        runtimeState.url.takeIf { it.isNotBlank() && it != state.originalUrl }?.let {
+            controller.updateLinkPreviewVisibleUrl(state.originalUrl, it)
+        }
+    }
+
+    val currentUrl = runtimeState.url.takeIf(String::isNotBlank)
+        ?: controller.linkPreviewVisibleUrl
+        ?: state.originalUrl
+    val settings = controller.displaySettings
+    val favicon = remember(currentUrl, settings?.faviconProvider) {
+        runCatching {
+            FaviconUrlBuilder.faviconUrl(
+                currentUrl,
+                settings?.faviconProvider ?: app.userSettings.story.faviconProvider,
+            )
+        }.getOrNull()
+    }
+    ReferenceCardContent(
+        url = currentUrl,
+        fallbackTitle = state.fallbackTitle,
+        summary = ReferenceSummaryUiState(
+            loading = runtimeState.loading,
+            showFallback = runtimeState.showFallback,
+            result = runtimeState.summary,
+            error = runtimeState.error,
+        ),
+        preferredFont = settings?.font ?: app.userSettings.story.font,
+        commentTextSize = settings?.preferredTextSize ?: app.userSettings.comments.textSize,
+        favicon = favicon,
+        offline = runtimeState.offline,
+        textStyle = TextStyle.Default,
+        referenceImage = { imageUrl, loading, expanded, shape, ratio, onRatio, onClick, modifier ->
+            Box(
+                modifier = modifier
+                    .then(
+                        if (expanded) Modifier.fillMaxWidth().aspectRatio(ratio.coerceIn(0.45f, 3f))
+                        else Modifier.size(104.dp),
+                    )
+                    .clip(shape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                    .clickable(enabled = imageUrl != null, onClick = onClick),
+            ) {
+                if (loading) LinkPreviewShimmer(Modifier.fillMaxSize())
+                AsyncImage(
+                    model = imageUrl,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize().graphicsLayer { alpha = if (loading) 0f else 1f },
+                    contentScale = if (expanded) ContentScale.Fit else ContentScale.Crop,
+                    onSuccess = { success ->
+                        val size = success.painter.intrinsicSize
+                        if (size.width > 0f && size.height > 0f) onRatio(size.width / size.height)
+                    },
+                )
+            }
+        },
+        onOpen = { scene.links.open(currentUrl) },
+    )
+}

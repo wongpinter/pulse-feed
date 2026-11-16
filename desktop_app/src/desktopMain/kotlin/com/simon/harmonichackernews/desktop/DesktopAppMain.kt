@@ -1,0 +1,830 @@
+package com.simon.harmonichackernews.desktop
+
+import com.simon.harmonichackernews.ui.settings.SettingsScrollPage
+
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import androidx.compose.runtime.CompositionLocalProvider
+import com.simon.harmonichackernews.ui.session.HarmonicSceneOwner
+import androidx.compose.material3.Surface
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
+import androidx.compose.material3.adaptive.layout.calculatePaneScaffoldDirective
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.padding
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.platform.accountOrNull
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.runtime.movableContentOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPainter
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowState
+import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.rememberWindowState
+import com.simon.harmonichackernews.app.DesktopHarmonicAppBootstrap
+import com.simon.harmonichackernews.app.HarmonicAppComposition
+import com.simon.harmonichackernews.app.HarmonicSceneComposition
+import com.simon.harmonichackernews.app.StoriesFeatureHost
+import com.simon.harmonichackernews.app.createStoriesFeatureStore
+import com.simon.harmonichackernews.navigation.EditorDestination
+import com.simon.harmonichackernews.navigation.EditorType
+import com.simon.harmonichackernews.navigation.MainDestination
+import com.simon.harmonichackernews.navigation.MainNavigationSnapshot
+import com.simon.harmonichackernews.ui.feed.FeedReaderShell
+import com.simon.harmonichackernews.platform.ExternalLinkRequest
+import com.simon.harmonichackernews.platform.PresentationCopy
+import com.simon.harmonichackernews.network.CommentThreadSource
+import com.simon.harmonichackernews.presentation.CommentsPreloadCoordinator
+import com.simon.harmonichackernews.presentation.StoriesPlatformEffect
+import com.simon.harmonichackernews.presentation.StoriesFeatureEffect
+import com.simon.harmonichackernews.presentation.WebContentPolicy
+import com.simon.harmonichackernews.presentation.WebPreloadEnvironment
+import com.simon.harmonichackernews.settings.AppLaunchDialog
+import com.simon.harmonichackernews.ui.HarmonicUiDependencies
+import com.simon.harmonichackernews.ui.ProvideHarmonicUiDependencies
+import com.simon.harmonichackernews.ui.common.harmonicFilterButtonColors
+import com.simon.harmonichackernews.ui.comments.CommentsScreenController
+import com.simon.harmonichackernews.ui.comments.EmptyCommentsScreen
+import com.simon.harmonichackernews.ui.debug.CoulombGasScreen
+import com.simon.harmonichackernews.ui.navigation.RegisterDestinationController
+import com.simon.harmonichackernews.ui.navigation.RetainedDestinationControllers
+import com.simon.harmonichackernews.ui.navigation.HarmonicAppRoot
+import com.simon.harmonichackernews.navigation.MainStoryRequest
+import com.simon.harmonichackernews.ui.navigation.MainNavigationScene
+import com.simon.harmonichackernews.ui.navigation.mainNavigationScenePlan
+import com.simon.harmonichackernews.ui.settings.SettingsListScreen
+import com.simon.harmonichackernews.ui.settings.PortableWelcomeScreen
+import com.simon.harmonichackernews.ui.settings.SettingsSection
+import com.simon.harmonichackernews.ui.settings.SettingsNavigationShell
+import com.simon.harmonichackernews.ui.settings.SettingsSearchCapabilities
+import com.simon.harmonichackernews.ui.settings.SettingsNavigationStore
+import com.simon.harmonichackernews.ui.settings.handleSettingsBack
+import com.simon.harmonichackernews.ui.settings.rememberSettingsNavigationStore
+import com.simon.harmonichackernews.ui.stories.StoriesRoute
+import com.simon.harmonichackernews.ui.stories.StoriesScreenController
+import com.simon.harmonichackernews.ui.stories.StoriesFeatureListener
+import com.simon.harmonichackernews.ui.stories.StoriesPlatformPresentation
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import com.simon.harmonichackernews.ui.theme.HarmonicThemeCatalog
+import java.awt.Taskbar
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
+import kotlinx.coroutines.delay
+import androidx.navigationevent.NavigationEventInfo
+import androidx.navigationevent.compose.NavigationBackHandler
+import androidx.navigationevent.compose.rememberNavigationEventState
+
+internal val desktopAppIconImage: BufferedImage? by lazy(::loadDesktopAppIcon)
+
+fun main() {
+    val trainingRun = System.getProperty("compose.aot.training-run") == "true"
+    System.setProperty("apple.awt.application.name", "Pulse Feed")
+    val desktopAppIcon = desktopAppIconImage
+    installTaskbarIcon(desktopAppIcon)
+    val connectivity = if (trainingRun) null else DesktopConnectivityService()
+    val bootstrap = try {
+        val metadata = DesktopRuntimeMetadata.load()
+        if (trainingRun) {
+            // Packaging must not read the user's credentials or modify their settings and caches.
+            DesktopHarmonicAppBootstrap.inMemory("Pulse-Feed-AppCDS-Training")
+        } else DesktopHarmonicAppBootstrap.production(
+            userAgent = "Pulse-Feed-Desktop/${metadata.versionName}",
+            metadata = metadata,
+            connectivity = checkNotNull(connectivity),
+        )
+    } catch (error: Exception) {
+        connectivity?.close()
+        if (trainingRun) throw error
+        showDesktopStartupFailure(desktopAppIcon, error)
+        return
+    }
+    val sceneOwner = HarmonicSceneOwner(bootstrap.app)
+    try {
+        desktopApplication {
+            if (trainingRun) {
+                LaunchedEffect(Unit) {
+                    // Exercise real Compose layouts and fonts, then let the JVM write its archive.
+                    delay(5_000L)
+                    exitApplication()
+                }
+            }
+            val windowIcon = remember(desktopAppIcon) { desktopAppIcon?.toPainter() }
+            val navigation by sceneOwner.scene.navigation.state.collectAsState()
+            var storiesController by remember { mutableStateOf<StoriesScreenController?>(null) }
+            val commentsControllers = remember { RetainedDestinationControllers<CommentsScreenController>() }
+            val commentsController = commentsControllers[
+                navigation.storyRequest?.serial.takeIf { navigation.currentDestination == MainDestination.STORY }
+            ]
+            val settingsControllers = remember { RetainedDestinationControllers<SettingsNavigationStore>() }
+            val settingsNavigation = settingsControllers[navigation.settingsRequest?.serial]
+            var editorBackRequestVersion by remember { mutableIntStateOf(0) }
+            val windowState = rememberWindowState(width = 1180.dp, height = 840.dp)
+            Window(
+                onCloseRequest = ::exitApplication,
+                title = "Pulse Feed",
+                icon = windowIcon,
+                state = windowState,
+                onKeyEvent = { event ->
+                    when {
+                        event.type != KeyEventType.KeyDown -> false
+                        event.key == Key.Comma && (event.isMetaPressed || event.isCtrlPressed) -> {
+                            sceneOwner.scene.navigation.openSettings(null)
+                            true
+                        }
+                        event.key == Key.W && (event.isMetaPressed || event.isCtrlPressed) -> {
+                            exitApplication()
+                            true
+                        }
+                        else -> false
+                    }
+                },
+            ) {
+                CompositionLocalProvider(LocalViewModelStoreOwner provides sceneOwner) {
+                    // Use the same dispatcher as Compose dialogs so the topmost modal handles
+                    // Escape before screen navigation. Window.onKeyEvent bypasses that ordering.
+                    NavigationBackHandler(rememberNavigationEventState(NavigationEventInfo.None)) {
+                        handleDesktopBack(
+                            navigation,
+                            sceneOwner.scene,
+                            storiesController,
+                            commentsController,
+                            settingsNavigation,
+                            onEditorBackRequested = { editorBackRequestVersion++ },
+                        )
+                    }
+                    // Set the native properties before the window's first visible frame.
+                    DisposableEffect(window, bootstrap.app.articleCategories) {
+                        val runtime = bootstrap.app.articleCategories
+                        val listener = object : WindowAdapter() {
+                            override fun windowGainedFocus(event: WindowEvent) { runtime.setForeground(true) }
+                            override fun windowLostFocus(event: WindowEvent) { runtime.setForeground(false) }
+                        }
+                        runtime.setForeground(window.isFocused)
+                        window.addWindowFocusListener(listener)
+                        onDispose { window.removeWindowFocusListener(listener); runtime.setForeground(false) }
+                    }
+                    DisposableEffect(window) {
+                        val releaseTitleBar = DesktopWindowAppearance.configureTitleBar(window)
+                        onDispose { releaseTitleBar() }
+                    }
+                    val fontSettings by bootstrap.app.settings.updates.collectAsState(bootstrap.app.settings.snapshot())
+                    val selection by bootstrap.app.appearance.selections.collectAsState(
+                        initial = bootstrap.app.appearance.selection(),
+                    )
+                    val palette = remember(selection) {
+                        HarmonicThemeCatalog.scheme(selection.colorScheme, selection.dark, selection.colorStyle)
+                    }
+                    LaunchedEffect(window, selection.dark, palette.colorScheme.pageBackground) {
+                        DesktopWindowAppearance.apply(
+                            window = window,
+                            dark = selection.dark,
+                            backgroundArgb = palette.colorScheme.pageBackground.toArgb(),
+                        )
+                    }
+                    LaunchedEffect(bootstrap.app.launchState) {
+                        if (trainingRun) return@LaunchedEffect
+                        when (
+                            bootstrap.app.launchState.consumeLaunchDialog(
+                                currentVersion = bootstrap.app.metadata.versionCode,
+                                showChangelog = bootstrap.app.userSettings.general.showChangelog,
+                            )
+                        ) {
+                            AppLaunchDialog.WELCOME -> Unit
+                            AppLaunchDialog.CHANGELOG -> sceneOwner.scene.navigation.showChangelogDialog()
+                            AppLaunchDialog.NONE -> Unit
+                        }
+                    }
+
+                    ProvideHarmonicUiDependencies(
+                        HarmonicUiDependencies(bootstrap.app, sceneOwner.scene),
+                    ) {
+                        HarmonicTheme(palette.colorScheme, palette.dark, appearance = fontSettings.appearance) {
+                            Surface(
+                                modifier = Modifier.fillMaxSize().pointerHoverIcon(PointerIcon.Default),
+                                color = palette.colorScheme.pageBackground,
+                            ) {
+                                // Screens reserve the native controls/drag area individually so
+                                // the welcome background can extend behind the title bar.
+                                val titleBarInset = if (
+                                    DesktopWindowAppearance.usesIntegratedTitleBar &&
+                                    windowState.placement != WindowPlacement.Fullscreen
+                                ) DesktopWindowAppearance.integratedTitleBarHeight.dp else 0.dp
+                                Box(Modifier.fillMaxSize()) {
+                                    DesktopAppContent(
+                                        app = bootstrap.app,
+                                        scene = sceneOwner.scene,
+                                        storiesController = storiesController,
+                                        commentsController = commentsController,
+                                        editorBackRequestVersion = editorBackRequestVersion,
+                                        onStoriesControllerChanged = { storiesController = it },
+                                        commentsControllers = commentsControllers,
+                                        settingsControllers = settingsControllers,
+                                        titleBarInset = titleBarInset,
+                                    )
+                                    if (DesktopWindowAppearance.isWindows && titleBarInset > 0.dp) {
+                                        DesktopWindowsTitleBar(window, windowIcon)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } finally {
+        sceneOwner.close()
+        bootstrap.close()
+        connectivity?.close()
+    }
+}
+
+private fun showDesktopStartupFailure(icon: BufferedImage?, error: Exception) {
+    System.err.println("Harmonic could not initialize its desktop storage.")
+    error.printStackTrace(System.err)
+    desktopApplication {
+        val windowIcon = remember(icon) { icon?.toPainter() }
+        Window(
+            onCloseRequest = ::exitApplication,
+            title = "Pulse Feed – Startup error",
+            icon = windowIcon,
+            state = WindowState(width = 620.dp, height = 260.dp),
+        ) {
+            MaterialTheme {
+                Surface(Modifier.fillMaxSize().pointerHoverIcon(PointerIcon.Default)) {
+                    Box(Modifier.padding(24.dp)) {
+                        Text(
+                            "Harmonic could not open its settings or data folder. " +
+                                "Check that the folder is accessible, then restart the app.\n\n" +
+                                (error.message ?: error::class.simpleName.orEmpty()),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun loadDesktopAppIcon(): BufferedImage? = runCatching {
+    val osName = System.getProperty("os.name")
+    val resourceName = when {
+        osName.startsWith("Mac", ignoreCase = true) -> "pulsefeed-app-icon-macos.png"
+        osName.startsWith("Windows", ignoreCase = true) -> "pulsefeed-app-icon-windows.png"
+        else -> "pulsefeed-app-icon.png"
+    }
+    Thread.currentThread().contextClassLoader
+        .getResourceAsStream(resourceName)
+        ?.use(ImageIO::read)
+}.getOrNull()
+
+private fun installTaskbarIcon(icon: BufferedImage?) {
+    if (icon == null || !Taskbar.isTaskbarSupported()) return
+    runCatching {
+        Taskbar.getTaskbar().takeIf { it.isSupported(Taskbar.Feature.ICON_IMAGE) }?.iconImage = icon
+    }
+}
+
+internal fun handleDesktopBack(
+    navigation: MainNavigationSnapshot,
+    scene: HarmonicSceneComposition,
+    storiesController: StoriesScreenController?,
+    commentsController: CommentsScreenController?,
+    settingsNavigation: SettingsNavigationStore?,
+    onEditorBackRequested: () -> Unit,
+): Boolean {
+    when {
+        navigation.failureRequest != null -> scene.navigation.dismissFailureDetailDialog()
+        navigation.userRequest != null -> scene.navigation.dismissUserDialog()
+        navigation.captchaRequest != null -> navigation.captchaRequest?.let { scene.captchaRequests.cancel(it.serial) }
+        navigation.loginDialogVisible -> scene.navigation.dismissLoginDialog()
+        navigation.cacheStoriesDialogVisible -> scene.navigation.dismissCacheStoriesDialog()
+        navigation.changelogDialogVisible -> scene.navigation.dismissChangelogDialog()
+        navigation.currentDestination == MainDestination.WELCOME -> scene.closeWelcome()
+        navigation.coulombGasVisible -> scene.navigation.closeCoulombGas()
+        navigation.currentDestination == MainDestination.EDITOR -> onEditorBackRequested()
+        navigation.currentDestination == MainDestination.SUBMISSIONS -> scene.navigation.closeSubmissions()
+        navigation.currentDestination == MainDestination.SETTINGS -> {
+            handleSettingsBack(settingsNavigation, scene.navigation::closeSettings)
+        }
+        commentsController?.isHeaderMenuShowing() == true ->
+            commentsController.requestDismissHeaderMenu()
+        commentsController?.isLinkPreviewOverlayShowing() == true ->
+            commentsController.requestDismissLinkPreview()
+        commentsController?.isCommentActionOverlayShowing() == true ->
+            commentsController.requestDismissCommentActions()
+        commentsController?.searchDialogVisible == true -> commentsController.dismissCommentSearch()
+        storiesController?.isHeaderMenuShowing() == true ->
+            storiesController.requestDismissHeaderMenu()
+        commentsController?.isWebsiteVisible() == true -> commentsController.requestExpandSheet()
+        storiesController?.isStoryPreviewShowing() == true ->
+            storiesController.requestDismissStoryPreview()
+        navigation.currentDestination == MainDestination.STORY -> scene.navigation.detailRemovedFromBackStack()
+        storiesController?.searching == true -> storiesController.finishSearchBack()
+        else -> return false
+    }
+    return true
+}
+
+@OptIn(ExperimentalMaterial3AdaptiveApi::class)
+@Composable
+private fun DesktopAppContent(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    storiesController: StoriesScreenController?,
+    commentsController: CommentsScreenController?,
+    editorBackRequestVersion: Int,
+    onStoriesControllerChanged: (StoriesScreenController?) -> Unit,
+    commentsControllers: RetainedDestinationControllers<CommentsScreenController>,
+    settingsControllers: RetainedDestinationControllers<SettingsNavigationStore>,
+    titleBarInset: Dp,
+) {
+    val navigation by scene.navigation.state.collectAsState()
+    val storyDestinationForeground = navigation.currentDestination == MainDestination.STORY
+    var destinationTransitionSettled by remember {
+        mutableStateOf(storyDestinationForeground)
+    }
+    LaunchedEffect(storyDestinationForeground) {
+        if (!storyDestinationForeground) {
+            destinationTransitionSettled = false
+        } else if (!destinationTransitionSettled) {
+            delay(DesktopDestinationTransitionDurationMillis)
+            destinationTransitionSettled = true
+        }
+    }
+    val composeOverlayVisible = navigation.changelogDialogVisible ||
+        navigation.cacheStoriesDialogVisible ||
+        navigation.loginDialogVisible ||
+        navigation.captchaRequest != null ||
+        navigation.userRequest != null ||
+        navigation.failureRequest != null ||
+        storiesController?.isHeaderMenuShowing() == true ||
+        storiesController?.frontDatePickerRequest != null ||
+        storiesController?.newStoriesFilterDialogVisible == true ||
+        storiesController?.isStoryPreviewShowing() == true ||
+        commentsController?.isHeaderMenuShowing() == true ||
+        commentsController?.isLinkPreviewOverlayShowing() == true ||
+        commentsController?.isCommentActionOverlayShowing() == true ||
+        commentsController?.searchDialogVisible == true
+    var overlayTransitionSettled by remember { mutableStateOf(!composeOverlayVisible) }
+    LaunchedEffect(composeOverlayVisible) {
+        if (composeOverlayVisible) {
+            overlayTransitionSettled = false
+        } else if (!overlayTransitionSettled) {
+            delay(DesktopOverlayExitDurationMillis)
+            overlayTransitionSettled = true
+        }
+    }
+    val webViewForegroundAllowed = storyDestinationForeground &&
+        destinationTransitionSettled &&
+        !composeOverlayVisible &&
+        overlayTransitionSettled
+    val adaptiveInfo = currentWindowAdaptiveInfoV2()
+    val mainDirective = remember(adaptiveInfo) {
+        calculatePaneScaffoldDirective(adaptiveInfo).copy(
+            horizontalPartitionSpacerSize = 16.dp,
+        )
+    }
+    val isTwoPane = mainDirective.maxHorizontalPartitions > 1
+    val currentStoriesContent by rememberUpdatedState<@Composable () -> Unit> {
+        FeedReaderShell(
+            store = app.feedSubscriptions,
+            syncCoordinator = app.feedSync,
+            onOpenExternalLink = { url ->
+                scene.links.openExternal(ExternalLinkRequest(url))
+            },
+            articleFetcher = app.feedArticleFetcher,
+            subscribeRequests = app.feedSubscribeRequests,
+            refreshRuntime = app.feedRefresh,
+            openRequests = app.feedOpenRequests,
+            isBlockedHost = { host -> app.webContent.adBlocklist.contains(host) },
+        )
+    }
+    val retainedStoriesContent = remember { movableContentOf { currentStoriesContent() } }
+    val renderComments: @Composable (MainStoryRequest, Boolean) -> Unit = { request, showNavigation ->
+        DesktopInsetContent(if (showNavigation) titleBarInset else 0.dp) {
+            DesktopCommentsContent(
+                app = app, scene = scene, request = request,
+                showNavigation = showNavigation,
+                webViewForegroundAllowed = webViewForegroundAllowed,
+                onClose = scene.navigation::detailRemovedFromBackStack,
+                controllers = commentsControllers,
+            )
+        }
+    }
+    HarmonicAppRoot(
+        plan = mainNavigationScenePlan(navigation, isTwoPane),
+        linkPreview = commentsController
+            ?.takeIf {
+                navigation.currentDestination == MainDestination.STORY &&
+                    it.isLinkPreviewOverlayShowing() && !it.searchDialogVisible
+            }
+            ?.let { controller ->
+                { DesktopInsetContent(titleBarInset) { DesktopCommentLinkPreview(app, scene, controller) } }
+            },
+        stories = { detail, paneComments ->
+            DesktopInsetContent(titleBarInset) {
+                val stories = retainedStoriesContent
+                if (isTwoPane) {
+                    MainNavigationScene(
+                        storyRequest = detail,
+                        directive = mainDirective,
+                        paneProportion = 0.4f,
+                        onBack = scene.navigation::detailRemovedFromBackStack,
+                        stories = stories,
+                        emptyDetail = { EmptyCommentsScreen() },
+                        animateDetailVisibilityChanges = true,
+                        comments = paneComments,
+                    )
+                } else {
+                    stories()
+                }
+            }
+        },
+        comments = renderComments,
+        settings = { request ->
+            DesktopInsetContent(titleBarInset) {
+                DesktopSettingsShell(
+                    focusHideComments = request.initialSectionRoute ==
+                        com.simon.harmonichackernews.ui.settings.HideCommentsSettingsRoute,
+                    app = app,
+                    scene = scene,
+                    requestSerial = request.serial,
+                    controllers = settingsControllers,
+                    initialSection = SettingsSection.fromRoute(
+                        request.initialSectionRoute.orEmpty(),
+                    ),
+                )
+            }
+        },
+        submissions = { request, detail, paneComments ->
+            DesktopInsetContent(titleBarInset) {
+                if (isTwoPane) {
+                    MainNavigationScene(
+                        storyRequest = detail, directive = mainDirective, paneProportion = 0.4f,
+                        onBack = scene.navigation::detailRemovedFromBackStack,
+                        stories = { DesktopSubmissionsContent(app, scene, request, isSplitLayout = true) },
+                        emptyDetail = { EmptyCommentsScreen() },
+                        comments = paneComments,
+                    )
+                } else {
+                    DesktopSubmissionsContent(app, scene, request)
+                }
+            }
+        },
+        editor = { request ->
+            DesktopInsetContent(titleBarInset) {
+                DesktopEditorContent(
+                    app = app, scene = scene, request = request,
+                    backRequestVersion = editorBackRequestVersion,
+                )
+            }
+        },
+        immersive = { DesktopInsetContent(titleBarInset) { CoulombGasScreen() } },
+        welcome = { request ->
+            PortableWelcomeScreen(
+                app, rememberDesktopAppIconPainter(), scene::closeWelcome, request.styleChooser,
+                contentWindowInsets = WindowInsets(top = titleBarInset),
+            )
+        },
+        foreground = {
+            DesktopInsetContent(titleBarInset) {
+                DesktopAppForeground(app, scene, navigation, storiesController)
+            }
+        },
+    )
+}
+
+@Composable
+private fun DesktopInsetContent(
+    titleBarInset: Dp,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    Box(Modifier.fillMaxSize().padding(top = titleBarInset).clipToBounds(), content = content)
+}
+
+private const val DesktopDestinationTransitionDurationMillis = 450L
+private const val DesktopOverlayExitDurationMillis = 160L
+@Composable
+private fun DesktopWindowsTitleBar(window: java.awt.Window, icon: androidx.compose.ui.graphics.painter.Painter?) {
+    var active by remember(window) { mutableStateOf(window.isFocused) }
+    DisposableEffect(window) {
+        val listener = object : WindowAdapter() {
+            override fun windowGainedFocus(event: WindowEvent) { active = true }
+            override fun windowLostFocus(event: WindowEvent) { active = false }
+        }
+        window.addWindowFocusListener(listener)
+        onDispose { window.removeWindowFocusListener(listener) }
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .height(DesktopWindowAppearance.integratedTitleBarHeight.dp)
+            .padding(start = 16.dp, end = DesktopWindowAppearance.windowsCaptionControlsWidth.dp + 16.dp)
+            .alpha(if (active) 1f else 0.55f),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (icon != null) Image(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+        Text(
+            text = "Harmonic",
+            style = MaterialTheme.typography.labelMedium,
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun DesktopStoriesContent(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    isSplitLayout: Boolean,
+    onControllerChanged: (StoriesScreenController?) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val appSettings by app.settings.updates.collectAsState(app.settings.snapshot())
+    val latestAppSettings by rememberUpdatedState(appSettings)
+    val unmetered by app.platform.connectivity.unmeteredChanges.collectAsState(false)
+    val online by app.platform.connectivity.onlineChanges.collectAsState(true)
+    val preloadCoordinator = remember(app, scope) {
+        CommentsPreloadCoordinator(
+            preloads = app.commentsPreloads,
+            loadFilteredUsers = { app.contentFilters.load().users },
+            preloadAllowed = {
+                val comments = latestAppSettings.comments
+                WebContentPolicy.shouldPreload(
+                    comments.preloadCommentsMode,
+                    comments.preloadCommentsMinimumBattery,
+                    WebPreloadEnvironment(
+                        unmeteredConnection = app.platform.connectivity.isUnmetered(),
+                        batteryPercent = app.platform.battery.batteryPercent(),
+                    ),
+                )
+            },
+            preloadSource = {
+                if (latestAppSettings.reading.useAlgoliaApi) {
+                    CommentThreadSource.ALGOLIA
+                } else {
+                    CommentThreadSource.OFFICIAL
+                }
+            },
+            scope = scope,
+        )
+    }
+    val currentSplitLayout by rememberUpdatedState(isSplitLayout)
+    val density = LocalDensity.current
+    val defaultStoryHeightPx = with(density) { 96.dp.roundToPx() }
+    val contentInsetStartPx = with(density) {
+        if (isSplitLayout) DesktopWidePaneHorizontalPadding.roundToPx() else 0
+    }
+    val store = remember(app, scene, scope) {
+        app.createStoriesFeatureStore(
+            StoriesFeatureHost(
+                scope = scope,
+                sessionState = scene.sessions.stories,
+                platform = app.storiesPlatformDependencies(),
+                userSettings = app.userSettings,
+                captchaResponder = scene.captchaRequests::awaitResponse,
+            ),
+        )
+    }
+    val controller = remember(store) {
+        lateinit var created: StoriesScreenController
+        val callbacks = object : StoriesFeatureListener.PlatformCallbacks {
+            override fun onSearchStateChanged(searching: Boolean) {
+                created.endPredictiveBack()
+            }
+
+            override fun showFrontDatePicker() {
+                val state = store.state.value
+                created.showFrontDatePicker(
+                    state.frontDateSelectedMillis,
+                    state.frontDateEarliestMillis,
+                    state.frontDateLatestMillis,
+                )
+            }
+
+            override fun onStoryPreviewVisibilityChanged(showing: Boolean) = Unit
+            override fun isSplitLayout(): Boolean = currentSplitLayout
+        }
+        created = StoriesScreenController.create(
+            revealedStoryIds = scene.sessions.stories.revealedStoryIds,
+            defaultStoryHeightPx = defaultStoryHeightPx,
+            savedItemState = store.savedItemState,
+            listener = StoriesFeatureListener(store, callbacks),
+        )
+        created
+    }
+    val state by store.state.collectAsState()
+    val filterColors = harmonicFilterButtonColors()
+
+    SideEffect { onControllerChanged(controller) }
+    DisposableEffect(store) {
+        store.start()
+        store.onStart()
+        onDispose {
+            onControllerChanged(null)
+            store.onStop()
+            store.close()
+            preloadCoordinator.dispose()
+        }
+    }
+    LaunchedEffect(
+        preloadCoordinator,
+        appSettings.comments.preloadCommentsMode,
+        appSettings.comments.preloadCommentsMinimumBattery,
+        appSettings.reading.useAlgoliaApi,
+        unmetered,
+        online,
+    ) {
+        preloadCoordinator.setEnabled(
+            appSettings.comments.preloadCommentsFromStories,
+        )
+    }
+    LaunchedEffect(state, controller, contentInsetStartPx) {
+        val lastUpdatedText = state.lastUpdatedMillis?.let { millis ->
+            PresentationCopy.lastUpdated(app.platform.timeFormatting.time(millis))
+        }
+        controller.updateContent(
+            state,
+            StoriesPlatformPresentation(
+                lastUpdatedText,
+                contentInsetStartPx = contentInsetStartPx,
+            ),
+        )
+    }
+    LaunchedEffect(store, controller, scene) {
+        store.effects.collect { effect ->
+            when (effect) {
+                is StoriesFeatureEffect.OpenStory -> scene.navigation.openStory(effect.destination)
+                is StoriesFeatureEffect.OpenExternalLink ->
+                    scene.links.openExternal(ExternalLinkRequest(effect.url))
+                is StoriesFeatureEffect.Platform -> when (val platform = effect.effect) {
+                    StoriesPlatformEffect.OpenSettings -> scene.navigation.openSettings(null)
+                    StoriesPlatformEffect.RequestLogin -> scene.navigation.showLoginDialog()
+                    is StoriesPlatformEffect.OpenProfile ->
+                        scene.navigation.showUserDialog(platform.userName)
+                    StoriesPlatformEffect.ShowCacheDialog ->
+                        scene.navigation.showCacheStoriesDialog()
+                    StoriesPlatformEffect.OpenSubmitEditor ->
+                        scene.navigation.openEditor(EditorDestination(EditorType.POST))
+                }
+                is StoriesFeatureEffect.StoryChanged ->
+                    effect.storyId?.let(controller::invalidateStory)
+                StoriesFeatureEffect.LoginRequired -> scene.navigation.showLoginDialog()
+                is StoriesFeatureEffect.UserMessage -> scene.userMessages.show(
+                    effect.message, actionLabel = effect.actionLabel, onAction = effect.onAction,
+                )
+                is StoriesFeatureEffect.SavedActionFailed -> {
+                    if (effect.presentation.showDetails) {
+                        scene.navigation.showFailureDetailDialog(
+                            effect.presentation.failureSummary,
+                            effect.presentation.failureDetail,
+                            null,
+                        )
+                    } else {
+                        scene.userMessages.show(effect.presentation.message)
+                    }
+                }
+            }
+        }
+    }
+
+    // Navigation assigns focus within its scene after the window root is composed.
+    // Keep the neutral target inside the retained stories scene so the header isn't selected.
+    val initialFocus = remember { FocusRequester() }
+    LaunchedEffect(initialFocus) { initialFocus.requestFocus() }
+    Box(Modifier.fillMaxSize().focusRequester(initialFocus).focusable()) {
+        StoriesRoute(
+            controller = controller,
+            tintStore = app.storyResourceTints,
+            filterColors = filterColors,
+            pullToRefreshEnabled = false,
+            showRefreshMenuItem = true,
+            onVisibleStoriesChanged = preloadCoordinator::updateVisibleStories,
+        )
+        if (controller.isStoryPreviewShowing()) {
+            DesktopStoryPreviewOverlay(app, controller)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3AdaptiveApi::class)
+@Composable
+private fun DesktopSettingsShell(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    initialSection: SettingsSection?,
+    requestSerial: Int,
+    controllers: RetainedDestinationControllers<SettingsNavigationStore>,
+    focusHideComments: Boolean = false,
+) {
+    val adaptiveInfo = currentWindowAdaptiveInfoV2()
+    val settingsAccountState by app.platform.accounts.accountState.collectAsState()
+    val directive = remember(adaptiveInfo) { calculatePaneScaffoldDirective(adaptiveInfo) }
+    val isTwoPane = directive.maxHorizontalPartitions > 1
+    val navigation = rememberSettingsNavigationStore(
+        initialSection = initialSection,
+        twoPane = isTwoPane,
+        focusHideComments = focusHideComments,
+    )
+    RegisterDestinationController(controllers, requestSerial, navigation)
+
+    // Compose Desktop can leave LookaheadDelegate alignment-line ownership stale when a
+    // Navigation 3 list/detail scene changes its pane count during a live resize. Recreate only
+    // the scene machinery at the breakpoint. Destination ownership stays inside the shared
+    // shell and outside its reset boundary, preserving open dialogs and drafts as well.
+    val scrollHistory = navigation.scrollHistory
+    val density = LocalDensity.current
+    val scrollLayout = Triple(isTwoPane, density.density, density.fontScale)
+    SettingsNavigationShell(
+        navigation = navigation,
+        directive = directive,
+        supportsTwoPane = true,
+        sceneReflowKey = isTwoPane,
+        isFoldable = false,
+        tabletPaneHorizontalPadding = if (isTwoPane) {
+            DesktopWidePaneHorizontalPadding
+        } else {
+            0.dp
+        },
+        onBackFromSettings = scene.navigation::closeSettings,
+        onSectionChanged = { scene.navigation.updateSettingsSection(it.route) },
+        searchCapabilities = SettingsSearchCapabilities(
+            webLinks = desktopWebLinksSettingsCapabilities(),
+            notifications = false, systemSettings = false, volumeNavigation = false,
+            transparentStatusBar = false, twoPane = true,
+        ),
+        renderList = { selectedSection, showSelection, onBack, onSectionSelected ->
+            SettingsScrollPage(scrollHistory, scrollLayout, "settings-list") {
+                SettingsListScreen(
+                    selectedSection = selectedSection,
+                    showSelection = showSelection,
+                    showDebugSettings = app.metadata.debugSettingsEnabled,
+                    loggedIn = settingsAccountState.accountOrNull != null,
+                    showNotifications = false,
+                    onBack = onBack,
+                    onSectionSelected = onSectionSelected,
+                )
+            }
+        },
+        renderDetail = { section, singlePane, onBack, onNavigate ->
+            SettingsScrollPage(scrollHistory, scrollLayout, section.route) {
+                DesktopSettingsDetail(
+                    section,
+                    app,
+                    scene,
+                    singlePane,
+                    onBack,
+                    onNavigate,
+                )
+            }
+        },
+    )
+}
+
+internal val DesktopWidePaneHorizontalPadding = 24.dp

@@ -1,0 +1,337 @@
+package com.simon.harmonichackernews.ui.widget
+
+import com.simon.harmonichackernews.ui.theme.onFloatingContainer
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.dropShadow
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.shadow.Shadow
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import com.simon.harmonichackernews.StoryType
+import com.simon.harmonichackernews.network.WidgetConfiguration
+import com.simon.harmonichackernews.resources.*
+import com.simon.harmonichackernews.settings.DisplayStyle
+import com.simon.harmonichackernews.settings.PaletteTintPreferences
+import com.simon.harmonichackernews.settings.StoryPreviewMode
+import com.simon.harmonichackernews.settings.SurfaceEffectMode
+import com.simon.harmonichackernews.settings.SurfaceEffectPreferences
+import com.simon.harmonichackernews.ui.content.SettingsStoryPreviewModel
+import com.simon.harmonichackernews.ui.stories.StoryTypeDropdownMenu
+import com.simon.harmonichackernews.ui.settings.*
+import com.simon.harmonichackernews.ui.common.HazeGlassAppearance
+import com.simon.harmonichackernews.ui.common.LocalHazeGlassEnabled
+import com.simon.harmonichackernews.ui.common.LocalHazePreferences
+import com.simon.harmonichackernews.ui.common.sharedHazeBackground
+import com.simon.harmonichackernews.ui.common.sharedHazeSource
+import dev.chrisbanes.haze.rememberHazeState
+import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.stringResource
+import kotlin.math.roundToInt
+import kotlin.math.min
+
+@Composable
+fun WidgetConfigScreen(
+    initialConfiguration: WidgetConfiguration,
+    frontpages: List<StoryType>,
+    onConfirm: (WidgetConfiguration) -> Unit,
+    paletteTintConfigKey: String = PaletteTintPreferences.DEFAULT,
+    headlineFontFamily: FontFamily? = null,
+    headlineFontLabel: String = "Device headline",
+) {
+    val feeds = frontpages.ifEmpty { listOf(StoryType.TOP_STORIES) }
+    var feed by rememberSaveable { mutableStateOf(initialConfiguration.storyType.takeIf { it in feeds } ?: feeds.first()) }
+    var count by rememberSaveable { mutableIntStateOf(initialConfiguration.visibleStoryCount) }
+    var image by rememberSaveable { mutableStateOf(initialConfiguration.previewImageMode) }
+    var style by rememberSaveable { mutableStateOf(initialConfiguration.displayStyle) }
+    var tint by rememberSaveable { mutableStateOf(initialConfiguration.tint) }
+    var useHeadlineFont by rememberSaveable { mutableStateOf(initialConfiguration.useHeadlineFont) }
+    var choosingFeed by rememberSaveable { mutableStateOf(false) }
+    val configuration = WidgetConfiguration(feed, feed.label, count, image, style, tint, useHeadlineFont)
+    val fontFamily = if (useHeadlineFont) headlineFontFamily ?: FontFamily.SansSerif else FontFamily.SansSerif
+    val hazeState = rememberHazeState()
+    val buttonShape = RoundedCornerShape(16.dp)
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.pageBackground)) {
+        val pinPreview = maxHeight >= 560.dp
+        val preview: @Composable () -> Unit = {
+            // The launcher cannot render Haze. Keep all sample-widget content under the same
+            // restriction, independently of the screen's glass-styled confirmation button.
+            CompositionLocalProvider(LocalHazeGlassEnabled provides false,
+                LocalHazePreferences provides SurfaceEffectPreferences(mode = SurfaceEffectMode.Solid)) {
+                WidgetConfigurationPreview(configuration, paletteTintConfigKey, fontFamily)
+            }
+        }
+        val pageScroll = rememberScrollState()
+        val settingsScroll = rememberScrollState()
+        Column(
+            Modifier.fillMaxSize().sharedHazeSource(hazeState),
+        ) {
+            Column(
+                Modifier.fillMaxWidth().weight(1f)
+                    .then(if (pinPreview) Modifier else Modifier.verticalScroll(pageScroll)),
+            ) {
+                Box(Modifier.fillMaxWidth()) {
+                    WidgetPreviewBackdrop(Modifier.matchParentSize())
+                    Column(Modifier.align(Alignment.Center).widthIn(max = 600.dp).fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
+                        Text(
+                            text = "Home screen preview",
+                            modifier = Modifier.padding(start = 24.dp, top = 16.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        preview()
+                    }
+                }
+                Column(
+                    Modifier.fillMaxWidth()
+                        .then(if (pinPreview) Modifier.weight(1f) else Modifier)
+                        .background(MaterialTheme.colorScheme.pageBackground)
+                        .then(if (pinPreview) Modifier.verticalScroll(settingsScroll) else Modifier)
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
+                        .padding(bottom = 112.dp),
+                ) {
+                    Column(Modifier.align(Alignment.CenterHorizontally).widthIn(max = 600.dp).fillMaxWidth()) {
+                        SettingsCategory("Content") {
+                            Box {
+                                SettingRow(
+                                    title = "Frontpage", summary = feed.label,
+                                    icon = Res.drawable.ic_library_books,
+                                    onClick = { choosingFeed = true },
+                                )
+                                StoryTypeDropdownMenu(
+                                    expanded = choosingFeed, onDismiss = { choosingFeed = false },
+                                    types = feeds, selectedType = feed,
+                                    onSelected = { feed = it; choosingFeed = false },
+                                )
+                            }
+                            SettingsDivider()
+                            SliderSetting(
+                                title = stringResource(Res.string.widget_config_story_count_label),
+                                valueLabel = count.toString(), value = count.toFloat(),
+                                valueRange = WidgetConfiguration.MIN_STORY_COUNT.toFloat()..WidgetConfiguration.MAX_STORY_COUNT.toFloat(),
+                                steps = WidgetConfiguration.MAX_STORY_COUNT - WidgetConfiguration.MIN_STORY_COUNT - 1,
+                                onValueChange = { count = it.roundToInt() },
+                            )
+                        }
+                        SettingsCategory("Appearance") {
+                            SwitchSettingRow(
+                                title = "Tint", summary = "Uses preview or favicon",
+                                icon = Res.drawable.ic_palette, checked = tint,
+                                onCheckedChange = {
+                                    tint = it
+                                    if (it && style == DisplayStyle.FLAT) style = DisplayStyle.STANDARD
+                                },
+                            )
+                            SettingsDivider()
+                            SegmentedSetting(
+                                title = "Preview image",
+                                options = listOf(StoryPreviewMode.OFF to "Off", StoryPreviewMode.SMALL to "Small", StoryPreviewMode.MEDIUM to "Medium"),
+                                selected = image, onSelected = { image = it },
+                            )
+                            SettingsDivider()
+                            SegmentedSetting(
+                                title = "Display style",
+                                options = listOf(DisplayStyle.FLAT to "Flat", DisplayStyle.STANDARD to "Filled", DisplayStyle.RAISED to "Raised", DisplayStyle.OUTLINED to "Outlined"),
+                                selected = style,
+                                onSelected = { style = it; if (it == DisplayStyle.FLAT) tint = false },
+                            )
+                            if (headlineFontFamily != null) {
+                                SettingsDivider()
+                                SegmentedSetting(
+                                    title = "Font",
+                                    options = listOf(false to "Default", true to headlineFontLabel),
+                                    optionWeights = if (headlineFontLabel.length > 18) mapOf(false to 1f, true to 2f) else emptyMap(),
+                                    selected = useHeadlineFont, onSelected = { useHeadlineFont = it },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ExtendedFloatingActionButton(
+            onClick = { onConfirm(configuration) },
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp)
+                .shadow(if (LocalHazeGlassEnabled.current) 2.dp else 6.dp, buttonShape, clip = false)
+                .sharedHazeBackground(
+                    hazeState = hazeState,
+                    surfaceColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.8f),
+                    shape = buttonShape,
+                    glassAppearance = HazeGlassAppearance.FloatingButton,
+                ),
+            shape = buttonShape,
+            containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onFloatingContainer,
+            elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
+        ) {
+            Icon(painterResource(Res.drawable.ic_check), null)
+            Spacer(Modifier.width(8.dp))
+            Text(stringResource(Res.string.widget_config_confirm))
+        }
+    }
+}
+
+/** A still, welcome-inspired setting for the preview, independent of launcher wallpaper or IPC. */
+@Composable
+private fun WidgetPreviewBackdrop(modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val dark = HarmonicTheme.isDark
+    val base = lerp(colors.surfaceContainerHighest, colors.primaryContainer, .2f)
+    val warm = lerp(colors.primary, Color(0xFFFFAD85), .85f)
+    val blush = lerp(colors.tertiary, Color(0xFFFFB9A5), .8f)
+    Canvas(modifier) {
+        drawRect(base)
+        val extentX = min(size.width * .9f, 400.dp.toPx())
+        val extentY = min(size.height * .8f, 260.dp.toPx())
+        drawRect(Brush.radialGradient(
+            listOf(warm.copy(alpha = if (dark) .12f else .28f), Color.Transparent),
+            center = Offset.Zero, radius = extentX,
+        ))
+        drawRect(Brush.radialGradient(
+            listOf(blush.copy(alpha = if (dark) .1f else .22f), Color.Transparent),
+            center = Offset(size.width, size.height), radius = extentX,
+        ))
+        val dotColor = lerp(base, warm, .45f)
+        drawWelcomeCornerDots(Offset.Zero, extentX, extentY, false, dotColor, dotColor, -1.0, dark)
+        drawWelcomeCornerDots(Offset(size.width, size.height), extentX, extentY, true, dotColor, dotColor, -1.0, dark)
+    }
+}
+
+/** Shared with the Glance renderer, which can only use platform fonts. */
+object WidgetTypography {
+    const val INDEX_SIZE = 12f
+    const val TITLE_SIZE = 14f
+    const val HEADER_SIZE = 18f
+    const val METADATA_SIZE = 11f
+    const val COMMENT_COUNT_SIZE = 12f
+    const val METRIC_COUNT_SIZE = 11f
+}
+
+object WidgetDimensions {
+    val indexWidth = 20.dp
+    val faviconSize = 12.dp
+    // Align the icon with the visible text rather than TextView's asymmetric font padding.
+    val faviconTopPadding = 2.dp
+    val faviconCornerRadius = 2.dp
+    val mediumImageWidth = 120.dp
+    val mediumImageHeight = 72.dp
+    val smallImageWidth = 72.dp
+    val smallImageHeight = 52.dp
+    val mediumNoImageWidth = 64.dp
+    val mediumNoImageHeight = 60.dp
+    val headerTopPadding = 6.dp
+    val headerBottomPadding = 2.dp
+    val listBottomPadding = 6.dp
+    val cardSpacing = 7.dp
+    val titleMetadataSpacing = 2.dp
+    val cardHorizontalMargin = 12.dp
+    const val metricBackgroundAlpha = 0.92f
+    val metricStartPadding = 5.dp
+    val pointsStartPadding = 2.dp
+    val metricEndPadding = 7.dp
+    val metricVerticalPadding = 4.dp
+    val metricIconSize = 13.dp
+}
+
+// A gesture that starts in the sample widget belongs to it, including at either scroll limit.
+private val PreviewScrollBoundary = object : NestedScrollConnection {
+    override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource) = available
+    override suspend fun onPostFling(consumed: Velocity, available: Velocity) = available
+}
+
+private val WidgetPreviewStories = listOf(
+    SettingsStoryPreviewModel.copy(index = "1.", domain = "quantamagazine.org", domainWithoutTopLevel = "quantamagazine"),
+    SettingsStoryPreviewModel.copy(
+        index = "2.", title = "Show HN: An offline-first reading list",
+        domain = "github.com", domainWithoutTopLevel = "github", age = "4h", points = 128,
+        commentCount = 42, previewImageFallback = Res.drawable.github_preview,
+        faviconFallback = Res.drawable.github_favicon, tintFaviconFallback = true,
+    ),
+    SettingsStoryPreviewModel.copy(
+        index = "3.", title = "Ask HN: What have you been building this weekend?",
+        domain = "news.ycombinator.com", domainWithoutTopLevel = "news.ycombinator", age = "5h", points = 76, commentCount = 103,
+        previewImageFallback = null, faviconFallback = Res.drawable.hacker_news_favicon, tintFaviconFallback = false,
+    ),
+    SettingsStoryPreviewModel.copy(
+        index = "4.", title = "A small database that fits in your pocket",
+        domain = "sqlite.org", domainWithoutTopLevel = "sqlite", age = "6h", points = 214, commentCount = 57,
+        previewImageFallback = null, faviconFallback = Res.drawable.ic_public, tintFaviconFallback = true,
+    ),
+    SettingsStoryPreviewModel.copy(
+        index = "5.", title = "New patterns",
+        domain = "science.org", domainWithoutTopLevel = "science", age = "7h", points = 91, commentCount = 24,
+    ),
+)
+
+/** Fixed widget viewport with animated Glance-equivalent rows and an independent scroll boundary. */
+@Composable
+private fun WidgetConfigurationPreview(configuration: WidgetConfiguration, paletteTintConfigKey: String, fontFamily: FontFamily) {
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(24.dp)
+    Column(
+        Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 24.dp)
+            .fillMaxWidth().height(240.dp)
+            // Keep the preview's shadow attached to the card while the landscape page scrolls.
+            // Native elevation shadows depend on the layer's position relative to the window light.
+            .dropShadow(shape, Shadow(
+                radius = 12.dp,
+                color = Color.Black.copy(alpha = .22f),
+                offset = DpOffset(0.dp, 4.dp),
+            ))
+            .border(1.dp, colors.outlineVariant.copy(alpha = .65f), shape)
+            .clip(shape).background(colors.pageBackground),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = WidgetDimensions.headerTopPadding, bottom = WidgetDimensions.headerBottomPadding), verticalAlignment = Alignment.CenterVertically) {
+            Crossfade(configuration.storyType to fontFamily, modifier = Modifier.weight(1f), label = "Widget feed") { (feed, family) ->
+                Text(feed.label, color = colors.onSurface, fontWeight = FontWeight.Bold, fontFamily = family, fontSize = WidgetTypography.HEADER_SIZE.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, style = LocalWidgetTextStyle.current)
+            }
+            Crossfade(fontFamily, label = "Widget status font") { family ->
+                Text("Updated just now", Modifier.padding(start = 8.dp), color = colors.onSurfaceVariant,
+                    fontFamily = family, fontSize = WidgetTypography.METADATA_SIZE.sp, maxLines = 1, style = LocalWidgetTextStyle.current)
+            }
+            Icon(painterResource(Res.drawable.ic_refresh), null, Modifier.size(48.dp).padding(12.dp), tint = colors.onSurface)
+        }
+        LazyColumn(Modifier.fillMaxWidth().weight(1f).nestedScroll(PreviewScrollBoundary)
+            .semantics { contentDescription = "Widget preview" }, contentPadding = PaddingValues(bottom = WidgetDimensions.listBottomPadding)) {
+            items(WidgetPreviewStories, key = { it.index }, contentType = { "widget-story" }) { model ->
+                Crossfade(fontFamily, label = "Widget story font") { family ->
+                    WidgetPreviewStoryRow(model, configuration, family, paletteTintConfigKey)
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,340 @@
+package com.simon.harmonichackernews.data
+
+import com.simon.harmonichackernews.CommentListDiff
+import com.simon.harmonichackernews.cache.ArticleSnapshotService
+import com.simon.harmonichackernews.cache.StoryCacheService
+import com.simon.harmonichackernews.network.AlgoliaCommentsParser
+import com.simon.harmonichackernews.network.AlgoliaCommentsResponse
+import com.simon.harmonichackernews.network.AlgoliaCommentsDisplayReuse
+import com.simon.harmonichackernews.network.KtorHttpClient
+import com.simon.harmonichackernews.network.StableHash
+import com.simon.harmonichackernews.platform.Crc32
+import com.simon.harmonichackernews.platform.KotlinCrc32
+import com.simon.harmonichackernews.presentation.CommentThreadStore
+import com.simon.harmonichackernews.utils.CommentSorter
+import kotlinx.coroutines.test.runTest
+import kotlin.test.*
+
+class PreparedCommentThreadTest {
+    private val parser = AlgoliaCommentsParser()
+    private val raw = """{"id":42,"title":"A title [pdf]","text":"<p>Header &amp; text</p>","children":[
+        {"id":7,"parent_id":42,"author":" Alice ","text":"<p>Hello &amp; <a href='https://example.com/long'>https://example.com/...</a></p>","created_at_i":100,"children":[
+            {"id":9,"parent_id":7,"author":"child","text":"child","created_at_i":300}]},
+        {"id":8,"parent_id":42,"author":"Bob","text":"<p>世界 &lt;tag&gt;</p>","created_at_i":200},
+        {"id":10,"parent_id":42,"text":" null ","children":[{"id":11,"text":"Hidden below deleted parent"}]}
+    ]}"""
+
+    @Test fun directRecordsKeepPermissiveScalarsDeletedBranchesAndDuplicateIds() = runTest {
+        for (text in listOf("null", "123", "true", "{}", "\"<p>Text &amp; more</p>\"")) {
+            for (author in listOf("null", "123", "false", "\" reader \"")) {
+                val response = """{"id":42,"title":17,"children":[
+                    {"id":1,"text":$text,"author":$author,"children":[
+                        {"id":1,"parent_id":1,"author":"child","text":"Nested duplicate ID"}]},
+                    {"id":2,"text":"null","children":[{"id":3,"text":"Hidden"}]},
+                    {"text":"Missing ID is allowed","author":"reader"}
+                ]}"""
+                val prepared = parser.prepare(response)
+                val decoded = assertNotNull(PreparedCommentCodec.decode(PreparedCommentCodec.encode(prepared)))
+                for (filter in listOf(emptySet(), setOf(" READER "))) {
+                    val expected = parser.parse(response, listOf(0, 1), filter)
+                    val actual = decoded.restore(listOf(0, 1), filter)
+                    assertEquals(expected.comments.map { it.toSnapshot() }, actual.comments.map { it.toSnapshot() })
+                    assertEquals(expected.comments.map { it.presentationSnapshot() }, actual.comments.map { it.presentationSnapshot() })
+                    assertEquals(expected.cacheSummary!!.encode(42), actual.cacheSummary!!.encode(42))
+                }
+            }
+        }
+    }
+
+    @Test fun firstDisplayDefersDigestAndPersistenceKeepsNeutralContent() = runTest {
+        val displayParser = AlgoliaCommentsParser(sourceDigest = { error("First display must not hash") })
+        val displayed = displayParser.parseForDisplay(raw, listOf(8, 7), setOf("Alice"))
+        val pending = assertNotNull(displayed.cacheSummary?.preparedThread)
+        assertEquals("", pending.sourceDigest)
+        assertFalse(pending.isCompatible())
+        assertEquals(listOf(8), displayed.comments.map { it.id })
+        for (encoding in PreparedCommentCodec.Encoding.entries) {
+            assertFailsWith<IllegalArgumentException> { PreparedCommentCodec.encode(pending, encoding) }
+        }
+        displayed.comments.single().text = "Presentation changed after parsing"
+
+        val repository = StoryCacheRepository(InMemoryStoryCacheFileStore(), InMemoryStoryCacheMetadataStore())
+        assertTrue(repository.storeStory(42, raw, 1_000, displayed.cacheSummary))
+        val stored = assertNotNull(repository.loadPreparedThread(42))
+        assertEquals(parser.prepare(raw, listOf(8, 7)), stored)
+        assertEquals("", pending.sourceDigest)
+        assertEquals(listOf(8, 7, 9), stored.restore().comments.map { it.id })
+
+        // A second response without a completed digest cannot be mistaken for a cache hit.
+        val updated = displayParser.parseForDisplay(raw.replace("A title", "Updated"), cachedThread = pending)
+        assertEquals("Updated [pdf]", updated.title)
+    }
+
+    @Test fun displayWithPreparedCacheStillHashesAndReusesOnlyMatchingContent() = runTest {
+        val cached = parser.prepare(raw)
+        var hashes = 0
+        val displayParser = AlgoliaCommentsParser(sourceDigest = {
+            hashes++
+            StableHash.sha256Hex(it)
+        })
+        val unchanged = displayParser.parseForDisplay(raw, cachedThread = cached)
+        assertEquals(1, hashes)
+        assertSame(cached, unchanged.cacheSummary?.preparedThread)
+        val changed = raw.replace("A title", "Updated")
+        val updated = displayParser.parseForDisplay(changed, cachedThread = cached)
+        assertEquals(2, hashes)
+        assertEquals(parser.prepare(changed), updated.cacheSummary?.preparedThread)
+    }
+
+    @Test fun restoredContentOnlyBlocksTheExactCaseIdentity() = runTest {
+        val prepared = parser.prepare(raw, listOf(8, 7))
+        for (encoding in PreparedCommentCodec.Encoding.entries) {
+            val decoded = assertNotNull(PreparedCommentCodec.decode(PreparedCommentCodec.encode(prepared, encoding)))
+            assertEquals(listOf(8), decoded.restore(filteredUsers = setOf(" Alice ")).comments.map { it.id })
+            assertEquals(listOf(8, 7, 9), decoded.restore(filteredUsers = setOf("alice")).comments.map { it.id })
+            assertEquals(listOf(8, 7, 9), decoded.restore(filteredUsers = setOf("ALICE")).comments.map { it.id })
+        }
+    }
+
+    @Test fun unchangedResponseReusesPreparedContentWithFreshPresentation() = runTest {
+        val prepared = parser.prepare(raw, listOf(8, 7))
+        assertSame(prepared, parser.prepare(raw, listOf(8, 7), cachedThread = prepared))
+
+        val restored = parser.parsePrepared(raw, listOf(7, 8), setOf("child"), cachedThread = prepared)
+        val reused = assertNotNull(restored.cacheSummary?.preparedThread)
+        assertSame(prepared.comments, reused.comments)
+        assertEquals(listOf(7, 8), reused.rankedIds)
+        assertEquals(listOf(7, 8), restored.comments.map { it.id })
+        assertEquals(listOf(8, 7), prepared.rankedIds)
+
+        restored.comments.first().text = "Changed on screen"
+        val reopened = parser.parsePrepared(raw, listOf(8, 7), cachedThread = prepared)
+        assertEquals(listOf(8, 7, 9), reopened.comments.map { it.id })
+        assertNotEquals("Changed on screen", reopened.comments.first { it.id == 7 }.text)
+    }
+
+    @Test fun displayReuseRequiresTheSameContentRankingAndFiltersAndIsOptIn() = runTest {
+        val ranking = listOf(8, 7)
+        val filters = setOf("child")
+        val prepared = parser.prepare(raw, ranking)
+        val displayed = prepared.restore(ranking, filters)
+        val reuse = AlgoliaCommentsDisplayReuse(displayed, ranking, filters)
+        displayed.comments.first().expanded = false
+        assertSame(displayed, parser.parseForDisplay(raw, ranking, filters, prepared, reuse))
+
+        val otherScreen = parser.parseForDisplay(raw, ranking, filters, prepared)
+        assertNotSame(displayed, otherScreen)
+        assertTrue(otherScreen.comments.first().expanded)
+
+        val reordered = parser.parseForDisplay(raw, listOf(7, 8), filters, prepared, reuse)
+        assertNotSame(displayed, reordered)
+        assertEquals(listOf(7, 8), reordered.comments.map { it.id })
+
+        val unfiltered = parser.parseForDisplay(raw, ranking, emptySet(), prepared, reuse)
+        assertNotSame(displayed, unfiltered)
+        assertEquals(listOf(8, 7, 9), unfiltered.comments.map { it.id })
+
+        val updated = parser.parseForDisplay(raw.replace("Hello", "Updated"), ranking, filters, prepared, reuse)
+        assertNotSame(displayed, updated)
+        assertTrue(updated.comments.first { it.id == 7 }.text.orEmpty().contains("Updated"))
+    }
+
+    @Test fun displayReuseRejectsAnIncompatiblePreparedCache() = runTest {
+        val prepared = parser.prepare(raw, listOf(8, 7))
+        val displayed = prepared.restore()
+        val incompatible = prepared.copy(textPreparationVersion = -1)
+        val staleDisplay = displayed.copy(cacheSummary = incompatible.cacheSummary())
+        val reuse = AlgoliaCommentsDisplayReuse(staleDisplay, listOf(8, 7), emptySet())
+        val result = parser.parseForDisplay(raw, listOf(8, 7), emptySet(), incompatible, reuse)
+        assertNotSame(staleDisplay, result)
+        assertEquals(displayed.comments.map { it.toSnapshot() }, result.comments.map { it.toSnapshot() })
+    }
+
+    @Test fun changedResponseAndIncompatibleCachesAreParsedAgain() = runTest {
+        val prepared = parser.prepare(raw)
+        val changed = raw.replace("A title", "Updated title")
+        val updated = parser.prepare(changed, cachedThread = prepared)
+        assertNotSame(prepared.comments, updated.comments)
+        assertEquals("Updated title [pdf]", updated.story.title)
+        assertEquals(parser.prepare(changed), updated)
+
+        for (invalid in listOf(
+            prepared.copy(schemaVersion = -1),
+            prepared.copy(textPreparationVersion = -1),
+            prepared.copy(comments = prepared.comments.map { it.copy(subtreeEndExclusive = 0) }),
+        )) {
+            val rebuilt = parser.prepare(raw, cachedThread = invalid)
+            assertNotSame(invalid, rebuilt)
+            assertEquals(prepared, rebuilt)
+        }
+    }
+
+    @Test fun bothEncodingsPreserveContentAndCurrentPreferences() = runTest {
+        val prepared = parser.prepare(raw, listOf(8, 7))
+        for (encoding in PreparedCommentCodec.Encoding.entries) {
+            val cached = assertNotNull(PreparedCommentCodec.decode(PreparedCommentCodec.encode(prepared, encoding)))
+            assertEquals(prepared, cached)
+            for (ids in listOf(emptyList(), listOf(8, 7), listOf(7, 7, 8))) {
+                for (blocked in listOf(emptySet(), setOf(" ALICE "), setOf("child"))) {
+                    val expected = parser.parse(raw, ids, blocked)
+                    val actual = cached.restore(ids, blocked)
+                    assertEquals(expected.comments.map { it.toSnapshot() }, actual.comments.map { it.toSnapshot() })
+                    assertEquals(expected.cacheSummary!!.encode(42), actual.cacheSummary!!.encode(42))
+                    for (sorting in listOf(CommentSorter.DEFAULT, CommentSorter.NEWEST_FIRST,
+                        CommentSorter.OLDEST_FIRST, CommentSorter.REPLY_COUNT)) {
+                        for (collapsed in listOf(false, true)) {
+                            fun store(response: AlgoliaCommentsResponse) =
+                                CommentThreadStore().apply {
+                                    val story = Story()
+                                    response.updateStoryInformation(story, 0)
+                                    reset(story)
+                                    replaceParsedComments(story, response.comments, sorting, collapsed)
+                                }
+                            val oldStore = store(parser.parse(raw, ids, blocked))
+                            val newStore = store(cached.restore(ids, blocked))
+                            assertEquals(oldStore.state.value, newStore.state.value)
+                            newStore.setSorting(CommentSorter.DEFAULT)
+                            oldStore.setSorting(CommentSorter.DEFAULT)
+                            assertEquals(oldStore.state.value, newStore.state.value)
+                        }
+                    }
+                }
+            }
+            val first = cached.restore()
+            first.comments.first().text = "Changed by presentation"
+            assertNotEquals(first.comments.first().expandedAnchorText, cached.restore().comments.first().expandedAnchorText)
+            assertEquals(prepared, cached)
+        }
+    }
+
+    @Test fun repositoryUsesItsChecksumAdapterForPreparedWritesAndReads() = runTest {
+        val offsets = mutableListOf<Int>()
+        val checksum = Crc32 { bytes, start ->
+            offsets += start
+            KotlinCrc32.compute(bytes, start)
+        }
+        val files = InMemoryStoryCacheFileStore()
+        val repository = StoryCacheRepository(files, InMemoryStoryCacheMetadataStore(), crc32 = checksum)
+        val parsed = parser.parsePrepared(raw)
+        assertTrue(repository.storeStory(42, raw, 1_000, parsed.cacheSummary))
+        assertEquals(listOf(0), offsets)
+        val prepared = assertNotNull(repository.loadPreparedThread(42))
+        assertEquals(listOf(0, 5), offsets)
+        val stored = assertNotNull(files.read(StoryCacheKeys.PREPARED_NAMESPACE, "42.bin"))
+        assertContentEquals(PreparedCommentCodec.encode(prepared), stored)
+        stored[stored.lastIndex] = (stored.last().toInt() xor 1).toByte()
+        assertTrue(files.write(StoryCacheKeys.PREPARED_NAMESPACE, "42.bin", stored))
+        assertNull(repository.loadPreparedThread(42))
+        assertEquals(listOf(0, 5, 5), offsets)
+    }
+
+    @Test fun rejectsCorruptionVersionsAndInvalidSubtreeBoundaries() = runTest {
+        val prepared = parser.prepare(raw)
+        for (encoding in PreparedCommentCodec.Encoding.entries) {
+            val bytes = PreparedCommentCodec.encode(prepared, encoding)
+            bytes[bytes.lastIndex] = (bytes.last().toInt() xor 1).toByte()
+            assertNull(PreparedCommentCodec.decode(bytes))
+            for (invalid in listOf(
+                prepared.copy(schemaVersion = -1),
+                prepared.copy(textPreparationVersion = -1),
+                prepared.copy(comments = prepared.comments.map { it.copy(subtreeEndExclusive = 0) }),
+            )) assertNull(PreparedCommentCodec.decode(PreparedCommentCodec.encode(invalid, encoding)))
+        }
+    }
+
+    @Test fun emptyThreadsAndPreparedTextUpdatesRemainValid() = runTest {
+        val empty = parser.prepare("""{"id":42,"title":"No comments","children":[]}""")
+        for (encoding in PreparedCommentCodec.Encoding.entries) {
+            assertTrue(assertNotNull(PreparedCommentCodec.decode(PreparedCommentCodec.encode(empty, encoding)))
+                .restore().comments.isEmpty())
+        }
+        val parsed = parser.prepare(raw).restore().comments.first()
+        val existing = Comment().apply { text = "old" }
+        CommentListDiff.updateExistingComment(existing, parsed)
+        assertSame(parsed.expandedAnchorText, existing.expandedAnchorText)
+        existing.text = "new text"
+        assertEquals("new text", existing.expandedAnchorText)
+    }
+
+    @Test fun offlineRebuildAndWarmRestorationDoNotReadRawJsonAgain() = runTest {
+        val files = RecordingFiles()
+        val repository = StoryCacheRepository(files, InMemoryStoryCacheMetadataStore())
+        val service = StoryCacheService(repository,
+            ArticleSnapshotService(KtorHttpClient(client = { error("Offline") }), null), { 0L })
+        val original = parser.parse(raw, listOf(8, 7))
+        assertTrue(repository.storeStory(42, raw, 1_000, original.cacheSummary))
+        val prepared = assertNotNull(service.loadPreparedThread(42))
+        assertEquals(listOf(8, 7), prepared.rankedIds)
+        val rawReads = files.rawReads
+        assertEquals(prepared, service.loadPreparedThread(42))
+        assertEquals(rawReads, files.rawReads)
+        for (invalid in listOf(byteArrayOf(1, 2),
+            PreparedCommentCodec.encode(prepared.copy(schemaVersion = 0)),
+            PreparedCommentCodec.encode(prepared.copy(textPreparationVersion = 0)))) {
+            files.write(StoryCacheKeys.PREPARED_NAMESPACE, "42.bin", invalid)
+            assertEquals(prepared, service.loadPreparedThread(42))
+            assertEquals(raw, repository.loadStoryPayload(42))
+        }
+    }
+
+    @Test fun rawReplacementInvalidatesPreparedAndLifecycleRemovesBoth() = runTest {
+        val files = RecordingFiles()
+        val metadata = InMemoryStoryCacheMetadataStore()
+        val repository = StoryCacheRepository(files, metadata, maximumStories = 1)
+        val parsed = parser.parsePrepared(raw)
+        assertTrue(repository.storeStory(42, raw, 1_000, parsed.cacheSummary))
+        assertNotNull(StoryCacheRepository(files, metadata).loadPreparedThread(42))
+        files.failRemoval = true
+        assertFalse(repository.storeStory(42, raw.replace("A title", "New title"), 2_000))
+        assertEquals(raw, repository.loadStoryPayload(42))
+        assertNotNull(repository.loadPreparedThread(42))
+        files.failRemoval = false
+        files.failRawWrite = true
+        assertFalse(repository.storeStory(42, "replacement", 2_000))
+        assertNull(repository.loadPreparedThread(42))
+        assertEquals(raw, repository.loadStoryPayload(42))
+        files.failRawWrite = false
+        assertTrue(repository.storeStory(42, raw, 3_000, parsed.cacheSummary))
+        assertTrue(repository.storeStory(43, """{"id":43,"title":"Other"}""", 4_000))
+        assertNull(files.read(StoryCacheKeys.PREPARED_NAMESPACE, "42.bin"))
+        assertNull(repository.loadStoryPayload(42))
+        repository.storeStory(42, raw, 5_000, parsed.cacheSummary)
+        repository.remove(42)
+        assertNull(files.read(StoryCacheKeys.PREPARED_NAMESPACE, "42.bin"))
+        repository.storeStory(42, raw, 6_000, parsed.cacheSummary)
+        assertEquals(1, repository.clear())
+        assertTrue(files.list(StoryCacheKeys.PREPARED_NAMESPACE).isEmpty())
+        assertNull(repository.loadStoryPayload(42))
+    }
+
+    @Test fun backgroundDownloadsPrepareBeforeTheirFirstOpen() = runTest {
+        val files = RecordingFiles()
+        val repository = StoryCacheRepository(files, InMemoryStoryCacheMetadataStore())
+        val service = StoryCacheService(repository,
+            ArticleSnapshotService(KtorHttpClient(client = { error("Offline") }), null), { 1_000L })
+        service.cacheStory(42, raw)
+        assertNotNull(repository.loadPreparedThread(42))
+        assertEquals(0, files.rawReads)
+        assertEquals(parser.prepare(raw), service.loadPreparedThread(42))
+        assertEquals(0, files.rawReads)
+    }
+
+    private class RecordingFiles(
+        private val delegate: StoryCacheFileStore = InMemoryStoryCacheFileStore(),
+    ) : StoryCacheFileStore by delegate {
+        var rawReads = 0
+        var failRemoval = false
+        var failRawWrite = false
+        override fun read(namespace: String, key: String) = delegate.read(namespace, key)
+        override fun readText(namespace: String, key: String, charsetName: String): String? {
+            if (namespace == StoryCacheKeys.FULL_NAMESPACE) rawReads++
+            return delegate.readText(namespace, key, charsetName)
+        }
+        override fun write(namespace: String, key: String, value: ByteArray): Boolean =
+            if (failRawWrite && namespace == StoryCacheKeys.FULL_NAMESPACE) false else delegate.write(namespace, key, value)
+        override fun remove(namespace: String, key: String): Boolean =
+            if (failRemoval && namespace == StoryCacheKeys.PREPARED_NAMESPACE) false else delegate.remove(namespace, key)
+        override fun list(namespace: String) = delegate.list(namespace)
+        override fun clear(namespace: String) = delegate.clear(namespace)
+    }
+}

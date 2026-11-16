@@ -1,0 +1,336 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.baseline.profile)
+    alias(libs.plugins.ksp)
+}
+
+android {
+    namespace = "com.simon.harmonichackernews"
+    compileSdk {
+        version = release(37) { minorApiLevel = 1 }
+    }
+    ndkVersion = "28.2.13676358"
+    testBuildType = providers.gradleProperty("harmonic.testBuildType").getOrElse("debug")
+    dynamicFeatures = [":local_ai_runtime"]
+
+    defaultConfig {
+        applicationId = "com.wongpinter.pulsefeed"
+        minSdk = 26
+        targetSdk = 37
+        versionCode = providers.gradleProperty("harmonic.versionCode").get().toInteger()
+        versionName = providers.gradleProperty("harmonic.versionName").get()
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "boolean", "DEBUG_SETTINGS_ENABLED", "false"
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+            )
+        }
+
+        debug {
+            buildConfigField "boolean", "DEBUG_SETTINGS_ENABLED", "true"
+        }
+
+        debugFast {
+            initWith(release)
+
+            signingConfig = signingConfigs.debug
+
+            debuggable = false
+            minifyEnabled = false
+            shrinkResources = false
+            buildConfigField "boolean", "DEBUG_SETTINGS_ENABLED", "true"
+
+            matchingFallbacks.add("release")
+        }
+
+        debugLLM {
+            initWith(debug)
+            buildConfigField "boolean", "DEBUG_SETTINGS_ENABLED", "true"
+            matchingFallbacks.add("debug")
+        }
+
+        debugLLMFast {
+            initWith(debugFast)
+            buildConfigField "boolean", "DEBUG_SETTINGS_ENABLED", "true"
+            matchingFallbacks.add("release")
+        }
+
+        benchmark {
+            initWith(release)
+
+            applicationIdSuffix = ".benchmark.app"
+            resValue "string", "app_name", "Pulse Feed Benchmark"
+
+            signingConfig = signingConfigs.debug
+            debuggable = false
+            // Match shipped release optimization; opt out explicitly for compiler-isolation experiments.
+            minifyEnabled = providers.gradleProperty("harmonic.benchmark.minify")
+                    .map { it.toBoolean() }.getOrElse(true)
+            shrinkResources = minifyEnabled
+            proguardFiles "benchmark-rules.pro"
+            matchingFallbacks.add("release")
+        }
+
+        fossRelease {
+            initWith(release)
+            matchingFallbacks.add("release")
+        }
+
+        playRelease {
+            initWith(release)
+            matchingFallbacks.add("release")
+        }
+    }
+
+    // The optional AI module supplies a compatibility library for 32-bit ABIs.
+    // Keep the reader installable even when on-device inference is unavailable.
+    buildTypes.configureEach { buildType ->
+        buildType.ndk.abiFilters = ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
+    }
+
+    sourceSets {
+        debug {
+            kotlin.srcDirs += "src/foss/kotlin"
+        }
+        debugFast {
+            kotlin.srcDirs += "src/foss/kotlin"
+        }
+        debugLLM {
+            kotlin.srcDirs += "src/play/kotlin"
+        }
+        debugLLMFast {
+            kotlin.srcDirs += "src/play/kotlin"
+        }
+        benchmark {
+            kotlin.srcDirs += "src/foss/kotlin"
+        }
+        fossRelease {
+            kotlin.srcDirs += "src/foss/kotlin"
+        }
+        playRelease {
+            kotlin.srcDirs += "src/play/kotlin"
+        }
+    }
+
+    // Explicit source inclusion also covers the non-debuggable development variants.
+    ["debug", "debugFast", "debugLLM", "debugLLMFast"].each { variant ->
+        sourceSets.getByName(variant).kotlin.srcDir("src/development/kotlin")
+        sourceSets.getByName(variant).manifest.srcFile("src/development/AndroidManifest.xml")
+    }
+
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
+
+    buildFeatures {
+        buildConfig = true
+        compose = true
+        resValues = true
+    }
+
+}
+
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variantBuilder ->
+        variantBuilder.enable = false
+    }
+}
+
+kotlin {
+    compilerOptions {
+        languageVersion = KotlinVersion.KOTLIN_2_4
+        jvmTarget = JvmTarget.JVM_11
+    }
+}
+
+dependencies {
+    implementation libs.androidx.datastore.preferences
+    implementation libs.androidx.savedstate
+    implementation(project(":resources"))
+    implementation(project(":core"))
+    implementation(project(":ui"))
+
+    implementation(libs.bundles.androidx.lifecycle)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.browser)
+    implementation(libs.androidx.core)
+    implementation(libs.androidx.preference)
+    // Read-only compatibility bridge for credentials written before the direct-Keystore vault.
+    implementation(libs.androidx.security)
+    // Tink's static-analysis annotations must be available to R8 during release shrinking.
+    compileOnly(libs.jsr305)
+    compileOnly(libs.errorprone.annotations)
+    implementation(libs.androidx.webkit)
+    implementation(libs.androidx.activity)
+
+
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.okhttp)
+    implementation(libs.coil)
+    implementation(libs.coil.compose)
+    implementation(libs.coil.network.ktor3)
+    implementation(libs.coil.svg)
+    implementation(libs.androidsvg)
+    debugLLMImplementation(libs.mlkit.genai.summarization)
+    debugLLMImplementation(libs.mlkit.genai.prompt)
+    debugLLMImplementation(libs.mlkit.genai.embedding)
+    kspDebugLLM(libs.mlkit.genai.schema.compiler)
+    debugLLMImplementation(libs.play.feature.delivery)
+    debugLLMFastImplementation(libs.mlkit.genai.summarization)
+    debugLLMFastImplementation(libs.mlkit.genai.prompt)
+    debugLLMFastImplementation(libs.mlkit.genai.embedding)
+    kspDebugLLMFast(libs.mlkit.genai.schema.compiler)
+    debugLLMFastImplementation(libs.play.feature.delivery)
+    playReleaseImplementation(libs.mlkit.genai.summarization)
+    playReleaseImplementation(libs.mlkit.genai.prompt)
+    playReleaseImplementation(libs.mlkit.genai.embedding)
+    kspPlayRelease(libs.mlkit.genai.schema.compiler)
+    playReleaseImplementation(libs.play.feature.delivery)
+    implementation(libs.androidx.work)
+    implementation(libs.androidx.glance.appwidget)
+    implementation(libs.androidx.profileinstaller)
+
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.material3.adaptive)
+    implementation(libs.androidx.material3.adaptive.layout)
+    implementation(libs.androidx.material3.adaptive.navigation3)
+    implementation(libs.androidx.navigation3.runtime)
+    implementation(libs.androidx.navigation3.ui)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.haze)
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    androidTestImplementation(libs.androidx.test.espresso.core)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    debugLLMImplementation(libs.androidx.compose.ui.test.manifest)
+    debugFastImplementation(libs.androidx.compose.ui.test.manifest)
+    debugLLMFastImplementation(libs.androidx.compose.ui.test.manifest)
+    benchmarkImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+baselineProfile {
+    mergeIntoMain = true
+    saveInSrc = true
+    automaticGenerationDuringBuild = false
+    variants {
+        benchmark {
+            from(project(":benchmark"))
+        }
+    }
+}
+
+def benchmarkProfileDirectory = project(":benchmark").layout.buildDirectory
+        .dir("intermediates/baselineprofiles/nonMinifiedBenchmark")
+def installedBaselineProfile = layout.projectDirectory.file("src/main/baseline-prof.txt")
+def installedStartupProfile = layout.projectDirectory.file("src/main/baselineProfiles/startup-prof.txt")
+
+tasks.register("installBenchmarkBaselineProfile") {
+    dependsOn(":benchmark:collectNonMinifiedBenchmarkBaselineProfile")
+    inputs.dir(benchmarkProfileDirectory)
+    outputs.files(installedBaselineProfile, installedStartupProfile)
+    doLast {
+        def files = benchmarkProfileDirectory.get().asFile.listFiles().toList()
+        def readRules = { String kind ->
+            files.findAll { it.name.contains("-${kind}-prof-") && it.name.endsWith(".txt") }
+                    .collectMany { it.readLines("UTF-8") }
+                    .findAll { it.contains("com/simon/harmonichackernews") &&
+                            !it.contains("StoriesScrollBenchmarkActivity") }
+                    .unique().sort()
+        }
+        def startupRules = readRules("startup")
+        def collectedBaselineRules = readRules("baseline")
+        if (startupRules.isEmpty() || collectedBaselineRules.isEmpty()) {
+            throw new GradleException("Expected generated baseline and startup profile rules")
+        }
+        def baselineRules = (collectedBaselineRules + startupRules).unique().sort()
+        // Each journey emits a separate file. Renaming them all in a Copy task overwrites
+        // earlier journeys; merge their rules explicitly and retain startup in the baseline.
+        installedBaselineProfile.asFile.write(baselineRules.join("\n") + "\n", "UTF-8")
+        installedStartupProfile.asFile.parentFile.mkdirs()
+        installedStartupProfile.asFile.write(startupRules.join("\n") + "\n", "UTF-8")
+    }
+}
+
+afterEvaluate {
+    def fossReleaseRuntimeClasspath = configurations.named("fossReleaseRuntimeClasspath")
+    def forbiddenFossGroupPrefixes = [
+            "com.google.ai.edge",
+            "com.google.android.datatransport",
+            "com.google.android.gms",
+            "com.google.android.play",
+            "com.google.firebase",
+            "com.google.mlkit"
+    ] as Set<String>
+    def forbiddenFossDependencies = fossReleaseRuntimeClasspath.map { configuration ->
+        // Inspect coordinates without choosing among KMP Android secondary artifacts.
+        def resolutionResult = configuration.incoming.resolutionResult
+        def unresolvedDependency = resolutionResult.allDependencies.find {
+            it instanceof UnresolvedDependencyResult
+        }
+        if (unresolvedDependency != null) {
+            throw new GradleException(
+                    "Could not resolve FOSS dependency ${unresolvedDependency.requested.displayName}",
+                    unresolvedDependency.failure)
+        }
+        resolutionResult.allComponents
+                .findAll { component -> component.id instanceof ModuleComponentIdentifier }
+                .collect { component ->
+                    "${component.id.group}:${component.id.module}:${component.id.version}"
+                }
+                .findAll { dependency ->
+                    forbiddenFossGroupPrefixes.any { prefix ->
+                        dependency.startsWith(prefix + ":")
+                    }
+                }
+                .sort()
+    }
+
+    tasks.register("verifyFossDependencies") {
+        group = "verification"
+        description =
+                "Fails if the FOSS release resolves proprietary local-AI or Play libraries."
+        inputs.property("forbiddenDependencies", forbiddenFossDependencies)
+
+        doLast {
+            List<String> resolvedForbiddenDependencies = forbiddenFossDependencies.get()
+            if (!resolvedForbiddenDependencies.isEmpty()) {
+                throw new GradleException(
+                        "FOSS release contains forbidden dependencies:\n"
+                                + resolvedForbiddenDependencies.join("\n"))
+            }
+        }
+    }
+}
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}

@@ -1,0 +1,324 @@
+name: tag
+
+on:
+  push:
+    tags:
+      - 'v*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      BUNDLETOOL_VERSION: '1.18.3'
+      BUNDLETOOL_SHA256: 'A099CFA1543F55593BC2ED16A70A7C67FE54B1747BB7301F37FDFD6D91028E29'
+      RELEASE_UNSIGNED_APK: app/build/outputs/apk/fossRelease/app-fossRelease-unsigned.apk
+      RELEASE_ALIGNED_APK: app/build/outputs/apk/fossRelease/app-release-aligned.apk
+      RELEASE_SIGNED_APK: app/build/outputs/apk/fossRelease/app-release.apk
+      RELEASE_BUNDLE: app/build/outputs/bundle/playRelease/app-playRelease.aab
+      RELEASE_LLM_APKS: app/build/outputs/apk/playRelease/app-release-llm.apks
+      RELEASE_LLM_APK: app/build/outputs/apk/playRelease/app-release-llm.apk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Install NDK for stripping packaged native libraries
+        run: sdkmanager "ndk;29.0.13113456"
+      - name: Build with Gradle
+        run: >-
+          ./gradlew
+          :app:assembleFossRelease
+          :app:bundlePlayRelease
+          :app:lintFossRelease
+          :app:lintPlayRelease
+          :app:verifyFossDependencies
+          --warning-mode all
+          --no-daemon
+          --max-workers=2
+          --parallel
+      - name: Sign release APKs
+        env:
+          ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          ANDROID_SIGNING_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$ANDROID_SIGNING_KEYSTORE_BASE64" || -z "$ANDROID_SIGNING_KEYSTORE_PASSWORD" || -z "$ANDROID_SIGNING_KEY_ALIAS" || -z "$ANDROID_SIGNING_KEY_PASSWORD" ]]; then
+            echo "::error::Missing one or more Android signing secrets."
+            exit 1
+          fi
+
+          KEYSTORE_PATH="$RUNNER_TEMP/release-keystore.jks"
+          KEYSTORE_PASSWORD_FILE="$RUNNER_TEMP/keystore-password.txt"
+          KEY_PASSWORD_FILE="$RUNNER_TEMP/key-password.txt"
+          BUNDLETOOL_JAR="$RUNNER_TEMP/bundletool.jar"
+          echo "$ANDROID_SIGNING_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          printf '%s' "$ANDROID_SIGNING_KEYSTORE_PASSWORD" > "$KEYSTORE_PASSWORD_FILE"
+          printf '%s' "$ANDROID_SIGNING_KEY_PASSWORD" > "$KEY_PASSWORD_FILE"
+          chmod 600 "$KEYSTORE_PATH" "$KEYSTORE_PASSWORD_FILE" "$KEY_PASSWORD_FILE"
+
+          curl -fsSL \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar" \
+            -o "$BUNDLETOOL_JAR"
+          echo "${BUNDLETOOL_SHA256}  ${BUNDLETOOL_JAR}" | sha256sum --check -
+
+          BUILD_TOOLS_DIR="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          "$BUILD_TOOLS_DIR/zipalign" -p -f 4 "$RELEASE_UNSIGNED_APK" "$RELEASE_ALIGNED_APK"
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias "$ANDROID_SIGNING_KEY_ALIAS" \
+            --ks-pass env:ANDROID_SIGNING_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_SIGNING_KEY_PASSWORD \
+            --out "$RELEASE_SIGNED_APK" \
+            "$RELEASE_ALIGNED_APK"
+          "$BUILD_TOOLS_DIR/apksigner" verify --verbose --print-certs "$RELEASE_SIGNED_APK"
+
+          java -jar "$BUNDLETOOL_JAR" build-apks \
+            --bundle="$RELEASE_BUNDLE" \
+            --output="$RELEASE_LLM_APKS" \
+            --mode=universal \
+            --ks="$KEYSTORE_PATH" \
+            --ks-pass="file:$KEYSTORE_PASSWORD_FILE" \
+            --ks-key-alias="$ANDROID_SIGNING_KEY_ALIAS" \
+            --key-pass="file:$KEY_PASSWORD_FILE" \
+            --overwrite
+          unzip -p "$RELEASE_LLM_APKS" universal.apk > "$RELEASE_LLM_APK"
+          unzip -t "$RELEASE_LLM_APK" 'lib/*/liblitertlm_jni.so'
+          "$BUILD_TOOLS_DIR/apksigner" verify --verbose --print-certs "$RELEASE_LLM_APK"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-android
+          path: |
+            app/build/outputs/apk/fossRelease/app-release.apk
+            app/build/outputs/apk/playRelease/app-release-llm.apk
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+    env:
+      ORG_GRADLE_PROJECT_harmonicAndroidHostEnabled: 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            task: packageReleaseDmg
+            artifact_name: macos-dmg-arm64
+            artifact_path: desktop_app/build/compose/binaries/**/*.dmg
+            release_platform: macos
+          - os: windows-2025
+            task: packageReleaseMsi
+            artifact_name: windows-msi-x64
+            artifact_path: desktop_app/build/compose/binaries/**/*.msi
+            release_platform: windows
+          - os: windows-11-arm
+            task: createReleaseDistributable
+            artifact_name: windows-exe-arm64
+            artifact_path: desktop_app/build/compose/binaries/main-release/exe/*.exe
+            release_platform: windows-arm64
+          - os: ubuntu-24.04
+            task: packageReleaseDeb
+            artifact_name: linux-deb-x64
+            artifact_path: desktop_app/build/compose/binaries/**/*.deb
+            release_platform: linux
+          - os: ubuntu-24.04-arm
+            task: packageReleaseDeb
+            artifact_name: linux-deb-arm64
+            artifact_path: desktop_app/build/compose/binaries/**/*.deb
+            release_platform: linux-arm64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: ${{ matrix.os == 'windows-11-arm' && 'microsoft' || 'temurin' }}
+          java-version: '21'
+          architecture: ${{ runner.arch == 'ARM64' && 'aarch64' || 'x64' }}
+      - name: Select Windows ARM64 packaging JDK
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: echo "ORG_GRADLE_PROJECT_harmonicDesktopJavaHome=$JAVA_HOME" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v6
+      # The shared KMP modules still configure an Android library target.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Install Linux ARM64 desktop dependencies
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y fakeroot xvfb xauth libgl1 libgl1-mesa-dri libegl1 libfontconfig1 libfreetype6 libasound2t64 libx11-6 libxext6 libxi6 libxrender1 libxtst6
+      - name: Add WiX Toolset to PATH
+        if: runner.os == 'Windows' && runner.arch != 'ARM64'
+        shell: pwsh
+        run: |
+          $wix = Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset v3.*\bin" -Directory |
+            Select-Object -First 1
+          if (-not $wix) {
+            throw "WiX Toolset 3.x is required to build the MSI"
+          }
+          $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Test Windows ARM64 installer scripts
+        if: matrix.os == 'windows-11-arm'
+        run: python -B -m unittest discover -s .github/scripts -p 'test_package_windows_arm64.py'
+      - name: Build desktop package
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run --auto-servernum ./gradlew :desktop_app:${{ matrix.task }} --warning-mode all --no-daemon --max-workers=2
+          else
+            ./gradlew :desktop_app:${{ matrix.task }} --warning-mode all --no-daemon --max-workers=2
+          fi
+      - name: Verify desktop AppCDS archive
+        if: matrix.os != 'windows-11-arm'
+        run: python .github/scripts/verify-desktop-appcds.py desktop_app/build/compose/binaries/main-release/app
+      - name: Verify processed desktop runtime
+        run: >-
+          java -Xverify:all "-Djava.awt.headless=true"
+          -cp "desktop_app/build/compose/tmp/main-release/proguard/*"
+          .github/scripts/VerifyDesktopRelease.java
+      - name: Build Windows ARM64 installer
+        if: matrix.os == 'windows-11-arm'
+        run: python .github/scripts/package_windows_arm64.py
+      - name: Verify Windows ARM64 installation and uninstallation
+        if: matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: .github/scripts/verify_windows_arm64_install.ps1
+      - name: Upload Windows ARM64 verification logs
+        if: failure() && matrix.os == 'windows-11-arm'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-arm64-verification-logs
+          path: ${{ runner.temp }}/harmonic-arm64-verification/*.log
+          if-no-files-found: ignore
+      - name: Test desktop release filenames and website aliases
+        run: python -B -m unittest discover -s .github/scripts -p 'test_prepare_desktop_release.py'
+      - name: Prepare desktop release filenames and website download aliases
+        run: >-
+          python .github/scripts/prepare_desktop_release.py
+          "${{ matrix.artifact_path }}" "${{ matrix.release_platform }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.artifact_name }}
+          path: desktop-release/*
+          if-no-files-found: error
+
+  ios:
+    name: iOS unsigned Release
+    # Keep the toolchain aligned with the iOS verification job in push.yml.
+    runs-on: xcode-27
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      ORG_GRADLE_PROJECT_harmonicAndroidHostEnabled: 'false'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+      # The shared KMP modules still configure an Android library target.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Identify Kotlin and Apple toolchains
+        id: konan-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          kotlin=$(sed -n 's/^kotlin = "\([^"]*\)"/\1/p' gradle/libs.versions.toml)
+          test -n "$kotlin"
+          xcode_version=$(xcodebuild -version)
+          test -n "$xcode_version"
+          printf '%s\n' "$xcode_version"
+          echo "kotlin=$kotlin" >> "$GITHUB_OUTPUT"
+          echo "xcode=$(printf '%s' "$xcode_version" | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Cache Kotlin Native toolchain and dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: konan-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.konan-toolchain.outputs.kotlin }}-${{ steps.konan-toolchain.outputs.xcode }}-${{ hashFiles('gradle/libs.versions.toml', 'gradle.properties') }}
+      - name: Archive unsigned iOS device app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios_app/HarmonicIos.xcodeproj \
+            -scheme HarmonicIos \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/HarmonicIos.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/harmonic-ios-derived-data" \
+            -resultBundlePath "$RUNNER_TEMP/harmonic-ios-release.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+      - name: Package unsigned IPA and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/HarmonicIos.xcarchive/Products/Applications/HarmonicIos.app"
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Release tag must match the archived app version v$version."
+            exit 1
+          fi
+          test -f "$app/HarmonicIos"
+          test -f "$app/PrivacyInfo.xcprivacy"
+          test -f "$app/Frameworks/CLiteRTLM.framework/PrivacyInfo.xcprivacy"
+          test -d "$RUNNER_TEMP/HarmonicIos.xcarchive/dSYMs/HarmonicIos.app.dSYM"
+          mkdir -p "$RUNNER_TEMP/harmonic-ios-ipa/Payload" "$RUNNER_TEMP/ios-release"
+          ditto "$app" "$RUNNER_TEMP/harmonic-ios-ipa/Payload/HarmonicIos.app"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/harmonic-ios-ipa/Payload" \
+            "$RUNNER_TEMP/ios-release/Harmonic-$version-ios-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/HarmonicIos.xcarchive" \
+            "$RUNNER_TEMP/HarmonicIos-unsigned.xcarchive.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-ios
+          path: ${{ runner.temp }}/ios-release/*.ipa
+          if-no-files-found: error
+      - name: Upload archive with debug symbols
+        uses: actions/upload-artifact@v7
+        with:
+          # Kept in Actions, separately from the public release-* assets.
+          name: ios-release-archive
+          path: ${{ runner.temp }}/HarmonicIos-unsigned.xcarchive.zip
+          if-no-files-found: error
+      - name: Upload Xcode build result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-release-build-result
+          path: ${{ runner.temp }}/harmonic-ios-release.xcresult
+          if-no-files-found: ignore
+
+  release:
+    needs:
+      - android
+      - desktop
+      - ios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: release-artifacts/**/*
+          draft: false
+          prerelease: false

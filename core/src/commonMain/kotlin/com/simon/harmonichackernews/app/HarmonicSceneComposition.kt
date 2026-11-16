@@ -1,0 +1,67 @@
+package com.simon.harmonichackernews.app
+
+import com.simon.harmonichackernews.presentation.UserProfileDialogs
+import com.simon.harmonichackernews.navigation.CommentsOpeningRequests
+import com.simon.harmonichackernews.navigation.AppLaunchRouter
+import com.simon.harmonichackernews.navigation.AppLinkNavigator
+import com.simon.harmonichackernews.navigation.MainNavigationStore
+import com.simon.harmonichackernews.navigation.MainDestination
+import com.simon.harmonichackernews.presentation.ScreenSessionRegistry
+import com.simon.harmonichackernews.presentation.UserMessageStore
+import com.simon.harmonichackernews.presentation.CaptchaRequests
+import com.simon.harmonichackernews.network.CaptchaAwareHackerNewsActions
+
+/**
+ * State and routing owned by one Android task, iOS scene, or desktop window.
+ *
+ * A scene shares repositories and persistent services through [app], but never shares navigation
+ * history or retained screen state with another scene. Hosts retain this object for the scene
+ * lifetime and call [close] when that scene is permanently destroyed.
+ */
+class HarmonicSceneComposition internal constructor(
+    val app: HarmonicAppComposition,
+    val userMessages: UserMessageStore,
+) {
+    val sessions = ScreenSessionRegistry()
+    val commentsOpeningRequests = CommentsOpeningRequests(app.commentsPreloads) {
+        app.userSettings.reading.useAlgoliaApi
+    }
+    val userProfiles = UserProfileDialogs { scope, username ->
+        app.createUserProfileSession(scope, username, listOf(
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ))
+    }
+    val navigation = MainNavigationStore(beforePublish = {
+        sessions.navigationChanged(it)
+        commentsOpeningRequests.navigationChanged(it)
+        userProfiles.navigationChanged(it)
+    })
+    val launches = AppLaunchRouter(navigation)
+    val captchaRequests = CaptchaRequests(navigation)
+    val hackerNewsActions = CaptchaAwareHackerNewsActions(app.hackerNewsUser, captchaRequests::awaitResponse)
+    val links = AppLinkNavigator(
+        navigation = navigation,
+        externalLinks = app.externalLinks,
+        userMessages = userMessages,
+    )
+
+    private var closed = false
+
+    fun closeWelcome() {
+        if (navigation.state.value.currentDestination != MainDestination.WELCOME) return
+        if (navigation.state.value.welcomeRequest?.styleChooser == false) {
+            app.appearance.markWelcomeShown()
+        }
+        navigation.closeWelcome()
+    }
+
+    fun close() {
+        if (closed) return
+        closed = true
+        captchaRequests.close()
+        commentsOpeningRequests.close()
+        userProfiles.close()
+        userMessages.close()
+    }
+}

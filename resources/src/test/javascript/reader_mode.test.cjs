@@ -1,0 +1,457 @@
+// Run with node --test resources/src/test/javascript/reader_mode.test.cjs and Playwright installed.
+// PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH optionally selects an existing Chromium installation.
+const { before, after, test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { chromium } = require('playwright');
+
+const web = path.resolve(__dirname, '../../commonMain/composeResources/files/web');
+const reader = fs.readFileSync(path.join(web, 'reader_mode.js'), 'utf8');
+const readability = fs.readFileSync(path.join(web, 'vendor/mozilla/readability/0.6.0/Readability.min.js'), 'utf8');
+let browser;
+before(async () => {
+    browser = await chromium.launch({
+        headless: true,
+        ignoreDefaultArgs: ['--hide-scrollbars'],
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
+    });
+});
+after(async () => { await browser?.close(); });
+
+async function article(useReadability = false) {
+    const page = await browser.newPage();
+    await page.route('https://reader.test/article', route => route.fulfill({
+        contentType: 'text/html',
+        body: `<!doctype html><title>Article title</title><base href="https://cdn.test/assets/">
+            <article id="article-top"><h1 id="heading">Article title</h1>
+            <p>${'A substantive article sentence, with detail and punctuation. '.repeat(30)}</p>
+            <p><a href="#note-1">Footnote</a> and <a href="#legacy-note">Legacy footnote</a>.</p>
+            <p id="note-1">This is the footnote target.</p><a name="legacy-note"></a>
+            <button id="action">Click</button><input id="draft" value="original"></article>
+            <script>
+                window.scriptRuns = (window.scriptRuns || 0) + 1;
+                window.originalButton = document.getElementById('action');
+                window.originalInput = document.getElementById('draft');
+                window.clicks = 0;
+                originalButton.addEventListener('click', () => window.clicks++);
+                originalInput.value = 'unsaved typing';
+            </script>`,
+    }));
+    await page.goto('https://reader.test/article');
+    if (useReadability) await page.addScriptTag({ content: readability });
+    await page.addScriptTag({ content: reader });
+    return page;
+}
+
+async function enable(page) {
+    assert.equal(await page.evaluate(() => HarmonicReaderMode.enable()), 'enabled');
+    await page.waitForSelector('#harmonic-reader-article');
+    await page.waitForTimeout(600); // Finish both animation callbacks, including fallback timers.
+}
+
+async function disable(page) {
+    assert.equal(await page.evaluate(() => HarmonicReaderMode.disable()), 'disabled');
+    await page.waitForSelector('#action');
+    await page.waitForTimeout(600);
+}
+
+async function countDocumentClones(page) {
+    await page.evaluate(() => {
+        window.documentClones = 0;
+        const original = Document.prototype.cloneNode;
+        Document.prototype.cloneNode = function(deep) {
+            documentClones++;
+            return original.call(this, deep);
+        };
+    });
+}
+
+for (const customScrollbar of [false, true]) {
+    test(`reader transition preserves scroll and scrollbar layout (${customScrollbar ? 'custom' : 'native'})`, async () => {
+        const page = await article(true);
+        try {
+            await page.addStyleTag({ content: `body { min-height: 5000px }
+                ${customScrollbar ? 'html::-webkit-scrollbar { width:24px; background:black } html::-webkit-scrollbar-thumb { background:red }' : ''}` });
+            const original = await page.evaluate(() => {
+                window.scrollTo(0, 600);
+                return { width: document.documentElement.clientWidth, scroll: window.scrollY };
+            });
+            await page.evaluate(() => HarmonicReaderMode.enable());
+            assert.equal(await page.evaluate(() => document.documentElement.clientWidth), original.width,
+                'Suppressing scrollbar paint must not change the source layout');
+            assert.equal(await page.evaluate(() => window.scrollY), original.scroll);
+            assert.equal(await page.locator('#harmonic-reader-transition-scrollbar').count(), 1);
+            await page.waitForSelector('#harmonic-reader-article');
+            await page.waitForFunction(() => !document.getElementById('harmonic-reader-transition-scrollbar'));
+            await disable(page);
+            assert.deepEqual(await page.evaluate(() => ({
+                width: document.documentElement.clientWidth, scroll: window.scrollY,
+            })), original);
+            assert.equal(await page.locator('#harmonic-reader-transition-scrollbar').count(), 0);
+            assert.equal(await page.inputValue('#draft'), 'unsaved typing');
+            await page.click('#action');
+            assert.equal(await page.evaluate(() => clicks), 1);
+        } finally { await page.close(); }
+    });
+}
+
+test('rapid reader cancellation restores scrollbar styles and the original document', async () => {
+    const page = await article(true);
+    try {
+        await page.evaluate(() => { HarmonicReaderMode.enable(); HarmonicReaderMode.disable(); });
+        await page.waitForFunction(() => !document.getElementById('harmonic-reader-transition-scrollbar'));
+        assert.equal(await page.locator('#harmonic-reader-article').count(), 0);
+        assert.equal(await page.evaluate(() => originalButton === document.getElementById('action')), true);
+        await enable(page);
+        await disable(page);
+        assert.equal(await page.locator('#harmonic-reader-transition-scrollbar').count(), 0);
+    } finally { await page.close(); }
+});
+
+test('reader uses the new default, supports 13px, and updates line height without replacing article content', async () => {
+    const page = await article(true);
+    try {
+        await enable(page);
+        const typography = () => page.evaluate(() => {
+            const style = getComputedStyle(document.querySelector('#harmonic-reader-article p'));
+            return [style.fontSize, style.lineHeight];
+        });
+        assert.deepEqual(await typography(), ['17px', '28.56px']);
+        await page.evaluate(() => {
+            window.readerParagraph = document.querySelector('#harmonic-reader-article p');
+            HarmonicReaderMode.setTheme({fontSizePx: 13, lineHeight: 1.4});
+        });
+        assert.deepEqual(await typography(), ['13px', '18.2px']);
+        await page.evaluate(() => HarmonicReaderMode.setTheme({fontSizePx: 17, lineHeight: 2}));
+        assert.deepEqual(await typography(), ['17px', '34px']);
+        assert.equal(await page.evaluate(() => readerParagraph === document.querySelector('#harmonic-reader-article p')), true);
+        await page.evaluate(() => HarmonicReaderMode.setTheme({fontSizePx: -100, lineHeight: 'invalid'}));
+        assert.deepEqual(await typography(), ['13px', '21.84px']);
+        await disable(page);
+        assert.equal(await page.inputValue('#draft'), 'unsaved typing');
+    } finally { await page.close(); }
+});
+
+test('availability reuses its extraction on enable without changing article output', async () => {
+    const page = await article(true);
+    try {
+        await countDocumentClones(page);
+        assert.equal(await page.evaluate(() => HarmonicReaderMode.isAvailable()), 'available');
+        assert.equal(await page.evaluate(() => HarmonicReaderMode.isAvailable()), 'available');
+        await enable(page);
+        assert.equal(await page.evaluate(() => documentClones), 1);
+        assert.match(await page.locator('#harmonic-reader-article').textContent(), /substantive article sentence/);
+        const cachedHtml = await page.locator('#harmonic-reader-article').innerHTML();
+        await disable(page);
+        await enable(page);
+        assert.equal(await page.evaluate(() => documentClones), 2, 'restored document gets a fresh extraction');
+        assert.equal(await page.locator('#harmonic-reader-article').innerHTML(), cachedHtml);
+    } finally { await page.close(); }
+});
+
+for (const sameTask of [false, true]) {
+    test(`source changes invalidate extracted content (${sameTask ? 'before' : 'after'} observer delivery)`, async () => {
+        const page = await article(true);
+        try {
+            await countDocumentClones(page);
+            await page.evaluate(() => HarmonicReaderMode.isAvailable());
+            await page.evaluate(sameTask => {
+                document.querySelector('article p').textContent += ' Updated source text.';
+                if (sameTask) HarmonicReaderMode.enable();
+            }, sameTask);
+            if (!sameTask) await enable(page);
+            else await page.waitForSelector('#harmonic-reader-article');
+            assert.match(await page.locator('#harmonic-reader-article').textContent(), /Updated source text/);
+            assert.equal(await page.evaluate(() => documentClones), 2);
+        } finally { await page.close(); }
+    });
+}
+
+for (const change of ['url', 'base', 'expired', 'attributes']) {
+    test(`reader extraction cache invalidates on ${change}`, async () => {
+        const page = await article(true);
+        try {
+            await countDocumentClones(page);
+            await page.evaluate(() => HarmonicReaderMode.isAvailable());
+            assert.equal(await page.evaluate(change => {
+                if (change === 'url') history.replaceState(null, '', 'https://reader.test/different-article');
+                if (change === 'base') document.querySelector('base').href = 'https://new-base.test/';
+                if (change === 'attributes') document.querySelector('article').setAttribute('class', 'new-content');
+                if (change === 'expired') {
+                    const now = Date.now();
+                    Date.now = () => now + 31000;
+                }
+                return HarmonicReaderMode.isAvailable();
+            }, change), 'available');
+            assert.equal(await page.evaluate(() => documentClones), 2);
+        } finally { await page.close(); }
+    });
+}
+
+test('unavailable results invalidate when the page receives article content', async () => {
+    const page = await article(true);
+    try {
+        const result = await page.evaluate(() => {
+            const original = document.body.innerHTML;
+            document.body.innerHTML = '<p>Loading</p>';
+            const empty = HarmonicReaderMode.isAvailable();
+            document.body.innerHTML = original;
+            return [empty, HarmonicReaderMode.isAvailable()];
+        });
+        assert.deepEqual(result, ['unavailable', 'available']);
+    } finally { await page.close(); }
+});
+
+test('oversized articles are extracted correctly without retaining a cached DOM', async () => {
+    const page = await article(true);
+    try {
+        await page.evaluate(() => {
+            document.querySelector('article p').textContent = 'Large article sentence with details. '.repeat(10000);
+        });
+        await countDocumentClones(page);
+        await page.evaluate(() => HarmonicReaderMode.isAvailable());
+        await page.evaluate(() => HarmonicReaderMode.isAvailable());
+        assert.equal(await page.evaluate(() => documentClones), 2);
+    } finally { await page.close(); }
+});
+
+test('compact theme updates retain installed fonts and reject stale or missing installations', async () => {
+    const page = await article(true);
+    try {
+        assert.deepEqual(await page.evaluate(() => {
+            const api = HarmonicReaderMode;
+            const missing = api.updateTheme({fontSizePx: 24}, 'one');
+            api.setTheme({fontFaceCss: 'FONT_CSS', fontSizePx: 16}, 'one');
+            const accepted = api.updateTheme({fontSizePx: 24}, 'one');
+            const retained = window.__harmonicReaderModeTheme;
+            const stale = api.updateTheme({fontSizePx: 40}, 'two');
+            api.setTheme({fontFaceCss: '', fontSizePx: 18}, 'two');
+            return {missing, accepted, retained, stale, deviceFont: window.__harmonicReaderModeTheme.fontFaceCss};
+        }), {
+            missing: false, accepted: true, retained: {fontSizePx: 24, fontFaceCss: 'FONT_CSS'},
+            stale: false, deviceFont: '',
+        });
+    } finally { await page.close(); }
+});
+
+function contrast(foreground, background) {
+    const luminance = rgb => rgb.map(value => {
+        const channel = value / 255;
+        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    }).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+    const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+    return (values[0] + 0.05) / (values[1] + 0.05);
+}
+
+for (const useReadability of [false, true]) {
+    for (const dark of [false, true]) {
+        test(`reader corrects faint colors and preserves readable colors (${useReadability ? 'Readability' : 'fallback'}, ${dark ? 'dark' : 'light'})`, async () => {
+            const page = await article(useReadability);
+            try {
+                await page.addStyleTag({ content: `
+                    #faint { color: ${dark ? '#302028' : 'pink'} !important; }
+                    #readable { color: ${dark ? '#90ee90' : '#800000'} !important; }
+                    #alpha { color: rgba(120, 80, 180, .15); }
+                    #wide-gamut { color: color(display-p3 .7 .6 .8 / .1); }
+                ` });
+                await page.evaluate(dark => {
+                    HarmonicReaderMode.setTheme({ isLight: !dark });
+                    document.querySelector('article').insertAdjacentHTML('beforeend', `
+                        <p><q id="faint">A faint quotation with <b id="nested">nested emphasis</b>.</q>
+                        <q id="readable">Readable source color.</q>
+                        <q id="alpha">Translucent source text.</q>
+                        <q id="wide-gamut">Wide gamut source text.</q></p>`);
+                }, dark);
+                const original = await page.locator('#faint').evaluate(node => getComputedStyle(node).color);
+                await enable(page);
+                const colors = await page.evaluate(() => Object.fromEntries(
+                    ['faint', 'nested', 'readable', 'alpha', 'wide-gamut'].map(id =>
+                        [id, getComputedStyle(document.getElementById(id)).color.match(/[\d.]+/g).map(Number)]
+                    )
+                ));
+                const background = dark ? [21, 22, 23] : [250, 250, 250];
+                for (const [id, color] of Object.entries(colors)) {
+                    assert.ok(contrast(color, background) >= 4.5, `${id}: ${color}`);
+                }
+                assert.deepEqual(colors.readable, dark ? [144, 238, 144] : [128, 0, 0]);
+                assert.notDeepEqual(colors.faint, dark ? [232, 234, 237] : [32, 33, 36], 'retain some source tint');
+                await disable(page);
+                assert.equal(await page.locator('#faint').evaluate(node => getComputedStyle(node).color), original);
+            } finally { await page.close(); }
+        });
+    }
+
+    for (const separator of ['<br>', '</div><div>']) {
+        test(`byline preserves structural spacing without splitting inline words (${useReadability ? 'Readability' : 'fallback'}, ${separator})`, async () => {
+            const page = await article(useReadability);
+            try {
+                await page.evaluate(separator => {
+                    document.querySelector('article').insertAdjacentHTML('afterbegin',
+                        `<div class="byline"><div>By Jo Mc<em>Donald</em>${separator}September 23, 2026</div></div>`);
+                }, separator);
+                await enable(page);
+                assert.equal(await page.locator('#harmonic-reader-byline').textContent(), 'By Jo McDonald September 23, 2026');
+            } finally { await page.close(); }
+        });
+    }
+}
+
+test('contrast correction uses the code background and handles an insufficient theme text color', async () => {
+    const page = await article();
+    try {
+        await page.evaluate(() => {
+            HarmonicReaderMode.setTheme({ textColor: '#777777', codeBackgroundColor: '#888888' });
+            document.querySelector('article').insertAdjacentHTML('beforeend', '<pre id="code-contrast">code sample</pre>');
+        });
+        await enable(page);
+        const color = await page.locator('#code-contrast').evaluate(node => getComputedStyle(node).color.match(/\d+/g).map(Number));
+        assert.ok(contrast(color, [136, 136, 136]) >= 4.5, String(color));
+    } finally { await page.close(); }
+});
+
+for (const useReadability of [false, true]) {
+    test(`reader preserves fragment destinations (${useReadability ? 'Readability' : 'fallback'})`, async () => {
+        const page = await article(useReadability);
+        try {
+            await enable(page);
+            assert.equal(await page.locator('#note-1').count(), 1);
+            assert.equal(await page.locator('[name="legacy-note"]').count(), 1);
+            await page.getByRole('link', { name: 'Footnote', exact: true }).click();
+            assert.equal(new URL(page.url()).hash, '#note-1');
+            assert.equal(new URL(page.url()).host, 'reader.test');
+        } finally { await page.close(); }
+    });
+}
+
+test('reader restores original node identity, listeners and live form values over repeated toggles', async () => {
+    const page = await article(true);
+    try {
+        for (let cycle = 1; cycle <= 2; cycle++) {
+            await enable(page);
+            await disable(page);
+            await page.locator('#action').click();
+            assert.deepEqual(await page.evaluate(() => ({
+                sameButton: document.getElementById('action') === originalButton,
+                sameInput: document.getElementById('draft') === originalInput,
+                value: document.getElementById('draft').value,
+                clicks,
+                scriptRuns,
+            })), { sameButton: true, sameInput: true, value: 'unsaved typing', clicks: cycle, scriptRuns: 1 });
+        }
+    } finally { await page.close(); }
+});
+
+test('cancelling reader entry before its transition commits retains the original page', async () => {
+    const page = await article();
+    try {
+        await page.evaluate(() => { HarmonicReaderMode.enable(); HarmonicReaderMode.disable(); });
+        await page.waitForTimeout(800);
+        await page.locator('#action').click();
+        assert.deepEqual(await page.evaluate(() => ({
+            original: document.getElementById('action') === originalButton,
+            reader: Boolean(document.querySelector('#harmonic-reader-mode')),
+            clicks,
+            opacity: getComputedStyle(document.body).opacity,
+        })), { original: true, reader: false, clicks: 1, opacity: '1' });
+    } finally { await page.close(); }
+});
+
+for (const useReadability of [false, true]) {
+    test(`wide blocks scroll independently without widening the reader (${useReadability ? 'Readability' : 'fallback'})`, async () => {
+        const page = await article(useReadability);
+        try {
+            await page.setViewportSize({ width: 393, height: 852 });
+            // Author styles remain in the head when the reader replaces the body.
+            await page.addStyleTag({ content: `
+                body { display: grid; grid-template-columns: 1fr; min-width: 900px; }
+                #wide-grid { display: grid; grid-template-columns: 1fr; }
+                #wide-flex { display: flex; }
+                pre { white-space: pre-wrap; }
+            ` });
+            await page.evaluate(() => {
+                const article = document.querySelector('article');
+                article.insertAdjacentHTML('beforeend', `
+                    <section id="wide-grid"><div id="wide-flex"><div>
+                        <pre id="wide-code"><code>${'column_name = value; '.repeat(40)}</code></pre>
+                        <table id="wide-table"><tbody><tr>
+                            ${'<td>unbroken_column_value</td>'.repeat(12)}
+                        </tr></tbody></table>
+                    </div></div></section>`);
+            });
+            await enable(page);
+            for (const width of [393, 320, 852]) {
+                await page.setViewportSize({ width, height: 852 });
+                const dimensions = await page.evaluate(() => {
+                    const root = document.documentElement;
+                    const blocks = ['wide-code', 'wide-table'].map(id => {
+                        const block = document.getElementById(id);
+                        block.scrollLeft = 100;
+                        return { id, width: block.clientWidth, content: block.scrollWidth, left: block.scrollLeft };
+                    });
+                    window.scrollTo(100, 0);
+                    return {
+                        width: root.clientWidth, content: root.scrollWidth, left: window.scrollX,
+                        articleWidth: document.getElementById('harmonic-reader-article').getBoundingClientRect().width,
+                        blocks,
+                    };
+                });
+                assert.ok(dimensions.content <= dimensions.width, JSON.stringify(dimensions));
+                assert.equal(dimensions.left, 0);
+                assert.ok(dimensions.articleWidth <= width - 40, JSON.stringify(dimensions));
+                for (const block of dimensions.blocks) {
+                    assert.ok(block.content > block.width, `${block.id} should retain wide content`);
+                    assert.ok(block.left > 0, `${block.id} should scroll independently`);
+                }
+            }
+            await disable(page);
+            assert.equal(await page.locator('html').getAttribute('data-harmonic-reader'), null);
+            assert.equal(await page.evaluate(() => getComputedStyle(document.body).display), 'grid');
+        } finally { await page.close(); }
+    });
+}
+
+// Native hosts update themes in-place while reader is open.
+test('live theme switch recomputes source text contrast', async () => {
+    const page = await article(false);
+    try {
+        await page.addStyleTag({ content: '#faint { color: pink !important; }' });
+        await page.evaluate(() => document.querySelector('article').insertAdjacentHTML('beforeend',
+            '<p><q id="faint">Source-colored text must stay readable when the user switches themes.</q></p>'));
+        await enable(page);
+        const getColor = () => page.locator('#faint').evaluate(node => getComputedStyle(node).color.match(/[\d.]+/g).map(Number));
+        const lightColor = await getColor();
+        assert.ok(contrast(lightColor, [250,250,250]) >= 4.5);
+        await page.evaluate(() => HarmonicReaderMode.setTheme({ isLight: false }));
+        const darkColor = await getColor();
+        assert.ok(contrast(darkColor, [21,22,23]) >= 4.5,
+            'The correction must be recalculated against the new background');
+        assert.deepEqual(darkColor, [255, 192, 203], 'Readable source pink should be restored in dark mode');
+        await page.evaluate(() => HarmonicReaderMode.setTheme({ isLight: true }));
+        assert.deepEqual(await getColor(), lightColor, 'Theme round trips must not accumulate color corrections');
+        await disable(page);
+        assert.deepEqual(await getColor(), [255, 192, 203], 'The original article retains its source color');
+    } finally { await page.close(); }
+});
+
+for (const useReadability of [false, true]) {
+    test(`reader preserves wrapped video (${useReadability ? 'Readability' : 'fallback'})`, async () => {
+        const page = await article(useReadability);
+        try {
+            await page.locator('article').evaluate(article => {
+                article.insertAdjacentHTML('beforeend', `
+                    <video id="direct-video" src="data:video/mp4;base64," controls></video>
+                    <figure><video id="figure-video" src="data:video/mp4;base64," controls></video></figure>
+                    <figure><video id="source-video" controls><source src="data:video/mp4;base64," type="video/mp4"></video></figure>
+                    <div class="empty-wrapper"><span></span></div>`);
+            });
+            await enable(page);
+            const content = page.locator('#harmonic-reader-article');
+            assert.deepEqual(await content.locator('video').evaluateAll(nodes => nodes.map(node => node.id)),
+                ['direct-video', 'figure-video', 'source-video']);
+            assert.equal(await content.locator('#figure-video').evaluate(node => node.parentElement.tagName), 'FIGURE');
+            assert.equal(await content.locator('#source-video source').count(), 1);
+            assert.equal(await content.locator('.empty-wrapper').count(), 0);
+        } finally { await page.close(); }
+    });
+}

@@ -1,0 +1,803 @@
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
+
+package com.simon.harmonichackernews.ui.stories
+
+import com.simon.harmonichackernews.presentation.StoryListItemSnapshot
+import com.simon.harmonichackernews.resources.*
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.pager.VerticalPager
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.computedStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
+import com.simon.harmonichackernews.ui.common.GraphicsLayerSnapshot
+import com.simon.harmonichackernews.ui.common.modalCardTapBoundary
+import com.simon.harmonichackernews.ui.common.rememberGraphicsLayerSnapshot
+import com.simon.harmonichackernews.ui.common.shouldUpdateRestingTargetGeometry
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
+
+private const val TransformDurationMillis = 280
+private const val PredictiveBackTranslationXDp = 56f
+private const val PredictiveBackTranslationYDp = 18f
+private const val PagerSettledOffsetTolerance = 0.001f
+private const val DismissFallbackDelayMillis = 460L
+
+internal enum class StoryPreviewOpeningDecision {
+    Animate,
+    SnapToOpen,
+}
+
+internal fun storyPreviewOpeningDecision(
+    current: StoryPreviewOpeningDecision?,
+    snapshotsReady: Boolean,
+    snapshotsUnavailable: Boolean,
+    hasTargetBounds: Boolean,
+    dismissRequested: Boolean,
+): StoryPreviewOpeningDecision? = when {
+    current != null -> current
+    dismissRequested || !hasTargetBounds -> null
+    snapshotsUnavailable -> StoryPreviewOpeningDecision.SnapToOpen
+    snapshotsReady -> StoryPreviewOpeningDecision.Animate
+    else -> null
+}
+
+internal fun storyPreviewOptionalSnapshotUnavailable(
+    layerHasContent: Boolean,
+    snapshotUnavailable: Boolean,
+): Boolean = layerHasContent && snapshotUnavailable
+
+internal fun storyPreviewPagerSettleTarget(
+    isScrollInProgress: Boolean,
+    isPointerPressed: Boolean,
+    currentPage: Int,
+    currentPageOffsetFraction: Float,
+): Int? = currentPage.takeIf {
+    !isScrollInProgress && !isPointerPressed &&
+        currentPageOffsetFraction.isFinite() &&
+        abs(currentPageOffsetFraction) > PagerSettledOffsetTolerance
+}
+
+internal fun storyPreviewScrollWheelTarget(
+    currentPage: Int,
+    pageCount: Int,
+    scrollDeltaY: Float,
+): Int? {
+    if (pageCount <= 0 || currentPage !in 0..<pageCount) return null
+    if (!scrollDeltaY.isFinite() || scrollDeltaY == 0f) return null
+    val target = currentPage + if (scrollDeltaY > 0f) 1 else -1
+    return target.coerceIn(0, pageCount - 1).takeIf { it != currentPage }
+}
+
+/** Shared pager, list synchronization, container transform, and predictive-back presentation. */
+@Composable
+fun StoryPreviewOverlay(
+    controller: StoriesScreenController,
+    tablet: Boolean,
+    pageOnScrollWheel: Boolean = false,
+    onScrimAlphaChanged: (Float) -> Unit = {},
+    cardContent: @Composable (
+        story: StoryListItemSnapshot,
+        page: Int,
+        cardColor: Color,
+        modifier: Modifier,
+    ) -> Unit,
+) {
+    val state = controller.storyPreviewOverlay ?: return
+    val density = LocalDensity.current
+    val pagerState = rememberStoryPreviewPagerState(state, controller.visibleStoryPreviewId)
+    val pagerFlingBehavior = rememberStoryPreviewFlingBehavior(pagerState)
+    val currentStory = state.stories.getOrNull(pagerState.currentPage)
+        ?: state.stories[state.initialPage]
+    val currentCardColor = rememberStoryPreviewCardColor(controller, currentStory)
+    val pagerSettlingScope = rememberCoroutineScope()
+    var isPointerPressed by remember(state.sessionId) { mutableStateOf(false) }
+    var pagerRepairJob by remember(state.sessionId) { mutableStateOf<Job?>(null) }
+    val scrollWheelPaging = remember(state.sessionId, pagerSettlingScope) {
+        StoryPreviewScrollWheelPagingState(pagerSettlingScope)
+    }
+    val transformProgress = remember(state.sessionId) { Animatable(0f) }
+    val dismissOpacity = remember(state.sessionId) { Animatable(1f) }
+    val predictiveProgressAnimation = remember(state.sessionId) { Animatable(0f) }
+    var overlayActive by remember(state.sessionId) { mutableStateOf(false) }
+    var hideTargetContent by remember(state.sessionId) { mutableStateOf(true) }
+    var drawOverlayShadows by remember(state.sessionId) { mutableStateOf(false) }
+    var openingStarted by remember(state.sessionId) { mutableStateOf(false) }
+    var openingCompleted by remember(state.sessionId) { mutableStateOf(false) }
+    var openingDecision by remember(state.sessionId) {
+        mutableStateOf<StoryPreviewOpeningDecision?>(null)
+    }
+    var rootOffset by remember(state.sessionId) { mutableStateOf(Offset.Zero) }
+    var targetBounds by remember(state.sessionId, currentStory.id) { mutableStateOf<Rect?>(null) }
+    var targetImageBounds by remember(state.sessionId, currentStory.id) { mutableStateOf<Rect?>(null) }
+    var targetTitleBounds by remember(state.sessionId, currentStory.id) { mutableStateOf<Rect?>(null) }
+    var targetSummaryBounds by remember(state.sessionId, currentStory.id) { mutableStateOf<Rect?>(null) }
+    var targetAuthorBounds by remember(state.sessionId, currentStory.id) { mutableStateOf<Rect?>(null) }
+    var targetMetaBounds by remember(state.sessionId, currentStory.id) { mutableStateOf<Rect?>(null) }
+    var targetSupplementaryBounds by remember(state.sessionId, currentStory.id) {
+        mutableStateOf<Rect?>(null)
+    }
+    var targetCommentsButtonBounds by remember(state.sessionId, currentStory.id) {
+        mutableStateOf<Rect?>(null)
+    }
+    var targetImageLayer by remember(state.sessionId, currentStory.id) {
+        mutableStateOf<GraphicsLayer?>(null)
+    }
+    var targetTitleLayer by remember(state.sessionId, currentStory.id) {
+        mutableStateOf<GraphicsLayer?>(null)
+    }
+    var targetSummaryLayer by remember(state.sessionId, currentStory.id) {
+        mutableStateOf<GraphicsLayer?>(null)
+    }
+    var targetAuthorLayer by remember(state.sessionId, currentStory.id) { mutableStateOf<GraphicsLayer?>(null) }
+    var targetMetaLayer by remember(state.sessionId, currentStory.id) {
+        mutableStateOf<GraphicsLayer?>(null)
+    }
+    var targetSupplementaryLayer by remember(state.sessionId, currentStory.id) {
+        mutableStateOf<GraphicsLayer?>(null)
+    }
+    val dismissRequest = controller.storyPreviewDismissRequest
+    val updateRestingTargetGeometry by remember(controller) {
+        computedStateOf {
+            shouldUpdateRestingTargetGeometry(
+                predictiveBackProgress = controller.storyPreviewPredictiveBackProgress,
+                dismissRequestVersion = controller.storyPreviewDismissRequest,
+            )
+        }
+    }
+    val predictiveSettleRequest = controller.storyPreviewPredictiveBackSettleRequest
+    // An interrupted opening has not exposed interactive dialog content, so its existing snapshots
+    // are already current. Reusing them makes the transform reverse immediately. A fully opened
+    // dialog still refreshes snapshots on dismiss to include any actions or late-loaded content.
+    val snapshotRefreshKey = if (dismissRequest != 0 && !openingCompleted) 0 else dismissRequest
+    val targetImageCapture = rememberGraphicsLayerSnapshot(targetImageLayer, snapshotRefreshKey)
+    val targetTitleCapture = rememberGraphicsLayerSnapshot(targetTitleLayer, snapshotRefreshKey)
+    val targetSummaryCapture = rememberGraphicsLayerSnapshot(targetSummaryLayer, snapshotRefreshKey)
+    val targetAuthorCapture = rememberGraphicsLayerSnapshot(targetAuthorLayer, snapshotRefreshKey)
+    val targetMetaCapture = rememberGraphicsLayerSnapshot(targetMetaLayer, snapshotRefreshKey)
+    val targetSupplementaryCapture =
+        rememberGraphicsLayerSnapshot(targetSupplementaryLayer, snapshotRefreshKey)
+    val sourceGeometry = controller.sourceGeometryForStory(currentStory.id)
+    val sourceImageCapture = rememberGraphicsLayerSnapshot(sourceGeometry?.imageLayer, snapshotRefreshKey)
+    val sourceTitleCapture = rememberGraphicsLayerSnapshot(sourceGeometry?.titleLayer, snapshotRefreshKey)
+    val sourceSummaryCapture = rememberGraphicsLayerSnapshot(sourceGeometry?.summaryLayer, snapshotRefreshKey)
+    val sourceAuthorCapture = rememberGraphicsLayerSnapshot(sourceGeometry?.authorLayer, snapshotRefreshKey)
+    val sourceMetaCapture = rememberGraphicsLayerSnapshot(sourceGeometry?.metaLayer, snapshotRefreshKey)
+    val sourceIndexCapture = rememberGraphicsLayerSnapshot(sourceGeometry?.indexLayer, snapshotRefreshKey)
+    val sourceCommentsCapture = rememberGraphicsLayerSnapshot(
+        sourceGeometry?.commentsLayer,
+        snapshotRefreshKey,
+    )
+    val targetImageSnapshot = targetImageCapture.image
+    val targetTitleSnapshot = targetTitleCapture.image
+    val targetSummarySnapshot = targetSummaryCapture.image
+    val targetAuthorSnapshot = targetAuthorCapture.image
+    val targetMetaSnapshot = targetMetaCapture.image
+    val targetSupplementarySnapshot = targetSupplementaryCapture.image
+    val sourceImageSnapshot = sourceImageCapture.image
+    val sourceTitleSnapshot = sourceTitleCapture.image
+    val sourceSummarySnapshot = sourceSummaryCapture.image
+    val sourceAuthorSnapshot = sourceAuthorCapture.image
+    val sourceMetaSnapshot = sourceMetaCapture.image
+    val sourceIndexSnapshot = sourceIndexCapture.image
+    val sourceCommentsSnapshot = sourceCommentsCapture.image
+    var lastPagerPosition by remember(state.sessionId) {
+        mutableFloatStateOf(pagerState.currentPage.toFloat())
+    }
+    var pendingListScroll by remember(state.sessionId) { mutableFloatStateOf(0f) }
+    fun sourceSnapshotReady(bounds: Rect?, capture: GraphicsLayerSnapshot): Boolean =
+        bounds == null || capture.isCurrent(snapshotRefreshKey)
+    fun sourceSnapshotUnavailable(bounds: Rect?, capture: GraphicsLayerSnapshot): Boolean =
+        bounds != null && capture.isUnavailable(snapshotRefreshKey)
+    val sourceSnapshotsReady =
+        sourceGeometry != null &&
+            sourceSnapshotReady(sourceGeometry.image, sourceImageCapture) &&
+            sourceSnapshotReady(sourceGeometry.title, sourceTitleCapture) &&
+            sourceSnapshotReady(sourceGeometry.summary, sourceSummaryCapture) &&
+            sourceSnapshotReady(sourceGeometry.author, sourceAuthorCapture) &&
+            sourceSnapshotReady(sourceGeometry.meta, sourceMetaCapture) &&
+            sourceSnapshotReady(sourceGeometry.index, sourceIndexCapture) &&
+            sourceSnapshotReady(sourceGeometry.comments, sourceCommentsCapture)
+    val targetImageLayerHasContent = targetImageLayer
+        ?.takeIf { it.size.width > 0 && it.size.height > 0 } != null
+    val targetAuthorLayerHasContent = targetAuthorLayer?.takeIf { it.size.width > 0 && it.size.height > 0 } != null
+    val targetSummaryLayerHasContent = targetSummaryLayer
+        ?.takeIf { it.size.width > 0 && it.size.height > 0 } != null
+    val snapshotsReadyForTransition =
+        sourceSnapshotsReady &&
+            targetBounds != null &&
+            targetCommentsButtonBounds != null &&
+            targetTitleBounds != null &&
+            targetTitleCapture.isCurrent(snapshotRefreshKey) &&
+            targetMetaCapture.isCurrent(snapshotRefreshKey) &&
+            targetSupplementaryCapture.isCurrent(snapshotRefreshKey) &&
+            (!targetImageLayerHasContent ||
+                targetImageCapture.isCurrent(snapshotRefreshKey)) &&
+            (!targetAuthorLayerHasContent || targetAuthorCapture.isCurrent(snapshotRefreshKey)) &&
+            (!targetSummaryLayerHasContent ||
+                targetSummaryCapture.isCurrent(snapshotRefreshKey))
+    val snapshotsUnavailableForTransition = sourceGeometry == null ||
+        sourceSnapshotUnavailable(sourceGeometry.image, sourceImageCapture) ||
+        sourceSnapshotUnavailable(sourceGeometry.title, sourceTitleCapture) ||
+        sourceSnapshotUnavailable(sourceGeometry.summary, sourceSummaryCapture) ||
+        sourceSnapshotUnavailable(sourceGeometry.author, sourceAuthorCapture) ||
+        sourceSnapshotUnavailable(sourceGeometry.meta, sourceMetaCapture) ||
+        sourceSnapshotUnavailable(sourceGeometry.index, sourceIndexCapture) ||
+        sourceSnapshotUnavailable(sourceGeometry.comments, sourceCommentsCapture) ||
+        targetTitleCapture.isUnavailable(snapshotRefreshKey) ||
+        targetMetaCapture.isUnavailable(snapshotRefreshKey) ||
+        targetSupplementaryCapture.isUnavailable(snapshotRefreshKey) ||
+        storyPreviewOptionalSnapshotUnavailable(
+            targetImageLayerHasContent,
+            targetImageCapture.isUnavailable(snapshotRefreshKey),
+        ) ||
+        storyPreviewOptionalSnapshotUnavailable(targetAuthorLayerHasContent, targetAuthorCapture.isUnavailable(snapshotRefreshKey)) ||
+        storyPreviewOptionalSnapshotUnavailable(
+            targetSummaryLayerHasContent,
+            targetSummaryCapture.isUnavailable(snapshotRefreshKey),
+        )
+
+    // YouTube oEmbed commonly resolves its title and thumbnail just after the dialog is composed.
+    // Those updates replace capture layers and temporarily make the latest snapshots unready. Latch
+    // the first valid opening decision so that transient content enrichment cannot cancel an
+    // already-started container transform.
+    LaunchedEffect(
+        state,
+        snapshotsReadyForTransition,
+        snapshotsUnavailableForTransition,
+        dismissRequest,
+        targetBounds,
+    ) {
+        openingDecision = storyPreviewOpeningDecision(
+            current = openingDecision,
+            snapshotsReady = snapshotsReadyForTransition,
+            snapshotsUnavailable = snapshotsUnavailableForTransition,
+            hasTargetBounds = targetBounds != null,
+            dismissRequested = dismissRequest != 0,
+        )
+    }
+    LaunchedEffect(state, openingDecision, dismissRequest) {
+        if (dismissRequest != 0 || openingStarted) return@LaunchedEffect
+        when (openingDecision) {
+            null -> return@LaunchedEffect
+            StoryPreviewOpeningDecision.SnapToOpen -> {
+                openingStarted = true
+                transformProgress.snapTo(1f)
+                hideTargetContent = false
+                controller.setStoryPreviewSourceCovered(false)
+                openingCompleted = true
+                return@LaunchedEffect
+            }
+            StoryPreviewOpeningDecision.Animate -> Unit
+        }
+        openingStarted = true
+        // First cover the still-live source with an identical progress-zero overlay. Only hide the
+        // list row after that overlay has reached the screen, so there is no empty handoff frame.
+        overlayActive = true
+        withFrameNanos { }
+        controller.setStoryPreviewSourceCovered(true)
+        drawOverlayShadows = true
+        withFrameNanos { }
+        transformProgress.animateTo(
+            1f,
+            tween(TransformDurationMillis, easing = FastOutSlowInEasing),
+        )
+        // Likewise, draw the final card below the progress-one overlay for one frame before the
+        // overlay is removed.
+        hideTargetContent = false
+        drawOverlayShadows = false
+        withFrameNanos { }
+        openingCompleted = true
+        overlayActive = false
+    }
+    val dismissTransitionReady by rememberUpdatedState(
+        when {
+            snapshotsUnavailableForTransition -> false
+            snapshotsReadyForTransition -> true
+            else -> null
+        },
+    )
+    LaunchedEffect(state.sessionId, dismissRequest) {
+        if (dismissRequest == 0) return@LaunchedEffect
+        // Decide once, then finish closing even if a late image or favorite rollback changes the
+        // available source layers. Restarting this effect on readiness changes cancels the exit.
+        val canTransform = withTimeoutOrNull(DismissFallbackDelayMillis) {
+            snapshotFlow { dismissTransitionReady }.filterNotNull().first()
+        } ?: false
+        if (!canTransform) {
+            controller.setStoryPreviewSourceCovered(false)
+            // A removed last bookmark/favorite has no list row to transform back into.
+            dismissOpacity.animateTo(0f, tween(180))
+            controller.completeStoryPreviewDismiss()
+            return@LaunchedEffect
+        }
+        // Put the overlay over the still-live dialog first, then hide the live dialog beneath it.
+        overlayActive = true
+        withFrameNanos { }
+        hideTargetContent = true
+        drawOverlayShadows = true
+        withFrameNanos { }
+        transformProgress.animateTo(
+            0f,
+            tween(TransformDurationMillis, easing = FastOutSlowInEasing),
+        )
+        // Reveal the list row underneath the identical progress-zero overlay before removing the
+        // dialog host. This closes the second possible one-frame gap.
+        controller.setStoryPreviewSourceCovered(false)
+        drawOverlayShadows = false
+        withFrameNanos { }
+        controller.completeStoryPreviewDismiss()
+    }
+    LaunchedEffect(controller, predictiveProgressAnimation) {
+        snapshotFlow {
+            controller.storyPreviewPredictiveBackProgress to controller.storyPreviewPredictiveBackSettleRequest
+        }.collect { (progress, settle) ->
+            if (settle == null) predictiveProgressAnimation.snapTo(progress.coerceIn(0f, 1f))
+        }
+    }
+    LaunchedEffect(predictiveSettleRequest?.serial) {
+        val request = predictiveSettleRequest ?: return@LaunchedEffect
+        predictiveProgressAnimation.animateTo(
+            request.target,
+            tween(180, easing = FastOutSlowInEasing),
+        )
+        controller.finishStoryPreviewPredictiveBackSettle(request)
+    }
+    val removalRequest = controller.storyPreviewRemovalRequest
+    LaunchedEffect(removalRequest) {
+        val request = removalRequest ?: return@LaunchedEffect
+        val targetPage = state.stories.indexOfFirst { it.id == request.targetStoryId }
+        if (targetPage < 0) return@LaunchedEffect
+        pagerRepairJob?.cancel()
+        pagerState.animateScrollToPage(
+            targetPage,
+            animationSpec = tween(TransformDurationMillis, easing = FastOutSlowInEasing),
+        )
+        val page = controller.completeStoryPreviewRemoval(request) ?: return@LaunchedEffect
+        // Change the deck and its index together, keeping the newly visible story stationary.
+        lastPagerPosition = page.toFloat()
+        pendingListScroll = 0f
+        pagerState.requestScrollToPage(page)
+    }
+    LaunchedEffect(pagerState, state, removalRequest) {
+        snapshotFlow {
+            (pagerState.currentPage + pagerState.currentPageOffsetFraction)
+                .coerceIn(0f, (state.stories.size - 1).coerceAtLeast(0).toFloat())
+        }.collect { position ->
+            val lower = floor(position).toInt().coerceIn(state.stories.indices)
+            val upper = ceil(position).toInt().coerceIn(state.stories.indices)
+            val offset = position - lower
+            controller.onStoryPreviewPagePosition(lower, upper, offset)
+
+            val delta = position - lastPagerPosition
+            if (delta != 0f && state.stories.size > 1 && removalRequest == null) {
+                var cursor = lastPagerPosition
+                if (position > lastPagerPosition) {
+                    while (cursor < position) {
+                        val segment = floor(cursor).toInt()
+                            .coerceAtLeast(0)
+                            .coerceAtMost(state.stories.lastIndex - 1)
+                        val end = min(position, segment + 1f)
+                        val first = state.stories[segment]
+                        pendingListScroll += (end - cursor) *
+                            controller.getAdjacentStoryPagingDistance(first.id)
+                        cursor = end
+                    }
+                } else {
+                    while (cursor > position) {
+                        val segment = (ceil(cursor).toInt() - 1)
+                            .coerceAtLeast(0)
+                            .coerceAtMost(state.stories.lastIndex - 1)
+                        val end = max(position, segment.toFloat())
+                        val first = state.stories[segment]
+                        pendingListScroll += (end - cursor) *
+                            controller.getAdjacentStoryPagingDistance(first.id)
+                        cursor = end
+                    }
+                }
+                val wholePixels = if (pendingListScroll > 0f) {
+                    floor(pendingListScroll).toInt()
+                } else {
+                    ceil(pendingListScroll).toInt()
+                }
+                if (wholePixels != 0) {
+                    controller.requestScrollBy(wholePixels)
+                    pendingListScroll -= wholePixels
+                }
+            }
+            lastPagerPosition = position
+        }
+    }
+    LaunchedEffect(pagerState, state) {
+        snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
+            .collect(controller::onStoryPreviewPageSettled)
+    }
+    LaunchedEffect(pagerState, state) {
+        snapshotFlow {
+            storyPreviewPagerSettleTarget(
+                isScrollInProgress = pagerState.isScrollInProgress,
+                isPointerPressed = isPointerPressed,
+                currentPage = pagerState.currentPage,
+                currentPageOffsetFraction = pagerState.currentPageOffsetFraction,
+            )
+        }.distinctUntilChanged().collect { targetPage ->
+            if (targetPage != null) {
+                // Starting another gesture can cancel Pager's return animation after an incomplete
+                // swipe. Run the repair in a child job so that cancellation does not kill this
+                // observer; once the pager is idle again it can retry and finish centering the page.
+                pagerRepairJob = pagerSettlingScope.launch {
+                    pagerState.animateScrollToPage(targetPage)
+                }
+            }
+        }
+    }
+
+    val transitionSettled by remember(transformProgress) {
+        computedStateOf { transformProgress.value >= 0.999f }
+    }
+    val scrimAlpha = {
+        val predictive = predictiveProgressAnimation.value
+        val eased = 1f - (1f - predictive) * (1f - predictive)
+        0.32f * transformProgress.value * (1f - 0.55f * eased)
+    }
+    val currentOnScrimAlphaChanged by rememberUpdatedState(onScrimAlphaChanged)
+    LaunchedEffect(state.sessionId, transformProgress, predictiveProgressAnimation, dismissOpacity) {
+        snapshotFlow { scrimAlpha() * dismissOpacity.value }.collect { currentOnScrimAlphaChanged(it) }
+    }
+    fun transformTargetBounds(bounds: Rect?): Rect? {
+        val container = targetBounds ?: return bounds
+        val predictive = predictiveProgressAnimation.value
+        val eased = 1f - (1f - predictive) * (1f - predictive)
+        val direction = if (controller.storyPreviewPredictiveBackEdge == 1) -1f else 1f
+        return bounds?.let {
+            storyPreviewPredictiveBackBounds(
+                bounds = it,
+                container = container,
+                scale = 1f - 0.1f * eased,
+                translationX = with(density) { PredictiveBackTranslationXDp.dp.toPx() } * eased * direction,
+                translationY = with(density) { PredictiveBackTranslationYDp.dp.toPx() } * eased,
+                pivotFractionX = if (direction > 0f) 0f else 1f,
+            )
+        }
+    }
+    val sharedTransition = StoryPreviewSharedTransitionState(
+        progress = { transformProgress.value },
+        closing = dismissRequest != 0,
+        active = overlayActive,
+        hideTargetContent = hideTargetContent,
+        drawOverlayShadows = drawOverlayShadows,
+        source = sourceGeometry,
+        sourceSnapshot = { element ->
+            when (element) {
+                StoryPreviewSourceElement.Image -> sourceImageSnapshot
+                StoryPreviewSourceElement.Title -> sourceTitleSnapshot
+                StoryPreviewSourceElement.Summary -> sourceSummarySnapshot
+                StoryPreviewSourceElement.Author -> sourceAuthorSnapshot
+                StoryPreviewSourceElement.Meta -> sourceMetaSnapshot
+                StoryPreviewSourceElement.Index -> sourceIndexSnapshot
+                StoryPreviewSourceElement.Comments -> sourceCommentsSnapshot
+            }
+        },
+        // The live card is already transformed by predictive back when a committed gesture starts
+        // the shared-element dismissal. Use that same geometry for the overlay's progress-one
+        // frame so handing drawing from the live card to the overlay cannot jump back to rest.
+        targetContainer = { transformTargetBounds(targetBounds) },
+        targetScale = {
+            val p = predictiveProgressAnimation.value
+            1f - 0.1f * (1f - (1f - p) * (1f - p))
+        },
+        targetCommentsButton = { transformTargetBounds(targetCommentsButtonBounds) },
+        rootOffset = rootOffset,
+        targetBounds = { element ->
+            transformTargetBounds(when (element) {
+                StoryPreviewSharedElement.Image -> targetImageBounds
+                StoryPreviewSharedElement.Title -> targetTitleBounds
+                StoryPreviewSharedElement.Summary -> targetSummaryBounds
+                StoryPreviewSharedElement.Author -> targetAuthorBounds
+                StoryPreviewSharedElement.Meta -> targetMetaBounds
+                StoryPreviewSharedElement.Supplementary -> targetSupplementaryBounds
+            })
+        },
+        targetSnapshot = { element ->
+            when (element) {
+                StoryPreviewSharedElement.Image -> targetImageSnapshot
+                StoryPreviewSharedElement.Title -> targetTitleSnapshot
+                StoryPreviewSharedElement.Summary -> targetSummarySnapshot
+                StoryPreviewSharedElement.Author -> targetAuthorSnapshot
+                StoryPreviewSharedElement.Meta -> targetMetaSnapshot
+                StoryPreviewSharedElement.Supplementary -> targetSupplementarySnapshot
+            }
+        },
+        updateTargetBounds = { element, bounds ->
+            if (updateRestingTargetGeometry) {
+                when (element) {
+                    StoryPreviewSharedElement.Image -> {
+                        if (targetImageBounds != bounds) targetImageBounds = bounds
+                    }
+                    StoryPreviewSharedElement.Title -> {
+                        if (targetTitleBounds != bounds) targetTitleBounds = bounds
+                    }
+                    StoryPreviewSharedElement.Summary -> {
+                        if (targetSummaryBounds != bounds) targetSummaryBounds = bounds
+                    }
+                    StoryPreviewSharedElement.Author -> {
+                        if (targetAuthorBounds != bounds) targetAuthorBounds = bounds
+                    }
+                    StoryPreviewSharedElement.Meta -> {
+                        if (targetMetaBounds != bounds) targetMetaBounds = bounds
+                    }
+                    StoryPreviewSharedElement.Supplementary -> {
+                        if (targetSupplementaryBounds != bounds) {
+                            targetSupplementaryBounds = bounds
+                        }
+                    }
+                }
+            }
+        },
+        updateTargetLayer = { element, layer ->
+            when (element) {
+                StoryPreviewSharedElement.Image -> {
+                    if (targetImageLayer !== layer) targetImageLayer = layer
+                }
+                StoryPreviewSharedElement.Title -> {
+                    if (targetTitleLayer !== layer) targetTitleLayer = layer
+                }
+                StoryPreviewSharedElement.Summary -> {
+                    if (targetSummaryLayer !== layer) targetSummaryLayer = layer
+                }
+                StoryPreviewSharedElement.Author -> {
+                    if (targetAuthorLayer !== layer) targetAuthorLayer = layer
+                }
+                StoryPreviewSharedElement.Meta -> {
+                    if (targetMetaLayer !== layer) targetMetaLayer = layer
+                }
+                StoryPreviewSharedElement.Supplementary -> {
+                    if (targetSupplementaryLayer !== layer) targetSupplementaryLayer = layer
+                }
+            }
+        },
+        updateCommentsButtonBounds = { bounds ->
+            if (updateRestingTargetGeometry && targetCommentsButtonBounds != bounds) {
+                targetCommentsButtonBounds = bounds
+            }
+        },
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { rootOffset = it.boundsInWindow().topLeft }
+            .graphicsLayer { alpha = dismissOpacity.value }
+            .drawBehind { drawRect(Color.Black.copy(alpha = scrimAlpha())) }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = controller::requestDismissStoryPreview,
+            ),
+    ) {
+        VerticalPager(
+            state = pagerState,
+            flingBehavior = pagerFlingBehavior,
+            pageNestedScrollConnection = rememberStoryPreviewNestedScrollConnection(pagerState),
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(pagerState) {
+                    // The card's verticalScroll can move Pager through nested scroll without
+                    // setting Pager's isScrollInProgress. Observe even child-consumed touches
+                    // so the idle repair never pulls the card away from a held finger.
+                    try {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val pressed = event.changes.any { it.pressed }
+                                if (pressed && !isPointerPressed) pagerRepairJob?.cancel()
+                                isPointerPressed = pressed
+                            }
+                        }
+                    } finally {
+                        isPointerPressed = false
+                    }
+                }
+                .then(
+                    if (pageOnScrollWheel) {
+                        Modifier.storyPreviewScrollWheelPaging { scrollDeltaY ->
+                            if (
+                                transformProgress.value < 0.999f ||
+                                dismissRequest != 0 || removalRequest != null
+                            ) {
+                                return@storyPreviewScrollWheelPaging
+                            }
+                            val target = storyPreviewScrollWheelTarget(
+                                currentPage = pagerState.currentPage,
+                                pageCount = state.stories.size,
+                                scrollDeltaY = scrollDeltaY,
+                            ) ?: return@storyPreviewScrollWheelPaging
+                            scrollWheelPaging.page {
+                                pagerState.animateScrollToPage(target)
+                            }
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
+            beyondViewportPageCount = 2,
+            userScrollEnabled = transitionSettled && dismissRequest == 0 && removalRequest == null,
+            key = { page -> state.stories[page].id },
+        ) { page ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        val pageOffset = abs(
+                            (pagerState.currentPage - page) +
+                                pagerState.currentPageOffsetFraction,
+                        )
+                        alpha = (1f - ((pageOffset - 0.75f) / 0.25f)).coerceIn(0f, 1f)
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                // The background is a sibling, not an ancestor, of the card. Both touch
+                // origins then hand unused drag/fling motion directly to Pager through one
+                // nested-scroll child, without an extra scroll node intercepting card flings.
+                Box(Modifier.matchParentSize().scrollable(
+                    state = rememberScrollableState { 0f },
+                    orientation = Orientation.Vertical,
+                    enabled = transitionSettled && dismissRequest == 0 && removalRequest == null,
+                ))
+                Box(
+                    modifier = Modifier.fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .padding(
+                            horizontal = HarmonicDimens.compose_comment_action_screen_padding_horizontal,
+                            vertical = HarmonicDimens.compose_comment_action_screen_padding_vertical,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val currentPage = page == pagerState.currentPage
+                    val cardColor = if (currentPage) currentCardColor else {
+                        rememberStoryPreviewCardColor(controller, state.stories[page])
+                    }
+                    val cardModifier = Modifier
+                        .widthIn(
+                            max = if (tablet) {
+                                HarmonicDimens.compose_comment_action_tablet_max_width
+                            } else {
+                                HarmonicDimens.compose_comment_action_max_width
+                            },
+                        )
+                        .fillMaxWidth()
+                        .then(
+                            if (currentPage) {
+                                Modifier.onGloballyPositioned {
+                                    if (updateRestingTargetGeometry) {
+                                        targetBounds = it.boundsInWindow()
+                                    }
+                                }
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .then(
+                            if (currentPage) {
+                                Modifier.graphicsLayer {
+                                    val predictive = predictiveProgressAnimation.value
+                                    val eased = 1f - (1f - predictive) * (1f - predictive)
+                                    val direction = if (controller.storyPreviewPredictiveBackEdge == 1) -1f else 1f
+                                    scaleX = 1f - 0.1f * eased
+                                    scaleY = scaleX
+                                    translationX = with(density) { PredictiveBackTranslationXDp.dp.toPx() } * eased * direction
+                                    translationY = with(density) { PredictiveBackTranslationYDp.dp.toPx() } * eased
+                                    transformOrigin = TransformOrigin(if (direction > 0f) 0f else 1f, 0.5f)
+                                }
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .modalCardTapBoundary(
+                            cornerRadius = HarmonicDimens.compose_comment_action_corner_radius,
+                            onOutsideTap = controller::requestDismissStoryPreview,
+                        )
+                    if (currentPage) {
+                        CompositionLocalProvider(
+                            LocalStoryPreviewSharedTransition provides sharedTransition,
+                        ) {
+                            cardContent(
+                                state.stories[page],
+                                page,
+                                cardColor,
+                                cardModifier,
+                            )
+                        }
+                    } else {
+                        cardContent(
+                            state.stories[page],
+                            page,
+                            cardColor,
+                            cardModifier,
+                        )
+                    }
+                }
+            }
+        }
+        StoryPreviewTransitionOverlay(
+            transition = sharedTransition,
+            color = currentCardColor,
+        )
+    }
+}
+
+internal fun storyPreviewPredictiveBackBounds(
+    bounds: Rect,
+    container: Rect,
+    scale: Float,
+    translationX: Float,
+    translationY: Float,
+    pivotFractionX: Float,
+): Rect {
+    val pivotX = container.left + container.width * pivotFractionX
+    val pivotY = container.center.y
+    fun transformX(value: Float): Float =
+        pivotX + (value - pivotX) * scale + translationX
+    fun transformY(value: Float): Float =
+        pivotY + (value - pivotY) * scale + translationY
+    return Rect(
+        left = transformX(bounds.left),
+        top = transformY(bounds.top),
+        right = transformX(bounds.right),
+        bottom = transformY(bounds.bottom),
+    )
+}

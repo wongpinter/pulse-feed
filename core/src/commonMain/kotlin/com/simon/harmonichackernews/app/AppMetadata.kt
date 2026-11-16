@@ -1,0 +1,84 @@
+package com.simon.harmonichackernews.app
+
+data class AppMetadata(
+    val name: String = "Pulse Feed",
+    val versionName: String = "",
+    val versionCode: Int = 0,
+    val buildNumber: String = "",
+    val buildType: String = "",
+    val debug: Boolean = false,
+    val debugSettingsEnabled: Boolean = false,
+    /** Upstream project this app is forked from; credited in About and Licenses. */
+    val projectUrl: String = "https://github.com/SimonHalvdansson/Harmonic-HN",
+    /** This app's own repository: issues, feature requests, and source. */
+    val forkUrl: String = "https://github.com/wongpinter/Harmonic-HN",
+    /** This app's own privacy policy. */
+    val privacyUrl: String = "https://github.com/wongpinter/Harmonic-HN/blob/main/PRIVACY.md",
+) {
+    val versionLabel: String
+        get() = when {
+            versionName.isBlank() -> ""
+            debug && buildType.isNotBlank() -> "Version $versionName ($buildType)"
+            else -> "Version $versionName"
+        }
+}
+
+data class LicenseEntry(
+    val name: String,
+    val creator: String,
+    val licenseType: String,
+    val url: String,
+)
+
+/** Dependencies and adapted source code shared by every Harmonic KMP host. */
+object CommonLicenseCatalog {
+    val entries = listOf(
+        LicenseEntry("Harmonic (Origin & Architecture)", "Simon Halvdansson", "Apache License 2.0", "https://github.com/SimonHalvdansson/Harmonic-HN"),
+        LicenseEntry("Kotlin standard library", "JetBrains", "Apache License 2.0", "https://kotlinlang.org/"),
+        LicenseEntry("kotlinx.coroutines", "JetBrains", "Apache License 2.0", "https://github.com/Kotlin/kotlinx.coroutines"),
+        LicenseEntry("kotlinx.serialization", "JetBrains", "Apache License 2.0", "https://github.com/Kotlin/kotlinx.serialization"),
+        LicenseEntry("kotlinx.io", "JetBrains", "Apache License 2.0", "https://github.com/Kotlin/kotlinx-io"),
+        LicenseEntry("kotlinx.collections.immutable", "JetBrains", "Apache License 2.0", "https://github.com/Kotlin/kotlinx.collections.immutable"),
+        LicenseEntry("Ktor", "JetBrains", "Apache License 2.0", "https://ktor.io/"),
+        LicenseEntry("kuri", "dexpace and Omar Aljarrah", "MIT License", "https://github.com/dexpace/kuri"),
+        LicenseEntry("Unicode character data", "Unicode, Inc.", "Unicode License v3", "https://www.unicode.org/license.txt"),
+        LicenseEntry("Compose Multiplatform", "JetBrains", "Apache License 2.0", "https://www.jetbrains.com/compose-multiplatform/"),
+        LicenseEntry("Haze", "Chris Banes", "Apache License 2.0", "https://github.com/chrisbanes/haze"),
+        LicenseEntry("Coil", "Coil contributors", "Apache License 2.0", "https://coil-kt.github.io/coil/"),
+        LicenseEntry("Ksoup", "FleekSoft", "MIT License", "https://github.com/fleeksoft/ksoup"),
+        LicenseEntry("Compose LaTeX", "huarangmeng", "MIT License", "https://github.com/huarangmeng/latex"),
+        LicenseEntry("KaTeX math fonts", "KaTeX contributors", "MIT License", "https://github.com/KaTeX/KaTeX"),
+        LicenseEntry("Palette algorithms", "Android Open Source Project and KMPalette contributors", "Apache License 2.0", "https://github.com/jordond/kmpalette"),
+        LicenseEntry("pdf.js", "Mozilla", "Apache License 2.0", "https://mozilla.github.io/pdf.js/"),
+        LicenseEntry("Readability", "Mozilla", "Apache License 2.0", "https://github.com/mozilla/readability"),
+        LicenseEntry("Materialistic", "Hidroh", "Apache License 2.0", "https://github.com/hidroh/materialistic"),
+    )
+
+    fun withPlatform(platformEntries: List<LicenseEntry>): List<LicenseEntry> =
+        (platformEntries + entries).distinctBy { it.name to it.url }
+
+    fun complete(
+        platformEntries: List<LicenseEntry>,
+        includeLocalAi: Boolean,
+    ): List<LicenseEntry> = withPlatform(
+        platformEntries + if (includeLocalAi) LocalAiLicenseCatalog.entries else emptyList(),
+    )
+}
+
+/** Optional local-inference dependencies shared by hosts that bundle the local AI runtime. */
+object LocalAiLicenseCatalog {
+    val entries = listOf(
+        LicenseEntry(
+            "ML Kit GenAI APIs",
+            "Google",
+            "ML Kit Terms of Service",
+            "https://developers.google.com/ml-kit/genai",
+        ),
+        LicenseEntry(
+            "LiteRT-LM",
+            "Google",
+            "Apache License 2.0",
+            "https://github.com/google-ai-edge/LiteRT-LM",
+        ),
+    )
+}

@@ -1,0 +1,397 @@
+package com.simon.harmonichackernews.ui.comments
+
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.material3.BottomSheetScaffold
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SheetValue
+import androidx.compose.material3.rememberBottomSheetScaffoldState
+import androidx.compose.material3.rememberBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
+import androidx.compose.ui.res.dimensionResource
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.dp
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.R
+import com.simon.harmonichackernews.ui.LocalHarmonicUiDependencies
+import com.simon.harmonichackernews.adapters.CommentDisplaySettings
+import com.simon.harmonichackernews.network.StoryResourceTintKind
+import com.simon.harmonichackernews.utils.AndroidPdfOpener
+import com.simon.harmonichackernews.utils.HtmlTextUtils
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import androidx.compose.runtime.SideEffect
+import com.simon.harmonichackernews.ui.navigation.LocalBrowserPaneState
+
+/** Android shell for system insets, nested-scroll interop, and image/cache facilities. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun CommentsScaffold(
+    controller: CommentsScreenController,
+    reserveUpButtonInset: Boolean,
+    retainedContent: (@Composable () -> Unit)? = null,
+) {
+    val portal = LocalSideBySideCommentsPortal.current
+    val browserPane = LocalBrowserPaneState.current
+    val integratedBrowser = controller.integratedWebView
+    val browserOpening = controller.sheetRequest?.expanded == false
+    val sideBySide = controller.sideBySideActive
+    val sideBySideAvailable = controller.sideBySideAvailable
+    val logicalExpansion = controller.sheetSlideOffset
+    val background = MaterialTheme.colorScheme.pageBackground
+    SideEffect {
+        controller.browserPaneState = browserPane
+        browserPane?.let {
+            it.owner = controller
+            it.integrated = integratedBrowser
+            it.opening = browserOpening
+            it.sideBySide = sideBySide
+            it.canShowSideBySide = sideBySideAvailable
+            it.logicalExpansion = logicalExpansion
+            it.showSideBySide = { if (!controller.sideBySideActive) controller.toggleSideBySide() }
+        }
+    }
+    val density = LocalDensity.current
+    val navigationBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val peekHeight = navigationBottom + CommentsSheetCollapsedHeight
+    val modalBlockingSheet = rememberUpdatedState(controller.sheetGesturesBlocked)
+    val sheetState = rememberBottomSheetState(
+        initialValue = if (!controller.isSheetExpanded()) {
+            SheetValue.PartiallyExpanded
+        } else {
+            SheetValue.Expanded
+        },
+        enabledValues = setOf(SheetValue.PartiallyExpanded, SheetValue.Expanded),
+        confirmValueChange = { value -> value == SheetValue.Expanded || !modalBlockingSheet.value },
+    )
+    val scaffoldState = rememberBottomSheetScaffoldState(bottomSheetState = sheetState)
+
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val fullHeight = maxHeight
+        val travelPx = with(density) { (fullHeight - peekHeight).toPx().coerceAtLeast(1f) }
+        val horizontalBack = portal != null && browserPane?.standalone != true && sideBySide
+        val backPreviewLiftPx = if (horizontalBack) 0f else if (controller.sideBySideActive) travelPx * 0.35f
+            else with(density) { 48.dp.toPx() }.coerceAtMost(travelPx)
+        val backPreviewLift = animateFloatAsState(
+            targetValue = if (controller.predictiveBackActive) {
+                backPreviewLiftPx * controller.predictiveBackProgress.coerceIn(0f, 1f)
+            } else {
+                backPreviewLiftPx * controller.committedSheetBackProgress
+            },
+            animationSpec = if (controller.predictiveBackActive || controller.committedSheetBackProgress > 0f) snap() else tween(200),
+            label = "comments sheet back preview",
+        )
+
+        val visualExpansion = {
+            val offset = runCatching { sheetState.requireOffset() }.getOrDefault(
+                if (controller.isSheetExpanded()) 0f else travelPx,
+            )
+            (1f - ((offset - backPreviewLift.value).coerceAtLeast(0f) / travelPx)).coerceIn(0f, 1f)
+        }
+        LaunchedEffect(portal, sheetState, travelPx) {
+            snapshotFlow { visualExpansion() }.collect {
+                portal?.sheetExpansion = it
+                browserPane?.sheetExpansion = it
+            }
+        }
+
+        LaunchedEffect(controller.sheetRequest) {
+            val request = controller.sheetRequest ?: return@LaunchedEffect
+            if (request.expanded && horizontalBack && controller.committedSheetBackProgress > 0f) {
+                snapshotFlow { portal.horizontalProgress.value }.first { it >= 1f }
+            }
+            if (request.expanded) sheetState.expand() else sheetState.partialExpand()
+            controller.consumeSheetRequest(request)
+        }
+
+        LaunchedEffect(sheetState, travelPx) {
+            snapshotFlow { runCatching { sheetState.requireOffset() }.getOrNull() }
+                .collect { offset ->
+                    val expandedFraction = offset
+                        ?.let { 1f - (it / travelPx) }
+                        ?.coerceIn(0f, 1f)
+                        ?: if (sheetState.currentValue == SheetValue.Expanded) 1f else 0f
+                    controller.updateSheet(expandedFraction, controller.topInsetPx)
+                    controller.listener.onSheetProgressChanged(expandedFraction)
+                }
+        }
+
+        LaunchedEffect(sheetState) {
+            snapshotFlow { sheetState.currentValue }
+                .distinctUntilChanged()
+                .collect { value ->
+                    controller.listener.onSheetSettled(value == SheetValue.Expanded)
+                }
+        }
+
+        BottomSheetScaffold(
+            modifier = Modifier
+                .fillMaxSize()
+                .onGloballyPositioned {
+                    if (portal != null && !portal.horizontalBack) portal.detailLeft = it.positionInRoot().x
+                }
+                .graphicsLayer {
+                    // Keep the logical sheet collapsed during the preview so returning to
+                    // comments remains the back target throughout the gesture. Translate the
+                    // complete surface, including its shadow, and settle alongside expansion.
+                    val remainingTravel = runCatching { sheetState.requireOffset() }
+                        .getOrDefault(0f).coerceAtLeast(0f)
+                    translationY = -backPreviewLift.value.coerceAtMost(remainingTravel)
+                },
+            scaffoldState = scaffoldState,
+            sheetPeekHeight = peekHeight,
+            sheetMaxWidth = androidx.compose.ui.unit.Dp.Unspecified,
+            sheetShape = RectangleShape,
+            // Stay neutral when collapsed. Follow the incoming header's reveal directly,
+            // including predictive back, so its background and these controls meet seamlessly.
+            sheetContainerColor = if (sideBySide && portal?.horizontalBack != true) lerpCommentsColor(
+                background,
+                controller.headerBackgroundColor ?: background,
+                controller.statusBarHeaderCoverage * (portal?.sheetExpansion ?: visualExpansion()),
+            ) else background,
+            sheetContentColor = MaterialTheme.colorScheme.onSurface,
+            // Only cast a shadow as the sheet lowers to expose the article underneath.
+            sheetShadowElevation = 16.dp * (1f - controller.sheetSlideOffset.coerceIn(0f, 1f)),
+            sheetDragHandle = null,
+            // Give active summary selection ownership of drags, including movement outside the
+            // text. Disable both the sheet's drag detector and its nested-scroll connection.
+            sheetSwipeEnabled = controller.integratedWebView && !controller.sheetGesturesBlocked,
+            containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            sheetContent = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(fullHeight),
+                ) {
+                    if ((controller.sideBySideActive || portal?.horizontalBack == true) &&
+                        portal != null && retainedContent != null
+                    ) {
+                        if (!portal.horizontalBack) {
+                            SideBySideCommentsSheetMirror(portal, with(density) { peekHeight.toPx() })
+                        }
+                        Column {
+                            val expansion = if (portal.horizontalBack) 0f else portal.sheetExpansion
+                            Spacer(Modifier.height(with(density) { controller.topInsetPx.toDp() } * expansion))
+                            CommentsSheetControls(
+                                readerModeAvailable = controller.readerModeAvailable,
+                                readerModeEnabled = controller.readerModeEnabled,
+                                sideBySideAvailable = controller.sideBySideAvailable,
+                                sideBySideActive = true,
+                                onSideBySide = controller::toggleSideBySide,
+                                showInvert = controller.displaySettings?.showInvert == true,
+                                progress = { 1f - expansion },
+                                contentAlpha = { 1f },
+                                onAction = controller.listener::onSheetAction,
+                                onBrowserBack = null,
+                            )
+                        }
+                    } else if (retainedContent != null) {
+                        retainedContent()
+                    } else {
+                        AndroidCommentsScreen(controller, reserveUpButtonInset)
+                    }
+                }
+            },
+            content = {},
+        )
+    }
+}
+
+@Composable
+internal fun AndroidCommentsScreen(
+    controller: CommentsScreenController,
+    reserveUpButtonInset: Boolean,
+) {
+    val nestedScrollInterop = rememberNestedScrollInteropConnection()
+    val initialListState = rememberCommentsListState()
+    val listState = remember(controller) { controller.retainListState(initialListState) }
+    CommentsRoute(
+        controller = controller,
+        listModifier = Modifier.nestedScroll(nestedScrollInterop),
+        listState = listState,
+        reserveUpButtonInset = reserveUpButtonInset,
+        // The pane host draws these after its long-press overlays so the transition content stays
+        // behind both the back button and the bottom navigation controls.
+        showNavigationControls = false,
+        headerContent = { settings ->
+            AndroidCommentsHeader(
+                controller = controller,
+                settings = settings,
+                contentVersion = controller.contentVersion,
+            )
+        },
+        searchDialog = { settings ->
+            AndroidCommentsSearchDialog(
+                controller = controller,
+                searchTerm = controller.searchQuery,
+                visibleComments = controller.searchResults,
+                settings = settings,
+                storyAuthor = controller.story.by,
+                accountUser = controller.accountUser,
+                onSearchTermChanged = controller::updateSearchQuery,
+                onDismiss = controller::dismissCommentSearch,
+                onCommentSelected = controller::selectSearchResult,
+            )
+        },
+        // Android hosts the action overlay above the pane-level status-bar protection.
+        actionOverlay = {},
+    )
+}
+
+@Composable
+private fun AndroidCommentsHeader(
+    controller: CommentsScreenController,
+    settings: CommentDisplaySettings,
+    contentVersion: Int,
+) {
+    val context = LocalContext.current
+    val dependencies = LocalHarmonicUiDependencies.current
+    val story = remember(controller.story, contentVersion) { controller.story }
+    val previewResource = controller.headerPreviewResource?.takeIf { it.pageUrl == story.url }
+    val tintBaseColor = HarmonicTheme.targetColorScheme.cardBackground.toArgb()
+    val headerPresentation = remember(
+        story.id,
+        story.previewImageUrl,
+        story.previewImageTintColorLoaded,
+        story.previewImageTintColor,
+        story.previewImageTintBaseColor,
+        story.previewImageTintMode,
+        story.faviconTintSourceUrl,
+        story.faviconTintColorLoaded,
+        story.faviconTintColor,
+        story.faviconTintBaseColor,
+        story.faviconTintMode,
+        previewResource,
+        settings.faviconProvider,
+        settings.paletteTintMode,
+        tintBaseColor,
+        controller.lastRefreshed,
+        contentVersion,
+    ) {
+        CommentsHeaderPresentationFactory.create(
+            story = story,
+            previewResource = previewResource,
+            faviconProvider = settings.faviconProvider,
+            paletteTintMode = settings.paletteTintMode,
+            tintBaseColor = tintBaseColor,
+            tintStore = dependencies.storyResourceTints,
+            userTags = dependencies.userTags,
+            lastRefreshedMillis = controller.lastRefreshed,
+            formatTime = dependencies.platform.timeFormatting::time,
+        )
+    }
+    val tintPresentation = headerPresentation.tint
+    val paletteTintMode = tintPresentation.paletteMode
+    val previewImageUrl = tintPresentation.previewImageUrl
+    val previewPlatform = remember(context) {
+        CommentsPreviewPlatform(
+            textStyle = legacyTextStyle,
+            openLink = { url -> dependencies.links.open(url) },
+            downloadPdf = { url -> AndroidPdfOpener.open(context, url) },
+            openCustomTab = { url -> dependencies.links.open(url) },
+            plainText = HtmlTextUtils::plainText,
+        )
+    }
+    val portal = LocalSideBySideCommentsPortal.current
+    CommentsHeader(
+        controller = controller,
+        settings = settings,
+        contentVersion = contentVersion,
+        storyPosterTag = headerPresentation.posterTag,
+        storyPosterTagColor = headerPresentation.posterTagColor,
+        tintBaseColor = tintBaseColor,
+        initialTint = tintPresentation.initialTintArgb,
+        headerTopPadding = dimensionResource(R.dimen.comments_header_top_padding),
+        bookmarksEnabled = dependencies.userSettings.general.bookmarksEnabled,
+        lastRefreshedText = headerPresentation.lastRefreshedText,
+        textStyle = legacyTextStyle,
+        previewPlatform = previewPlatform,
+        linkPreviewsEnabled = dependencies.userSettings.reading.linkPreviewsEnabled,
+        headerPreviewImageDisplayed = settings.showHeaderPreviewImage &&
+            tintPresentation.previewImageAvailable,
+        // The left pane stays fully tinted; the incoming sheet uses the normal reveal fade.
+        // Keep this independent of header geometry so the retained scroll position stays put.
+        headerTintProgress = {
+            if (controller.sideBySideActive && portal?.liveInLeft == false) portal.sheetExpansion else null
+        },
+    ) { imageModifier, visibleBackground, onTintLoaded ->
+        val previewUrl = previewImageUrl
+        HeaderPreviewImage(
+            modifier = imageModifier,
+            imageUrl = previewUrl,
+            initiallyFailed = previewResource?.imageLoadFailed == true,
+            visible = settings.showHeaderPreviewImage,
+            suppressed = controller.headerPreviewSuppressed,
+            tintBaseColorArgb = tintBaseColor,
+            paletteTintConfigKey = paletteTintMode,
+            extractTint = tintPresentation.initialTintKind !=
+                StoryResourceTintKind.PREVIEW_IMAGE,
+            onTintExtracted = { tintColor ->
+                val canonicalTint = previewUrl?.let { sourceUrl ->
+                    controller.listener.onHeaderPreviewTintExtracted(
+                        sourceUrl,
+                        tintBaseColor,
+                        paletteTintMode,
+                        tintColor,
+                    )
+                } ?: tintColor
+                onTintLoaded(canonicalTint)
+            },
+            onImageResult = { success ->
+                previewUrl?.let { controller.listener.onHeaderPreviewImageResult(it, success) }
+            },
+            onClick = controller.listener::onHeaderClick,
+            onLongClick = { bounds, sourceContentLayer, imageAspectRatio ->
+                previewImageUrl?.takeIf(String::isNotBlank)?.let { imageUrl ->
+                    controller.showImagePreview(
+                        imageUrl = imageUrl,
+                        description = if (story.title.isNullOrBlank()) {
+                            "Story preview image"
+                        } else {
+                            "Preview image for ${story.title}"
+                        },
+                        sourceBounds = bounds,
+                        sourceContentLayer = sourceContentLayer,
+                        imageAspectRatio = imageAspectRatio,
+                        backgroundColor = visibleBackground.toArgb(),
+                    )
+                }
+            },
+        )
+    }
+}
+
+private val legacyTextStyle = TextStyle(
+    platformStyle = PlatformTextStyle(includeFontPadding = true),
+)

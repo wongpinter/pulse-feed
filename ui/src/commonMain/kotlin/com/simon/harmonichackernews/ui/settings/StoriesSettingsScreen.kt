@@ -1,0 +1,335 @@
+package com.simon.harmonichackernews.ui.settings
+
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.layout.LookaheadScope
+import com.simon.harmonichackernews.ui.content.StoryRowPlacementAnimation
+import org.jetbrains.compose.resources.stringResource
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.painter.Painter
+import com.simon.harmonichackernews.settings.DisplayStyle
+import com.simon.harmonichackernews.resources.*
+import com.simon.harmonichackernews.settings.StoryBooleanPreference
+import com.simon.harmonichackernews.settings.StoryPreviewMode
+import com.simon.harmonichackernews.ui.content.StoryRow
+import com.simon.harmonichackernews.ui.content.StoryRowModel
+
+data class StoriesSettingsUiState(
+    val previewModel: StoryRowModel,
+    val previewImageMode: StoryPreviewMode,
+    val borderlessLargeImage: Boolean,
+    val compact: Boolean,
+    val showPreviewText: Boolean,
+    val showFavicons: Boolean,
+    val showPoints: Boolean,
+    val compactPoints: Boolean,
+    val includeTopLevelDomain: Boolean,
+    val showComments: Boolean,
+    val showIndex: Boolean,
+    val commentsButtonOnLeft: Boolean,
+    val tint: Boolean,
+    val displayStyle: String,
+    val textSize: Float,
+    val textSizeOffset: Int,
+    val minTextSizeOffset: Int,
+    val maxTextSizeOffset: Int,
+    val hotnessEnabled: Boolean,
+    val hotnessLabel: String,
+    val preferredFont: String,
+    val paletteTintConfigKey: String,
+    val startingPage: String,
+    val alwaysOpenComments: Boolean,
+    val pagination: Boolean,
+    val hideRead: Boolean,
+    val dimReadStories: Boolean,
+    val faviconProvider: String,
+    val faviconIcon: Painter,
+    val markScrolledPostsRead: Boolean = false,
+    val swipeToHide: Boolean = false,
+    val showDividers: Boolean = false,
+    val spacing: Int = com.simon.harmonichackernews.settings.RowSpacingPreferences.DEFAULT,
+    val categoryTagLocation: com.simon.harmonichackernews.settings.CategoryTagLocation = com.simon.harmonichackernews.settings.CategoryTagLocation.TITLE,
+    val categorizationEnabled: Boolean = false,
+    val canEnableCategorization: Boolean = true,
+    val categorizationUnavailableReason: String? = null,
+)
+
+enum class StoriesBooleanSetting(internal val preference: StoryBooleanPreference) {
+    BorderlessLargeImage(StoryBooleanPreference.BORDERLESS_LARGE_IMAGE),
+    Tint(StoryBooleanPreference.TINT_CARD_USING_PREVIEW),
+    Compact(StoryBooleanPreference.COMPACT_VIEW),
+    ShowPreviewText(StoryBooleanPreference.SHOW_SUMMARY),
+    ShowFavicons(StoryBooleanPreference.SHOW_THUMBNAILS),
+    ShowPoints(StoryBooleanPreference.SHOW_POINTS),
+    CompactPoints(StoryBooleanPreference.COMPACT_POINTS),
+    IncludeTopLevelDomain(StoryBooleanPreference.INCLUDE_TOP_LEVEL_DOMAIN),
+    ShowComments(StoryBooleanPreference.SHOW_COMMENTS_COUNT),
+    ShowIndex(StoryBooleanPreference.SHOW_INDEX),
+    CommentsButtonOnLeft(StoryBooleanPreference.LEFT_ALIGN),
+    AlwaysOpenComments(StoryBooleanPreference.ALWAYS_OPEN_COMMENTS),
+    Pagination(StoryBooleanPreference.PAGINATION),
+    HideRead(StoryBooleanPreference.HIDE_CLICKED),
+    SwipeToHide(StoryBooleanPreference.SWIPE_TO_HIDE),
+    DimReadStories(StoryBooleanPreference.GRAY_OUT_CLICKED),
+    MarkScrolledPostsRead(StoryBooleanPreference.MARK_SCROLLED_POSTS_READ),
+}
+
+enum class StoriesStringSetting { DisplayStyle, CategoryTagLocation }
+enum class StoriesSettingsDialog { Hotness, FaviconProvider }
+
+@Composable
+fun StoriesSettingsScreen(
+    state: StoriesSettingsUiState,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onSpacingRequested: () -> Unit,
+    onBooleanChanged: (StoriesBooleanSetting, Boolean) -> Unit,
+    onPreviewImageModeChanged: (StoryPreviewMode) -> Unit,
+    onStringChanged: (StoriesStringSetting, String) -> Unit,
+    onTextSizeOffsetChanged: (Int) -> Unit,
+    onResetLayout: () -> Unit,
+    onDialogRequested: (StoriesSettingsDialog) -> Unit,
+    onManageFrontpages: () -> Unit,
+    onPaletteTintRequested: () -> Unit,
+    onArticleCategoriesRequested: () -> Unit = {},
+    onCategorizationEnabledChanged: (Boolean) -> Unit = {},
+    contentVersion: Int = 0,
+) {
+    // Palette settings remain reachable even when story tint is disabled.
+    PreloadPalettePreviewResources()
+    SettingsPage(
+        title = stringResource(Res.string.settings_section_stories),
+        showNavigation = showNavigation,
+        onBack = onBack,
+        contentVersion = contentVersion,
+        pinnedContent = {
+            LookaheadScope {
+                val visibility = com.simon.harmonichackernews.ui.content.rememberStorySettingsVisibility(
+                    state.previewModel, state.toPreviewStoryRowStyle().copy(showDivider = false))
+                val placementAnimation = remember(this) { StoryRowPlacementAnimation(this, visibility) }
+                Box(Modifier.fillMaxWidth().testTag("stories-settings-preview")) {
+                    // Let lookahead own layout motion; animating the destination dimensions
+                    // as well would give text, tags, and images moving targets and extra lag.
+                    StoryRow(model = visibility.rendered.model, style = visibility.rendered.style,
+                        placementAnimation = placementAnimation, animateChanges = false)
+                }
+            }
+        },
+    ) {
+        settingsCategory("Layout") {
+            row {
+                SegmentedSetting(
+                    title = "Preview image",
+                    options = listOf(
+                        StoryPreviewMode.OFF to "Off",
+                        StoryPreviewMode.SMALL to "Small",
+                        StoryPreviewMode.MEDIUM to "Medium",
+                        StoryPreviewMode.LARGE to "Large",
+                    ),
+                    selected = state.previewImageMode,
+                    onSelected = onPreviewImageModeChanged,
+                )
+            }
+            row {
+                BooleanRow(
+                    "Borderless image",
+                    Res.drawable.ic_fullscreen,
+                    state.borderlessLargeImage,
+                    StoriesBooleanSetting.BorderlessLargeImage,
+                    onBooleanChanged,
+                    enabled = state.previewImageMode == StoryPreviewMode.MEDIUM ||
+                        state.previewImageMode == StoryPreviewMode.LARGE,
+                )
+            }
+            row {
+                SliderSetting(
+                    title = "Text size",
+                    valueLabel = formatOffset(state.textSizeOffset),
+                    value = state.textSizeOffset.toFloat(),
+                    valueRange = state.minTextSizeOffset.toFloat()..
+                        state.maxTextSizeOffset.toFloat(),
+                    steps = state.maxTextSizeOffset - state.minTextSizeOffset - 1,
+                    onValueChange = { onTextSizeOffsetChanged(it.toInt()) },
+                )
+            }
+            row {
+                SegmentedSetting(
+                    title = "Display style",
+                    options = listOf(
+                        DisplayStyle.FLAT.storedValue to "Flat",
+                        DisplayStyle.STANDARD.storedValue to "Filled",
+                        DisplayStyle.RAISED.storedValue to "Raised",
+                        DisplayStyle.OUTLINED.storedValue to "Outlined",
+                    ),
+                    selected = state.displayStyle,
+                    disabledOptions = if (state.tint) setOf(DisplayStyle.FLAT.storedValue) else emptySet(),
+                    onSelected = { onStringChanged(StoriesStringSetting.DisplayStyle, it) },
+                )
+            }
+            row {
+                NavigationSwitchSettingRow(
+                    title = "Tint",
+                    summary = "Uses preview or favicon",
+                    icon = Res.drawable.ic_palette,
+                    checked = state.tint,
+                    onClick = onPaletteTintRequested,
+                    onCheckedChange = { onBooleanChanged(StoriesBooleanSetting.Tint, it) },
+                )
+            }
+            row {
+                NavigationSwitchSettingRow(
+                    title = "Article category tags",
+                    summary = state.categorizationUnavailableReason,
+                    icon = Res.drawable.ic_label,
+                    checked = state.categorizationEnabled,
+                    switchEnabled = state.canEnableCategorization || state.categorizationEnabled,
+                    onClick = onArticleCategoriesRequested,
+                    onCheckedChange = onCategorizationEnabledChanged,
+                )
+            }
+            row {
+                SegmentedSetting(
+                    title = "Category tag location",
+                    options = com.simon.harmonichackernews.settings.CategoryTagLocation.entries.map { it to it.label },
+                    selected = state.categoryTagLocation,
+                    enabled = state.categorizationEnabled,
+                    onSelected = { onStringChanged(StoriesStringSetting.CategoryTagLocation, it.storedValue) },
+                )
+            }
+            row {
+                SettingRow(
+                    title = "Spacing",
+                    summary = "Vertical spacing and dividers",
+                    icon = Res.drawable.ic_format_line_spacing,
+                    onClick = onSpacingRequested,
+                )
+            }
+            row {
+                BooleanRow("Compact layout", Res.drawable.ic_view_agenda, state.compact, StoriesBooleanSetting.Compact, onBooleanChanged, summary = "Hides points, domain and time")
+            }
+            row {
+                BooleanRow("Summary", Res.drawable.ic_subject, state.showPreviewText, StoriesBooleanSetting.ShowPreviewText, onBooleanChanged)
+            }
+            row {
+                BooleanRow("Thumbnails", Res.drawable.ic_public, state.showFavicons, StoriesBooleanSetting.ShowFavicons, onBooleanChanged, enabled = !state.compact)
+            }
+            row {
+                BooleanRow("Points", Res.drawable.ic_thumbs_up_down, state.showPoints, StoriesBooleanSetting.ShowPoints, onBooleanChanged, enabled = !state.compact)
+            }
+            row {
+                BooleanRow(
+                    "Compact points",
+                    Res.drawable.ic_thumb_up,
+                    state.compactPoints,
+                    StoriesBooleanSetting.CompactPoints,
+                    onBooleanChanged,
+                    enabled = !state.compact &&
+                        state.showPoints &&
+                        state.previewImageMode != StoryPreviewMode.MEDIUM,
+                )
+            }
+            row {
+                BooleanRow("Include top level domain", Res.drawable.ic_public, state.includeTopLevelDomain, StoriesBooleanSetting.IncludeTopLevelDomain, onBooleanChanged, enabled = !state.compact)
+            }
+            row {
+                BooleanRow("Comment count", Res.drawable.ic_comment, state.showComments, StoriesBooleanSetting.ShowComments, onBooleanChanged, enabled = !state.compact)
+            }
+            row {
+                BooleanRow("Show story indices", Res.drawable.ic_format_list_numbered, state.showIndex, StoriesBooleanSetting.ShowIndex, onBooleanChanged)
+            }
+            row {
+                BooleanRow(
+                    "Left align comments button",
+                    Res.drawable.ic_pan_tool,
+                    state.commentsButtonOnLeft,
+                    StoriesBooleanSetting.CommentsButtonOnLeft,
+                    onBooleanChanged,
+                    enabled = state.previewImageMode != StoryPreviewMode.MEDIUM,
+                )
+            }
+            row {
+                SettingRow(
+                    title = "Highlight hot stories",
+                    summary = state.hotnessLabel,
+                    icon = Res.drawable.ic_whatshot,
+                    onClick = { onDialogRequested(StoriesSettingsDialog.Hotness) },
+                )
+            }
+            row {
+                SettingRow(
+                    title = "Reset",
+                    icon = Res.drawable.ic_refresh,
+                    onClick = onResetLayout,
+                )
+            }
+        }
+        settingsCategory("Behavior") {
+            row {
+                SettingRow(
+                    title = "Manage frontpages",
+                    summary = "Default: ${state.startingPage}",
+                    icon = Res.drawable.ic_library_books,
+                    onClick = onManageFrontpages,
+                )
+            }
+            row {
+                BooleanRow("Always open comments", Res.drawable.ic_keyboard_double_arrow_right, state.alwaysOpenComments, StoriesBooleanSetting.AlwaysOpenComments, onBooleanChanged, summary = "Clicking a story takes you directly to the comments view")
+            }
+            row {
+                BooleanRow("Use pagination", Res.drawable.ic_swipe_vertical, state.pagination, StoriesBooleanSetting.Pagination, onBooleanChanged, summary = "Load 30 stories at a time")
+            }
+            row {
+                BooleanRow("Swipe to hide", Res.drawable.ic_visibility_off, state.swipeToHide, StoriesBooleanSetting.SwipeToHide, onBooleanChanged, summary = "Swipe left or right to hide posts from frontpages.")
+            }
+            row {
+                BooleanRow("Hide clicked posts", Res.drawable.ic_visibility_off, state.hideRead, StoriesBooleanSetting.HideRead, onBooleanChanged,
+                    enabled = !state.markScrolledPostsRead,
+                    summary = if (state.markScrolledPostsRead) "Turn off scroll marking first" else null)
+            }
+            row {
+                BooleanRow("Gray out clicked posts", Res.drawable.ic_visibility, state.dimReadStories, StoriesBooleanSetting.DimReadStories, onBooleanChanged, enabled = !state.hideRead)
+            }
+            row {
+                BooleanRow("Mark scrolled posts as read", Res.drawable.ic_swipe_vertical, state.markScrolledPostsRead,
+                    StoriesBooleanSetting.MarkScrolledPostsRead, onBooleanChanged,
+                    enabled = !state.hideRead,
+                    summary = if (state.hideRead) "Turn off Hide clicked posts first" else "Marks posts as read when you scroll past them")
+            }
+            row {
+                SettingRow(
+                    title = "Favicon provider",
+                    summary = state.faviconProvider,
+                    icon = null,
+                    iconPainter = state.faviconIcon,
+                    iconTint = Color.Unspecified,
+                    enabled = !state.compact && state.showFavicons,
+                    onClick = { onDialogRequested(StoriesSettingsDialog.FaviconProvider) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BooleanRow(
+    title: String,
+    icon: org.jetbrains.compose.resources.DrawableResource,
+    checked: Boolean,
+    setting: StoriesBooleanSetting,
+    onChanged: (StoriesBooleanSetting, Boolean) -> Unit,
+    summary: String? = null,
+    enabled: Boolean = true,
+) = SwitchSettingRow(
+    title = title,
+    summary = summary,
+    icon = icon,
+    checked = checked,
+    enabled = enabled,
+    onCheckedChange = { onChanged(setting, it) },
+)
+
+private fun formatOffset(offset: Int): String = if (offset >= 0) "+$offset" else "$offset"

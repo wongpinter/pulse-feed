@@ -1,0 +1,8 @@
+<resources>
+    <style name="ProductSansTextViewStyle" parent="@android:style/Widget.TextView">
+        <item name="android:fontFamily">@font/product_sans</item>
+    </style>
+    <style name="JetBrainsMonoTextViewStyle" parent="@android:style/Widget.TextView">
+        <item name="android:fontFamily">@font/jetbrains_mono</item>
+    </style>
+</resources>

@@ -1,0 +1,318 @@
+package com.simon.harmonichackernews.ui.about
+
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.onClick as semanticsOnClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.resources.HarmonicDimens
+import com.simon.harmonichackernews.resources.Res
+import com.simon.harmonichackernews.resources.ic_attribution
+import com.simon.harmonichackernews.resources.ic_link_preview_github
+import com.simon.harmonichackernews.resources.ic_policy
+import com.simon.harmonichackernews.resources.ic_system_update_alt
+import com.simon.harmonichackernews.resources.settings_section_about
+import com.simon.harmonichackernews.ui.common.HarmonicTopAppBar
+import com.simon.harmonichackernews.ui.common.OutlinedButton
+import com.simon.harmonichackernews.ui.settings.SettingsCard
+import com.simon.harmonichackernews.ui.theme.AppHeadlineFontFamily
+import com.simon.harmonichackernews.ui.theme.AppUiFontFamily
+import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.stringResource
+
+private const val AboutBody =
+    "Pulse Feed is a fast, privacy-focused universal feed reader for RSS, Atom, and JSON feeds.\n\n" +
+        "This app is an open-source fork based on Harmonic, originally created and developed by Simon Halvdansson. " +
+        "We retained Harmonic's multiplatform foundation, fluid Material 3 animations, reading mode, and on-device AI " +
+        "summarization to create an open feed client for blogs, newsletters, and news across the entire web."
+
+private const val FeedbackBody =
+    "Pulse Feed is open source. Report issues, request features, or read the source in its own repository."
+
+@Composable
+fun AboutScreen(
+    versionLabel: String,
+    appIcon: Painter,
+    onBack: () -> Unit,
+    onOpenGithub: () -> Unit,
+    onOpenSource: () -> Unit,
+    onOpenChangelog: () -> Unit,
+    onOpenLicenses: () -> Unit,
+    onOpenPrivacy: () -> Unit,
+    modifier: Modifier = Modifier,
+    showNavigation: Boolean = true,
+    sidePadding: Dp = 0.dp,
+    topBarHeight: Dp = 64.dp,
+    topBarNavigationHeight: Dp = 56.dp,
+    topBarNavigationInset: Dp = 0.dp,
+    platformTextStyle: TextStyle = TextStyle.Default,
+) {
+    val colors = MaterialTheme.colorScheme
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(colors.pageBackground)
+            .windowInsetsPadding(
+                WindowInsets.safeDrawing.only(
+                    WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
+                ),
+            ),
+    ) {
+        HarmonicTopAppBar(
+            title = stringResource(Res.string.settings_section_about),
+            onBack = if (showNavigation) onBack else null,
+            toolbarHeight = topBarHeight,
+            navigationHeight = topBarNavigationHeight,
+            navigationInset = topBarNavigationInset,
+            platformTextStyle = platformTextStyle,
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom),
+                )
+                .padding(
+                    start = sidePadding,
+                    top = HarmonicDimens.settings_list_first_segment_top_margin,
+                    end = sidePadding,
+                    bottom = 24.dp,
+                ),
+        ) {
+            SettingsCard {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.cardBackground)
+                        .padding(horizontal = 16.dp, vertical = 20.dp),
+                ) {
+                    AboutIdentity(
+                        versionLabel = versionLabel,
+                        appIcon = appIcon,
+                        platformTextStyle = platformTextStyle,
+                    )
+
+                    Text(
+                        text = AboutBody,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 22.dp, bottom = 18.dp),
+                        color = colors.onSurface,
+                        fontFamily = AppUiFontFamily,
+                        fontSize = 15.sp,
+                        style = platformTextStyle,
+                    )
+
+                    FeedbackCard(platformTextStyle)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    AboutActionButton(
+                        text = "Pulse Feed source code",
+                        icon = painterResource(Res.drawable.ic_link_preview_github),
+                        onClick = onOpenSource,
+                        platformTextStyle = platformTextStyle,
+                    )
+                    AboutActionButton(
+                        text = "Harmonic (Original Project)",
+                        icon = painterResource(Res.drawable.ic_link_preview_github),
+                        onClick = onOpenGithub,
+                        platformTextStyle = platformTextStyle,
+                    )
+                    AboutActionButton(
+                        text = "Changelog",
+                        icon = painterResource(Res.drawable.ic_system_update_alt),
+                        onClick = onOpenChangelog,
+                        platformTextStyle = platformTextStyle,
+                    )
+                    AboutActionButton(
+                        text = "Licenses",
+                        icon = painterResource(Res.drawable.ic_attribution),
+                        onClick = onOpenLicenses,
+                        platformTextStyle = platformTextStyle,
+                    )
+                    AboutActionButton(
+                        text = "Privacy policy",
+                        icon = painterResource(Res.drawable.ic_policy),
+                        onClick = onOpenPrivacy,
+                        platformTextStyle = platformTextStyle,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutIdentity(
+    versionLabel: String,
+    appIcon: Painter,
+    platformTextStyle: TextStyle,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(modifier = Modifier.fillMaxWidth().height(56.dp)) {
+        AboutAnimatedIcon(
+            painter = appIcon,
+            modifier = Modifier.size(56.dp),
+        )
+        Spacer(modifier = Modifier.width(16.dp))
+        Box(modifier = Modifier.fillMaxHeight()) {
+            Text(
+                text = "Pulse Feed",
+                modifier = Modifier.offset(y = (-2).dp).semantics { heading() },
+                color = colors.onSurface,
+                fontFamily = AppHeadlineFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = fixedDpTextSize(29.dp),
+                style = platformTextStyle,
+            )
+            Text(
+                text = versionLabel,
+                modifier = Modifier.offset(y = 34.dp),
+                color = colors.onSurfaceVariant,
+                fontFamily = AppHeadlineFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = fixedDpTextSize(13.dp),
+                style = platformTextStyle,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FeedbackCard(platformTextStyle: TextStyle) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(colors.secondaryContainer)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Image(
+            painter = painterResource(Res.drawable.ic_link_preview_github),
+            contentDescription = null,
+            modifier = Modifier.size(24.dp).alpha(0.9f),
+            colorFilter = ColorFilter.tint(colors.onSecondaryContainer),
+        )
+        Spacer(modifier = Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Have feedback?",
+                color = colors.onSecondaryContainer,
+                fontFamily = AppUiFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+                style = platformTextStyle,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = FeedbackBody,
+                color = colors.onSecondaryContainer,
+                fontFamily = AppUiFontFamily,
+                fontSize = 14.sp,
+                style = platformTextStyle,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AboutActionButton(
+    text: String,
+    icon: Painter,
+    onClick: () -> Unit,
+    platformTextStyle: TextStyle = TextStyle.Default,
+) {
+    val colors = MaterialTheme.colorScheme
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .padding(3.5.dp)
+            .clearAndSetSemantics {
+                contentDescription = text
+                role = Role.Button
+                semanticsOnClick {
+                    onClick()
+                    true
+                }
+            },
+        shape = CircleShape,
+        border = BorderStroke(0.75.dp, colors.outlineVariant),
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Image(
+                painter = icon,
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 24.dp)
+                    .alpha(0.8f)
+                    .size(24.dp),
+                colorFilter = ColorFilter.tint(colors.onSurface),
+            )
+            Text(
+                text = text,
+                modifier = Modifier.align(Alignment.Center).offset(x = 12.dp, y = (-0.5).dp),
+                color = colors.onSurface,
+                fontFamily = AppUiFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                lineHeight = 20.sp,
+                style = platformTextStyle,
+            )
+        }
+    }
+}
+
+@Composable
+private fun fixedDpTextSize(size: Dp) = with(LocalDensity.current) { size.toSp() }

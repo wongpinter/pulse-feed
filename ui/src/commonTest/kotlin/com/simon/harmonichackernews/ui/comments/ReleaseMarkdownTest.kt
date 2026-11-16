@@ -1,0 +1,185 @@
+package com.simon.harmonichackernews.ui.comments
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
+import kotlin.test.assertFalse
+
+class ReleaseMarkdownTest {
+    @Test
+    fun expansionIsAvailableOnlyWhenThePreviewActuallyOmitsContent() {
+        val short = releaseMarkdownPreview("A short release note.", pageUrl)
+        assertFalse(short.truncated)
+        val source = (1..50).joinToString("\n\n") { "Change $it with a useful description." }
+        val preview = releaseMarkdownPreview(source, pageUrl)
+        assertTrue(preview.truncated)
+        val expanded = releaseMarkdownBlocks(source, pageUrl).filterIsInstance<ReleaseMarkdownBlock.Text>()
+        assertTrue(expanded.any { "Change 50" in it.markdown })
+        assertFalse(preview.blocks.filterIsInstance<ReleaseMarkdownBlock.Text>().any { "Change 50" in it.markdown })
+    }
+
+    private val pageUrl = "https://github.com/audacity/audacity/releases/tag/Audacity-4.0.0"
+
+    @Test
+    fun multilineImageLinksKeepTheExistingEightLineLimit() {
+        fun markdown(blankLines: Int) =
+            "<a href='https://example.org/video'>\n" + "\n".repeat(blankLines) +
+                "<img src='https://example.org/image.png'>\n</a>"
+
+        assertEquals(
+            listOf(ReleaseMarkdownBlock.Image("https://example.org/image.png", "", "https://example.org/video")),
+            releaseMarkdownBlocks(markdown(6), pageUrl),
+        )
+        val beyondLimit = releaseMarkdownBlocks(markdown(7), pageUrl)
+        assertEquals(null, assertIs<ReleaseMarkdownBlock.Image>(beyondLimit[1]).link)
+        assertEquals(ReleaseMarkdownBlock.Text("</a>"), beyondLimit.last())
+    }
+
+    @Test
+    fun unclosedAnchorsRemainTextThroughoutLongReleaseNotes() {
+        val markdown = List(1_024) { "<a href='https://example.org/$it'>Unclosed $it" }.joinToString("\n")
+
+        assertEquals(listOf(ReleaseMarkdownBlock.Text(markdown)), releaseMarkdownBlocks(markdown, pageUrl))
+    }
+
+    @Test
+    fun keepsAudacityVideoThumbnailBetweenIntroductionAndEditingNotes() {
+        val blocks = releaseMarkdownBlocks(
+            """
+            ## Audacity 4.0
+
+            A new interface and clip editing model.
+
+            ### Watch the video:
+
+            <a href="https://www.youtube.com/watch?v=BTQymidLYIM">
+              <img src="https://img.youtube.com/vi/BTQymidLYIM/maxresdefault.jpg" width="600">
+            </a>
+
+            ## Editing clips
+
+            - **Select clips directly.** Click the header.
+            """.trimIndent(),
+            pageUrl,
+        )
+        assertEquals(3, blocks.size)
+        assertEquals(true, assertIs<ReleaseMarkdownBlock.Text>(blocks[0]).markdown.endsWith("### Watch the video:"))
+        assertEquals(
+            ReleaseMarkdownBlock.Image(
+                "https://img.youtube.com/vi/BTQymidLYIM/maxresdefault.jpg", "",
+                "https://www.youtube.com/watch?v=BTQymidLYIM",
+            ),
+            blocks[1],
+        )
+        assertEquals(true, assertIs<ReleaseMarkdownBlock.Text>(blocks[2]).markdown.startsWith("## Editing clips"))
+    }
+
+    @Test
+    fun preservesMultipleMarkdownImagesAndTheirLinksInOrder() {
+        assertEquals(
+            listOf(
+                ReleaseMarkdownBlock.Text("Before"),
+                ReleaseMarkdownBlock.Image("https://example.org/one.png", "One", null),
+                ReleaseMarkdownBlock.Text("Between"),
+                ReleaseMarkdownBlock.Image("https://github.com/two.jpg", "Two", "https://example.org/video"),
+                ReleaseMarkdownBlock.Text("After"),
+            ),
+            releaseMarkdownBlocks(
+                "Before\n![One](https://example.org/one.png)\nBetween\n[![Two](/two.jpg)](https://example.org/video)\nAfter",
+                pageUrl,
+            ),
+        )
+    }
+
+    @Test
+    fun doesNotLoadImagesFromCodeCommentsOrUnsupportedSchemes() {
+        val markdown = """
+            <!-- <img src="https://example.org/hidden.png"> -->
+            ```html
+            <img src="https://example.org/example.png">
+            ```
+            `<img src="https://example.org/inline.png">`
+            ![Local](file:///private.png)
+            ![Script](javascript:alert)
+        """.trimIndent()
+        assertEquals(1, releaseMarkdownBlocks(markdown, pageUrl).size)
+        assertIs<ReleaseMarkdownBlock.Text>(releaseMarkdownBlocks(markdown, pageUrl).single())
+    }
+
+    @Test
+    fun truncatesTheWholePreviewAfterAnInlineImage() {
+        val blocks = releaseMarkdownPreviewBlocks(
+            """
+            ## Before
+
+            ![Screenshot](https://example.org/screenshot.png)
+
+            ## Changes
+
+            - First change
+            - Second change which is deliberately long enough to exceed the remaining preview budget
+            - This must not be shown
+            """.trimIndent(),
+            pageUrl,
+            lineBudget = 12,
+        )
+
+        assertEquals(3, blocks.size)
+        assertEquals(ReleaseMarkdownBlock.Text("## Before"), blocks[0])
+        assertIs<ReleaseMarkdownBlock.Image>(blocks[1])
+        assertEquals("## Changes\n\n- First change\n\n...", assertIs<ReleaseMarkdownBlock.Text>(blocks[2]).markdown)
+    }
+
+    @Test
+    fun leavesShortReleaseMarkdownUnchanged() {
+        assertEquals(
+            listOf(ReleaseMarkdownBlock.Text("A short release note.")),
+            releaseMarkdownPreviewBlocks("A short release note.", pageUrl),
+        )
+    }
+
+    @Test
+    fun boundsUnfinishedImageMarkupBeforeParsingThePreview() {
+        assertEquals(
+            listOf(ReleaseMarkdownBlock.Text("Introduction\n\n...")),
+            releaseMarkdownPreviewBlocks("Introduction\n\n" + "![".repeat(32_000), pageUrl),
+        )
+    }
+
+    @Test
+    fun doesNotExtractAnImageWhoseClosingMarkupIsBeyondTheSourceBudget() {
+        val markdown = "Introduction\n\n![" + "caption ".repeat(10_000) + "](https://example.org/image.png)"
+
+        assertEquals(
+            listOf(ReleaseMarkdownBlock.Text("Introduction\n\n...")),
+            releaseMarkdownPreviewBlocks(markdown, pageUrl),
+        )
+    }
+
+    @Test
+    fun sourceLimitPreservesEarlyImagesAndSignalsOmittedContent() {
+        assertEquals(
+            listOf(
+                ReleaseMarkdownBlock.Text("Introduction"),
+                ReleaseMarkdownBlock.Image("https://example.org/image.png", "Preview", null),
+                ReleaseMarkdownBlock.Text("..."),
+            ),
+            releaseMarkdownPreviewBlocks(
+                "Introduction\n\n![Preview](https://example.org/image.png)\n\n" + "![".repeat(32_000),
+                pageUrl,
+            ),
+        )
+    }
+
+    @Test
+    fun hiddenCommentsDoNotConsumeTheVisibleSourceBudget() {
+        assertEquals(
+            listOf(ReleaseMarkdownBlock.Text("Introduction\n\nAfter the comment.")),
+            releaseMarkdownPreviewBlocks(
+                "Introduction\n\n<!--" + "![".repeat(32_000) + "-->After the comment.",
+                pageUrl,
+            ),
+        )
+    }
+}

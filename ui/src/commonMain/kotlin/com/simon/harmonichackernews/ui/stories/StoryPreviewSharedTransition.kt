@@ -1,0 +1,520 @@
+package com.simon.harmonichackernews.ui.stories
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.absoluteOffset
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
+import com.simon.harmonichackernews.ui.common.SharedTransitionDrawCache
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.ui.common.lerpRect
+import com.simon.harmonichackernews.ui.common.sharedHazeDialogBackground
+import com.simon.harmonichackernews.ui.common.outerShadow
+import com.simon.harmonichackernews.ui.common.moveRectBetweenContainers
+import com.simon.harmonichackernews.ui.common.roundedRectPath
+import kotlin.math.roundToInt
+
+/** Window-space geometry and transparent element layers captured before a preview opens. */
+data class StoryPreviewSourceGeometry(
+    val container: Rect,
+    val containerElevationDp: Float = 0f,
+    val image: Rect? = null,
+    val title: Rect? = null,
+    val summary: Rect? = null,
+    val meta: Rect? = null,
+    val author: Rect? = null,
+    val index: Rect? = null,
+    val comments: Rect? = null,
+    val imageCornerRadiusPx: Float = 0f,
+    val imageLayer: GraphicsLayer? = null,
+    val titleLayer: GraphicsLayer? = null,
+    val summaryLayer: GraphicsLayer? = null,
+    val metaLayer: GraphicsLayer? = null,
+    val authorLayer: GraphicsLayer? = null,
+    val indexLayer: GraphicsLayer? = null,
+    val commentsLayer: GraphicsLayer? = null,
+)
+
+internal enum class StoryPreviewSourceElement {
+    Image,
+    Title,
+    Summary,
+    Meta,
+    Author,
+    Index,
+    Comments,
+}
+
+internal enum class StoryPreviewSharedElement {
+    Image,
+    Title,
+    Summary,
+    Meta,
+    Author,
+    Supplementary,
+}
+
+internal data class StoryPreviewSharedTransitionState(
+    val progress: () -> Float,
+    val closing: Boolean,
+    val active: Boolean,
+    val hideTargetContent: Boolean,
+    val drawOverlayShadows: Boolean,
+    val source: StoryPreviewSourceGeometry?,
+    val sourceSnapshot: (StoryPreviewSourceElement) -> ImageBitmap?,
+    val targetContainer: () -> Rect?,
+    val targetScale: () -> Float,
+    val targetCommentsButton: () -> Rect?,
+    val rootOffset: Offset,
+    val targetBounds: (StoryPreviewSharedElement) -> Rect?,
+    val targetSnapshot: (StoryPreviewSharedElement) -> ImageBitmap?,
+    val updateTargetBounds: (StoryPreviewSharedElement, Rect) -> Unit,
+    val updateTargetLayer: (StoryPreviewSharedElement, GraphicsLayer) -> Unit,
+    val updateCommentsButtonBounds: (Rect) -> Unit,
+)
+
+internal val LocalStoryPreviewSharedTransition =
+    compositionLocalOf<StoryPreviewSharedTransitionState?> { null }
+
+/** Tracks the elevated Comments surface separately because its shadow is not in the bitmap layer. */
+@Composable
+internal fun Modifier.trackStoryPreviewCommentsButton(): Modifier {
+    val transition = LocalStoryPreviewSharedTransition.current ?: return this
+    return onGloballyPositioned { coordinates ->
+        val bounds = coordinates.boundsInWindow()
+        if (bounds.width > 0f && bounds.height > 0f) {
+            transition.updateCommentsButtonBounds(bounds)
+        }
+    }
+}
+
+/** The final static background. The moving background is rendered at overlay scope. */
+@Composable
+internal fun StoryPreviewContainerBackground(
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val transition = LocalStoryPreviewSharedTransition.current
+    // Text snapshots briefly overlap the live content during handoff. Translucent backgrounds
+    // must have a single owner throughout that overlap or their tint/optics are applied twice.
+    val visibility = if (transition?.active == true || transition?.hideTargetContent == true) {
+        Modifier.graphicsLayer(alpha = 0f)
+    } else {
+        Modifier
+    }
+    val shape = RoundedCornerShape(28.dp)
+    Box(
+        modifier
+            .then(visibility)
+            .outerShadow(8.dp, shape)
+            .sharedHazeDialogBackground(color, shape),
+    )
+}
+
+/** Records one source element against transparency while continuing to draw it in the list. */
+@Composable
+internal fun Modifier.captureStoryPreviewSourceContent(
+    onLayerChanged: (GraphicsLayer) -> Unit,
+): Modifier {
+    val layer = rememberGraphicsLayer()
+    SideEffect { onLayerChanged(layer) }
+    return drawWithContent snapshot@{
+        layer.resetForLocalDraw()
+        layer.record { this@snapshot.drawContent() }
+        drawLayer(layer)
+    }
+}
+
+/** Tracks stable destination bounds; the actual transition drawing happens in the root overlay. */
+@Composable
+internal fun StoryPreviewSharedElement(
+    element: StoryPreviewSharedElement,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val transition = LocalStoryPreviewSharedTransition.current
+    val layer = rememberGraphicsLayer()
+    SideEffect {
+        transition?.updateTargetLayer(element, layer)
+    }
+    val tracking = if (transition == null) {
+        Modifier
+    } else {
+        Modifier.onGloballyPositioned { coordinates ->
+            val bounds = coordinates.boundsInWindow()
+            if (bounds.width > 0f && bounds.height > 0f) {
+                transition.updateTargetBounds(element, bounds)
+            }
+        }
+    }
+    val finalClip = if (element == StoryPreviewSharedElement.Image) {
+        Modifier.clip(
+            RoundedCornerShape(
+                topStart = 28.dp,
+                topEnd = 28.dp,
+                bottomStart = 0.dp,
+                bottomEnd = 0.dp,
+            ),
+        )
+    } else {
+        Modifier
+    }
+    Box(
+        modifier
+            .then(tracking)
+            .then(finalClip)
+            .drawWithContent snapshot@{
+                layer.resetForLocalDraw()
+                layer.record { this@snapshot.drawContent() }
+                if (transition?.hideTargetContent != true) {
+                    drawLayer(layer)
+                }
+            },
+        content = content,
+    )
+}
+
+/**
+ * Draws above the pager and its scroll containers so moving content and shadows cannot be clipped
+ * to the destination dialog's final bounds.
+ */
+@Composable
+internal fun StoryPreviewTransitionOverlay(
+    transition: StoryPreviewSharedTransitionState,
+    color: Color,
+) {
+    if (!transition.active || transition.source == null) return
+    val drawCache = remember { SharedTransitionDrawCache() }
+    Box(Modifier.fillMaxSize()) {
+        StoryPreviewMovingSurface(transition, color)
+        Canvas(Modifier.fillMaxSize()) {
+            val source = checkNotNull(transition.source).localTo(transition.rootOffset)
+            val sourceContainer = source.container
+            val targetContainer = transition.targetContainer()?.localTo(transition.rootOffset) ?: sourceContainer
+            val progress = transition.progress().coerceIn(0f, 1f)
+            val container = lerpRect(sourceContainer, targetContainer, progress)
+            val targetRadius = 28.dp.toPx() * transition.targetScale()
+            drawTransitionContent(
+                transition, drawCache, source, sourceContainer, targetContainer, container,
+                lerp(8.dp.toPx(), targetRadius, progress), targetRadius, progress,
+            )
+        }
+    }
+}
+
+// Haze records immutable styles when they are built. Isolate their updates from captured text.
+@Composable
+private fun StoryPreviewMovingSurface(transition: StoryPreviewSharedTransitionState, color: Color) {
+    val source = transition.source ?: return
+    val rootOffset = transition.rootOffset
+    val localSource = source.localTo(rootOffset)
+    val sourceContainer = localSource.container
+    val targetContainer = transition.targetContainer()?.localTo(rootOffset) ?: sourceContainer
+    val progress = transition.progress().coerceIn(0f, 1f)
+    val container = lerpRect(sourceContainer, targetContainer, progress)
+    val density = LocalDensity.current
+    val sourceRadiusPx = with(density) { 8.dp.toPx() }
+    val targetRadiusPx = with(density) { 28.dp.toPx() } * transition.targetScale()
+    val containerRadiusPx = lerp(sourceRadiusPx, targetRadiusPx, progress)
+    val containerRadius = with(density) { containerRadiusPx.toDp() }
+    // The moving container also owns its shadow during the live-content handoff.
+    val elevation = if (transition.drawOverlayShadows || !transition.hideTargetContent) {
+        lerp(source.containerElevationDp, 8f * transition.targetScale(), progress).dp
+    } else {
+        0.dp
+    }
+    val width = with(density) { container.width.coerceAtLeast(1f).toDp() }
+    val height = with(density) { container.height.coerceAtLeast(1f).toDp() }
+    val shape = RoundedCornerShape(containerRadius)
+    val targetCommentsButton = transition.targetCommentsButton()?.localTo(rootOffset)
+    val commentsButton = targetCommentsButton?.let { bounds ->
+        moveRectBetweenContainers(bounds, targetContainer, container)
+    }
+    val commentsShadowProgress = supplementaryAlpha(progress)
+    val commentsButtonShape = RoundedCornerShape(percent = 50)
+    val commentsButtonColor = MaterialTheme.colorScheme.cardBackground
+
+    Box(
+        Modifier
+            .absoluteOffset {
+                IntOffset(container.left.roundToInt(), container.top.roundToInt())
+            }
+            .requiredSize(width, height)
+            .outerShadow(elevation, shape)
+            .sharedHazeDialogBackground(color, shape, revealProgress = progress),
+    )
+    if (
+        transition.drawOverlayShadows &&
+        commentsButton != null
+    ) {
+        Box(
+            Modifier
+                .absoluteOffset {
+                    IntOffset(
+                        commentsButton.left.roundToInt(),
+                        commentsButton.top.roundToInt(),
+                    )
+                }
+                .requiredSize(
+                    with(density) { commentsButton.width.coerceAtLeast(1f).toDp() },
+                    with(density) { commentsButton.height.coerceAtLeast(1f).toDp() },
+                )
+                // Fade a fixed resting shadow instead of animating sub-dp elevation. An empty
+                // shadow caster shows its dark interior through the partially faded bitmap;
+                // covering it with the real button color keeps the pill chroma stable.
+                .graphicsLayer(alpha = commentsShadowProgress)
+                .shadow(
+                    elevation = transition.targetScale().dp,
+                    shape = commentsButtonShape,
+                    clip = false,
+                )
+                .background(commentsButtonColor, commentsButtonShape),
+        )
+    }
+}
+
+private fun DrawScope.drawTransitionContent(
+    transition: StoryPreviewSharedTransitionState,
+    drawCache: SharedTransitionDrawCache,
+    source: StoryPreviewSourceGeometry,
+    sourceContainer: Rect,
+    targetContainer: Rect,
+    container: Rect,
+    containerRadiusPx: Float,
+    targetImageRadiusPx: Float,
+    progress: Float,
+) {
+    val containerClip = roundedRectPath(container, containerRadiusPx, path = drawCache.container)
+
+    fun drawElement(
+        element: StoryPreviewSharedElement,
+        sourceBounds: Rect?,
+        sourceSnapshot: ImageBitmap?,
+        image: Boolean = false,
+    ) {
+        val targetBounds = transition.targetBounds(element)?.localTo(transition.rootOffset)
+        val targetSnapshot = transition.targetSnapshot(element)
+        val destination = when {
+            sourceBounds != null && targetBounds != null ->
+                lerpRect(sourceBounds, targetBounds, progress)
+            targetBounds != null -> mapBetweenContainers(targetBounds, targetContainer, container)
+            sourceBounds != null -> mapBetweenContainers(sourceBounds, sourceContainer, container)
+            else -> return
+        }
+        val imageClip = if (image) {
+            val sourceImageRadius = source.imageCornerRadiusPx
+            roundedRectPath(
+                destination,
+                lerp(sourceImageRadius, targetImageRadiusPx, progress),
+                lerp(sourceImageRadius, 0f, progress),
+                path = drawCache.image,
+            )
+        } else {
+            null
+        }
+        val targetAlpha = if (sourceBounds == null) {
+            when (element) {
+                StoryPreviewSharedElement.Summary -> supplementaryAlpha(progress)
+                else -> progress
+            }
+        } else {
+            progress
+        }
+        val drawing: DrawScope.() -> Unit = {
+            // Interpolate premultiplied pixels in an isolated layer. Keeping the source opaque
+            // leaves its crop visible through a transparent destination until the final frame.
+            val blendImages = image && sourceSnapshot != null && targetSnapshot != null &&
+                sourceBounds != null && targetBounds != null
+            if (blendImages) drawContext.canvas.saveLayer(destination, drawCache.paint)
+            if (sourceBounds != null && sourceSnapshot != null) {
+                drawSnapshot(
+                    snapshot = sourceSnapshot,
+                    destination = destination,
+                    alpha = if (image && !blendImages) 1f else 1f - progress,
+                )
+            }
+            if (targetBounds != null && targetSnapshot != null) {
+                drawSnapshot(
+                    snapshot = targetSnapshot,
+                    destination = destination,
+                    alpha = targetAlpha,
+                    blendMode = if (blendImages) BlendMode.Plus else BlendMode.SrcOver,
+                )
+            }
+            if (blendImages) drawContext.canvas.restore()
+        }
+        if (imageClip != null) clipPath(imageClip, block = drawing) else drawing()
+    }
+
+    fun drawSourceAccessory(bounds: Rect?, snapshot: ImageBitmap?) {
+        val alpha = storyPreviewAccessoryAlpha(progress, transition.closing)
+        if (bounds == null || snapshot == null || alpha <= 0.001f) return
+        val destination = moveRectBetweenContainers(bounds, sourceContainer, container)
+        clipPath(containerClip) {
+            drawSnapshot(
+                snapshot = snapshot,
+                destination = destination,
+                alpha = alpha,
+            )
+        }
+    }
+
+    drawSourceAccessory(
+        source.index,
+        transition.sourceSnapshot(StoryPreviewSourceElement.Index),
+    )
+    drawElement(
+        StoryPreviewSharedElement.Image,
+        source.image,
+        transition.sourceSnapshot(StoryPreviewSourceElement.Image),
+        image = true,
+    )
+    // Medium-preview pills sit on the image; keep that stacking order throughout the return.
+    drawSourceAccessory(
+        source.comments,
+        transition.sourceSnapshot(StoryPreviewSourceElement.Comments),
+    )
+    drawElement(
+        StoryPreviewSharedElement.Title,
+        source.title,
+        transition.sourceSnapshot(StoryPreviewSourceElement.Title),
+    )
+    drawElement(
+        StoryPreviewSharedElement.Summary,
+        source.summary,
+        transition.sourceSnapshot(StoryPreviewSourceElement.Summary),
+    )
+    drawElement(
+        StoryPreviewSharedElement.Meta,
+        source.meta,
+        transition.sourceSnapshot(StoryPreviewSourceElement.Meta),
+    )
+
+    drawElement(
+        StoryPreviewSharedElement.Author,
+        source.author,
+        transition.sourceSnapshot(StoryPreviewSourceElement.Author),
+    )
+
+    val supplementary = transition
+        .targetBounds(StoryPreviewSharedElement.Supplementary)
+        ?.localTo(transition.rootOffset)
+    val supplementarySnapshot =
+        transition.targetSnapshot(StoryPreviewSharedElement.Supplementary)
+    if (supplementary != null && supplementarySnapshot != null) {
+        // Bottom controls follow the container's motion, but retain their measured size. Scaling
+        // this bitmap with the container visibly squashes the icons and Comments pill early in
+        // opening and late in closing.
+        val destination = moveRectBetweenContainers(supplementary, targetContainer, container)
+        clipPath(containerClip) {
+            drawSnapshot(
+                snapshot = supplementarySnapshot,
+                destination = destination,
+                alpha = supplementaryAlpha(progress),
+            )
+        }
+    }
+}
+
+private fun DrawScope.drawSnapshot(
+    snapshot: ImageBitmap,
+    destination: Rect,
+    alpha: Float,
+    blendMode: BlendMode = BlendMode.SrcOver,
+) {
+    if (
+        alpha <= 0.001f || snapshot.width <= 0 || snapshot.height <= 0 ||
+        destination.width <= 0f || destination.height <= 0f
+    ) {
+        return
+    }
+    clipRect(destination.left, destination.top, destination.right, destination.bottom) {
+        drawImage(
+            image = snapshot,
+            srcOffset = IntOffset.Zero,
+            srcSize = IntSize(snapshot.width, snapshot.height),
+            dstOffset = IntOffset(destination.left.roundToInt(), destination.top.roundToInt()),
+            dstSize = IntSize(
+                destination.width.roundToInt().coerceAtLeast(1),
+                destination.height.roundToInt().coerceAtLeast(1),
+            ),
+            alpha = alpha.coerceIn(0f, 1f),
+            blendMode = blendMode,
+        )
+    }
+}
+
+private fun GraphicsLayer.resetForLocalDraw() {
+    alpha = 1f
+    scaleX = 1f
+    scaleY = 1f
+    translationX = 0f
+    translationY = 0f
+    pivotOffset = Offset.Zero
+}
+
+private fun mapBetweenContainers(rect: Rect, from: Rect, to: Rect): Rect {
+    if (from.width <= 0f || from.height <= 0f) return rect
+    val scaleX = to.width / from.width
+    val scaleY = to.height / from.height
+    return Rect(
+        left = to.left + (rect.left - from.left) * scaleX,
+        top = to.top + (rect.top - from.top) * scaleY,
+        right = to.left + (rect.right - from.left) * scaleX,
+        bottom = to.top + (rect.bottom - from.top) * scaleY,
+    )
+}
+
+private fun StoryPreviewSourceGeometry.localTo(offset: Offset): StoryPreviewSourceGeometry =
+    copy(
+        container = container.localTo(offset),
+        image = image?.localTo(offset),
+        title = title?.localTo(offset),
+        summary = summary?.localTo(offset),
+        meta = meta?.localTo(offset),
+        author = author?.localTo(offset),
+        index = index?.localTo(offset),
+        comments = comments?.localTo(offset),
+    )
+
+private fun Rect.localTo(offset: Offset): Rect = translate(-offset.x, -offset.y)
+
+private fun supplementaryAlpha(progress: Float): Float =
+    ((progress - 0.42f) / 0.43f).coerceIn(0f, 1f)
+
+/** Returning pills start appearing as soon as the dialog starts moving back. */
+internal fun storyPreviewAccessoryAlpha(progress: Float, closing: Boolean): Float =
+    (if (closing) (1f - progress) / 0.8f else 1f - progress / 0.6f).coerceIn(0f, 1f)
+
+private fun lerp(start: Float, end: Float, progress: Float): Float =
+    start + (end - start) * progress

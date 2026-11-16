@@ -1,0 +1,207 @@
+package com.simon.harmonichackernews.settings
+
+import com.simon.harmonichackernews.platform.LocalCalendarDate
+import com.simon.harmonichackernews.platform.PresentationCopy
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+enum class DataSettingsDialogState { IMPORT, RESET, LINKS, AI_MODELS }
+
+data class DataSettingsRuntimeState(
+    val snapshot: DataSettingsSnapshot,
+    val dialog: DataSettingsDialogState? = null,
+    val favoriteIds: List<Int>? = null,
+    val overwriteBookmarksOnImport: Boolean = true,
+    val revision: Int = 0,
+)
+
+sealed interface DataSettingsRuntimeEffect {
+    data class CreateExportDocument(val filename: String, val content: String, val mimeType: String = "text/plain") : DataSettingsRuntimeEffect
+    data object OpenSettingsImportDocument : DataSettingsRuntimeEffect
+    data object OpenImportDocument : DataSettingsRuntimeEffect
+    data object OpenAppLinkSettings : DataSettingsRuntimeEffect
+    data object SettingsReset : DataSettingsRuntimeEffect
+    data class Message(val text: String) : DataSettingsRuntimeEffect
+}
+
+/** Portable state/actions/results for the Data settings screen. */
+class DataSettingsRuntime(
+    private val scope: CoroutineScope,
+    private val service: DataSettingsService,
+    private val today: () -> LocalCalendarDate,
+    private val storageDispatcher: CoroutineDispatcher = Dispatchers.Default,
+) {
+    private var storageCounts = DataSettingsStorageCounts()
+    private var refreshJob: Job? = null
+    private val mutableState = MutableStateFlow(DataSettingsRuntimeState(service.snapshot(storageCounts)))
+    private val mutableEffects = MutableSharedFlow<DataSettingsRuntimeEffect>(extraBufferCapacity = 8)
+    val state: StateFlow<DataSettingsRuntimeState> = mutableState.asStateFlow()
+    val effects: SharedFlow<DataSettingsRuntimeEffect> = mutableEffects.asSharedFlow()
+
+    init {
+        refresh()
+    }
+
+    fun showDialog(dialog: DataSettingsDialogState?) = publish(dialog = dialog)
+    fun dismissFavorites() = publish(favoriteIds = null)
+
+    fun addBookmarksToFavorites() = publish(favoriteIds = service.bookmarkIdsByNewest())
+
+    fun exportBookmarks() {
+        val content = service.exportBookmarks()
+        if (content == null) {
+            mutableEffects.tryEmit(DataSettingsRuntimeEffect.Message(PresentationCopy.EXPORT_EMPTY))
+            return
+        }
+        val date = today()
+        mutableEffects.tryEmit(
+            DataSettingsRuntimeEffect.CreateExportDocument(
+                DataSettingsPolicy.bookmarksFilename(date.year, date.month, date.day),
+                content,
+            ),
+        )
+    }
+
+    fun exportSettings() {
+        try {
+            val content = service.exportSettings() ?: return
+            val date = today()
+            mutableEffects.tryEmit(DataSettingsRuntimeEffect.CreateExportDocument(
+                "PulseFeedSettings${date.year}-${date.month}-${date.day}.json", content, "application/json",
+            ))
+        } catch (_: Exception) {
+            emitMessage("Could not export settings")
+        }
+    }
+
+    fun requestSettingsImport() {
+        mutableEffects.tryEmit(DataSettingsRuntimeEffect.OpenSettingsImportDocument)
+    }
+
+    fun importSettings(content: String) {
+        scope.launch {
+            val result = try {
+                withContext(storageDispatcher) { service.importSettings(content) }
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                emitMessage("Could not import settings")
+                return@launch
+            }
+            when (result) {
+                is SettingsImportResult.Imported -> {
+                    emitMessage(if (result.count == 0) "No compatible settings found" else
+                        "Settings imported" + if (result.skipped > 0) " (${result.skipped} unsupported or invalid entries skipped)" else "")
+                    refresh()
+                    mutableEffects.tryEmit(DataSettingsRuntimeEffect.SettingsReset)
+                }
+                SettingsImportResult.Invalid -> emitMessage("Not a valid Pulse Feed settings file")
+                SettingsImportResult.UnsupportedVersion -> emitMessage("This settings file needs a newer version of Pulse Feed")
+            }
+        }
+    }
+
+    fun requestImport(overwrite: Boolean) {
+        publish(dialog = null, overwriteBookmarksOnImport = overwrite)
+        mutableEffects.tryEmit(DataSettingsRuntimeEffect.OpenImportDocument)
+    }
+
+    fun importBookmarks(content: String) {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            when (val result = service.importBookmarks(content, state.value.overwriteBookmarksOnImport)) {
+                BookmarkImportResult.Empty -> emitMessage(PresentationCopy.IMPORT_EMPTY)
+                is BookmarkImportResult.Imported -> emitMessage(
+                    PresentationCopy.importedBookmarks(result.count, result.overwroteExisting),
+                )
+            }
+            refresh()
+        }
+    }
+
+    fun clearHiddenPosts() {
+        scope.launch {
+            service.clearHiddenPosts()
+            refresh()
+            emitMessage("Hidden posts cleared")
+        }
+    }
+
+    fun clearHistory() {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            service.clearHistory()
+            refresh()
+        }
+    }
+
+    fun clearPostCache() {
+        scope.launch {
+            service.clearPostCache()
+            refresh()
+        }
+    }
+
+    fun clearTintCache() {
+        service.clearTintCache()
+        refresh()
+    }
+
+    fun clearAiModels() {
+        publish(dialog = null)
+        scope.launch {
+            emitMessage(service.clearAiModels())
+            refresh()
+        }
+    }
+
+    fun resetSettings() {
+        scope.launch {
+            service.resetSettings()
+            emitMessage(PresentationCopy.SETTINGS_RESET)
+            publish(dialog = null)
+            mutableEffects.tryEmit(DataSettingsRuntimeEffect.SettingsReset)
+        }
+    }
+
+    fun openAppLinkSettings() {
+        publish(dialog = null)
+        mutableEffects.tryEmit(DataSettingsRuntimeEffect.OpenAppLinkSettings)
+    }
+
+    fun refresh() {
+        refreshJob?.cancel()
+        refreshJob = scope.launch {
+            service.initializeHiddenPosts()
+            storageCounts = withContext(storageDispatcher) { service.storageCounts() }
+            publish()
+        }
+    }
+
+    private fun emitMessage(message: String) {
+        mutableEffects.tryEmit(DataSettingsRuntimeEffect.Message(message))
+    }
+
+    private fun publish(
+        dialog: DataSettingsDialogState? = state.value.dialog,
+        favoriteIds: List<Int>? = state.value.favoriteIds,
+        overwriteBookmarksOnImport: Boolean = state.value.overwriteBookmarksOnImport,
+    ) {
+        mutableState.value = DataSettingsRuntimeState(
+            snapshot = service.snapshot(storageCounts),
+            dialog = dialog,
+            favoriteIds = favoriteIds,
+            overwriteBookmarksOnImport = overwriteBookmarksOnImport,
+            revision = state.value.revision + 1,
+        )
+    }
+}

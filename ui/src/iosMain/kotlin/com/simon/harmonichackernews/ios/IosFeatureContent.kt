@@ -1,0 +1,175 @@
+package com.simon.harmonichackernews.ios
+
+import com.simon.harmonichackernews.ui.session.submissionsViewModel
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.background
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.AbsoluteAlignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.app.HarmonicAppComposition
+import com.simon.harmonichackernews.app.HarmonicSceneComposition
+import com.simon.harmonichackernews.app.createEditorFeatureSession
+import com.simon.harmonichackernews.navigation.MainEditorRequest
+import com.simon.harmonichackernews.navigation.MainSubmissionsRequest
+import com.simon.harmonichackernews.platform.ExternalLinkRequest
+import com.simon.harmonichackernews.presentation.EditorPresentationCopy
+import com.simon.harmonichackernews.presentation.EditorWorkflowResult
+import com.simon.harmonichackernews.presentation.StoryDisplaySettings
+import com.simon.harmonichackernews.presentation.SubmissionsFeatureEffect
+import com.simon.harmonichackernews.ui.common.HazeHost
+import com.simon.harmonichackernews.ui.common.TranslucentBackButton
+import com.simon.harmonichackernews.ui.editor.EditorScreen
+import com.simon.harmonichackernews.ui.session.EditorScreenSession
+import com.simon.harmonichackernews.ui.submissions.SubmissionsRoute
+
+@Composable
+internal fun IosSubmissionsContent(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    request: MainSubmissionsRequest,
+) {
+    val viewModel = submissionsViewModel(scene, request)
+    val store = viewModel.store
+    val initialScrollRestoration = remember(viewModel) { viewModel.scrollRestoration() }
+    val displaySettings = remember(store) {
+        StoryDisplaySettings.from(app.userSettings.story).withShowIndex(false)
+    }
+    val railWidth = iosSideRailWidth()
+
+    LaunchedEffect(store, scene) {
+        store.effects.collect { effect ->
+            when (effect) {
+                is SubmissionsFeatureEffect.OpenStory -> {
+                    scene.navigation.openStory(effect.destination)
+                }
+                is SubmissionsFeatureEffect.OpenExternalLink ->
+                    scene.links.openExternal(ExternalLinkRequest(effect.url))
+            }
+        }
+    }
+
+    HazeHost {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.pageBackground),
+        ) {
+            Box(
+                Modifier.fillMaxSize().windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal),
+                ),
+            ) {
+                SubmissionsRoute(
+                    userName = request.userName,
+                    store = store,
+                    displaySettings = displaySettings,
+                    initialScrollRestoration = initialScrollRestoration,
+                    previewService = app.previewResources,
+                    tintStore = app.storyResourceTints,
+                    includeStatusBarInset = true,
+                    reserveBackButtonSpace = railWidth == 0.dp,
+                    onOpenLink = { scene.links.open(it) },
+                )
+                IosStatusBarProtection(MaterialTheme.colorScheme.pageBackground)
+                if (railWidth == 0.dp) {
+                    TranslucentBackButton(
+                        onClick = scene.navigation::closeSubmissions,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .statusBarsPadding()
+                            .padding(start = 16.dp, top = 4.dp)
+                            .zIndex(101f),
+                    )
+                }
+            }
+            if (railWidth > 0.dp) {
+                IosSideRailUpButton(
+                    railWidth = railWidth,
+                    onClick = scene.navigation::closeSubmissions,
+                    modifier = Modifier.align(AbsoluteAlignment.TopRight),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun IosEditorContent(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    request: MainEditorRequest,
+    backRequestVersion: Int,
+) {
+    val destination = request.destination
+    val scope = rememberCoroutineScope()
+    val screenSession = remember(app, request.serial, scope) {
+        EditorScreenSession(
+            scope = scope,
+            feature = app.createEditorFeatureSession(
+                scope = scope,
+                type = destination.type,
+                itemId = destination.itemId,
+                rootStoryId = destination.rootStoryId,
+            ),
+        )
+    }
+    val submitting by screenSession.submitting.collectAsState()
+
+    DisposableEffect(screenSession) {
+        onDispose(screenSession::dispose)
+    }
+    LaunchedEffect(screenSession, destination.type, scene) {
+        screenSession.results.collect { result ->
+            when (result) {
+                EditorWorkflowResult.Success -> {
+                    scene.userMessages.show(EditorPresentationCopy.successMessage(destination.type))
+                    scene.navigation.closeEditor()
+                }
+                is EditorWorkflowResult.Failure -> scene.navigation.showFailureDetailDialog(
+                    result.title,
+                    result.message,
+                    result.commentDraft,
+                )
+                is EditorWorkflowResult.Captcha -> {
+                    val response = scene.captchaRequests.awaitResponse(result.challenge)
+                    if (response == null) screenSession.cancelCaptcha()
+                    else screenSession.respondToCaptcha(result.challenge, response)
+                }
+                is EditorWorkflowResult.CaptchaCancelled ->
+                    scene.userMessages.show(result.message)
+                EditorWorkflowResult.Ignored -> Unit
+            }
+        }
+    }
+
+    EditorScreen(
+        type = destination.type,
+        parentText = destination.parentText,
+        postTitle = destination.postTitle,
+        user = destination.userName,
+        submitting = submitting,
+        backRequestVersion = backRequestVersion,
+        onClose = scene.navigation::closeEditor,
+        onSubmit = screenSession::submit,
+        onOpenLink = { scene.links.open(it) },
+    )
+}

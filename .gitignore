@@ -1,0 +1,40 @@
+.gradle
+__pycache__/
+/local.properties
+
+# IntelliJ/Android Studio
+/.idea/*
+!/.idea/codeStyles/
+/.idea/codeStyles/*
+!/.idea/codeStyles/Project.xml
+!/.idea/inspectionProfiles/
+/.idea/inspectionProfiles/*
+!/.idea/inspectionProfiles/Project_Default.xml
+*.iml
+misc.xml
+deploymentTargetDropDown.xml
+
+.DS_Store
+/build
+**/build/
+/captures
+.externalNativeBuild
+.cxx
+*.pepk
+
+# kotlin
+.kotlin/
+
+# Local diagnostics and benchmark results
+/artifacts/
+/artefacts/
+/.playwright-mcp/
+/benchmark/results/
+/app/release/
+/docs/reports/
+/docs/performance/*.json
+/app/playRelease
+
+# Agent tooling notes
+.pi/
+/MIGRATION_PLAN.md

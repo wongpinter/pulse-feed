@@ -1,0 +1,326 @@
+package com.simon.harmonichackernews.app
+
+import com.simon.harmonichackernews.data.Story
+import com.simon.harmonichackernews.navigation.EditorType
+import com.simon.harmonichackernews.network.AlgoliaCommentRequest
+import com.simon.harmonichackernews.network.CommentThreadRepository
+import com.simon.harmonichackernews.network.CaptchaAwareHackerNewsActions
+import com.simon.harmonichackernews.network.HackerNewsCaptchaChallenge
+import com.simon.harmonichackernews.network.LinkPreviewUseCase
+import com.simon.harmonichackernews.network.StoryFeedRepository
+import com.simon.harmonichackernews.network.StoryLinkPreviewSession
+import com.simon.harmonichackernews.platform.CommentsPlatformDependencies
+import com.simon.harmonichackernews.platform.ConnectivityService
+import com.simon.harmonichackernews.platform.StoriesPlatformDependencies
+import com.simon.harmonichackernews.presentation.ArchiveUrlResolver
+import com.simon.harmonichackernews.presentation.CommentMasterResolver
+import com.simon.harmonichackernews.presentation.CommentsFeatureRuntime
+import com.simon.harmonichackernews.presentation.CommentsPresenter
+import com.simon.harmonichackernews.presentation.CommentsPerformanceTrace
+import com.simon.harmonichackernews.presentation.CommentsSessionState
+import com.simon.harmonichackernews.presentation.CommentsFeatureStore
+import com.simon.harmonichackernews.presentation.EditorSubmission
+import com.simon.harmonichackernews.presentation.EditorSubmissionWorkflow
+import com.simon.harmonichackernews.presentation.EditorWorkflowResult
+import com.simon.harmonichackernews.presentation.SavedItemActionUseCase
+import com.simon.harmonichackernews.presentation.SavedItemActionKind
+import com.simon.harmonichackernews.presentation.StoriesFeatureRuntime
+import com.simon.harmonichackernews.presentation.StoryRequests
+import com.simon.harmonichackernews.presentation.StoriesSessionState
+import com.simon.harmonichackernews.presentation.StoriesFeatureStore
+import com.simon.harmonichackernews.presentation.SubmissionsFeatureStore
+import com.simon.harmonichackernews.presentation.SubmissionsSessionState
+import com.simon.harmonichackernews.settings.ReadingPreferences
+import com.simon.harmonichackernews.settings.GeminiNanoSummaryMode
+import com.simon.harmonichackernews.settings.UserSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+sealed interface EditorFeatureSessionEvent {
+    data class Submitting(val value: Boolean) : EditorFeatureSessionEvent
+    data class Result(val value: EditorWorkflowResult) : EditorFeatureSessionEvent
+}
+
+class EditorFeatureSession internal constructor(
+    private val scope: CoroutineScope,
+    private val workflow: EditorSubmissionWorkflow,
+    private val mutableEvents: MutableSharedFlow<EditorFeatureSessionEvent>,
+    private val onSuccess: () -> Unit = {},
+) {
+    val events: SharedFlow<EditorFeatureSessionEvent> = mutableEvents.asSharedFlow()
+    val isSubmitting: Boolean get() = workflow.isSubmitting
+
+    fun submit(submission: EditorSubmission) {
+        scope.launch { emitResult(workflow.submit(submission)) }
+    }
+
+    fun respondToCaptcha(challenge: HackerNewsCaptchaChallenge, response: String) {
+        scope.launch { emitResult(workflow.respondToCaptcha(challenge, response)) }
+    }
+
+    private suspend fun emitResult(result: EditorWorkflowResult) {
+        if (result == EditorWorkflowResult.Success) onSuccess()
+        mutableEvents.emit(EditorFeatureSessionEvent.Result(result))
+    }
+
+    fun cancelCaptcha() {
+        mutableEvents.tryEmit(EditorFeatureSessionEvent.Result(workflow.cancelCaptcha()))
+    }
+}
+
+/** Lifecycle inputs supplied by a screen host. Portable services come from the app graph. */
+data class StoriesFeatureHost(
+    val scope: CoroutineScope,
+    val sessionState: StoriesSessionState,
+    val platform: StoriesPlatformDependencies,
+    val userSettings: UserSettings,
+    val captchaResponder: (suspend (HackerNewsCaptchaChallenge) -> String?)? = null,
+)
+
+data class CommentsFeatureHost(
+    val scope: CoroutineScope,
+    val sessionState: CommentsSessionState,
+    val platform: CommentsPlatformDependencies,
+    val userSettings: UserSettings,
+    val canLoadArticleTextOnDemand: Boolean = false,
+    val performanceTrace: CommentsPerformanceTrace = CommentsPerformanceTrace(),
+    val awaitInitialPresentation: suspend () -> Unit = {},
+    val openingRequest: AlgoliaCommentRequest? = null,
+    val prepareInitialContent: suspend (com.simon.harmonichackernews.presentation.PortableCommentThreadState) -> Unit = {},
+    val captchaResponder: (suspend (HackerNewsCaptchaChallenge) -> String?)? = null,
+)
+
+/**
+ * Application-scoped factories keep feature construction identical across Android, iOS and
+ * desktop. Hosts supply only lifecycle scopes and facilities that are still genuinely native.
+ */
+fun HarmonicAppComposition.createStoriesFeatureStore(
+    host: StoriesFeatureHost,
+): StoriesFeatureStore {
+    val featureScope = host.scope.childFeatureScope()
+    val storyCacheRuntime = createStoryCacheRuntime(featureScope)
+    val captchaActions = host.captchaResponder?.let { CaptchaAwareHackerNewsActions(hackerNewsUser, it) }
+    val actions = SavedItemActionUseCase(
+        repository = savedItems,
+        nowMillis = nowMillis,
+        voteRequest = { id, direction ->
+            captchaActions?.vote(id.toString(), direction) ?: hackerNewsUser.vote(id.toString(), direction)
+        },
+        favoriteRequest = { id, favorite ->
+            captchaActions?.setFavorite(id, favorite) ?: hackerNewsUser.setFavorite(id, favorite)
+        },
+        accountRequest = { action ->
+            when (action.kind) {
+                SavedItemActionKind.VOTE -> if (captchaActions != null) captchaActions.voteForAccount(
+                    action.accountName, action.itemId.toString(), requireNotNull(action.voteDirection),
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                ) else hackerNewsUser.voteForAccount(
+                    action.accountName, action.itemId.toString(), requireNotNull(action.voteDirection),
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                )
+                SavedItemActionKind.FAVORITE -> if (captchaActions != null) captchaActions.setFavoriteForAccount(
+                    action.accountName, action.itemId, action.targetPresent,
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                ) else hackerNewsUser.setFavoriteForAccount(
+                    action.accountName, action.itemId, action.targetPresent,
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                )
+            }
+        },
+    )
+    val requests = StoryRequests(
+        scope = featureScope,
+        sessionState = host.sessionState,
+        algoliaRepository = network.algoliaRepository,
+        hackerNewsRepository = network.hackerNewsRepository,
+        hackerNewsApi = network.hackerNewsApi,
+        userItemsLoader = captchaActions ?: hackerNewsUser,
+        savedItemsRepository = savedItems,
+        storyFeedLoader = StoryFeedRepository(
+            network.hackerNewsRepository,
+            network.hackerNewsWebRepository,
+            network.unslopRepository,
+        ),
+        readStoryIds = { host.platform.history.load().map { it.id } },
+        isStoryRead = host.platform.history::contains,
+        shouldHideReadStories = { host.userSettings.story.hideRead },
+        storyLoadFailurePercent = { host.userSettings.debug.storyLoadFailurePercent },
+    )
+    val runtime = StoriesFeatureRuntime(
+        scope = featureScope,
+        sessionState = host.sessionState,
+        requests = requests,
+        savedItems = savedItems,
+        savedItemActions = actions,
+        historyStore = host.platform.history,
+        hiddenPosts = hiddenPosts,
+        accounts = host.platform.accounts,
+        connectivity = host.platform.connectivity,
+        userSettings = host.userSettings,
+        loadContentFilters = contentFilters::load,
+        rootStoryResolver = CommentMasterResolver(network.hackerNewsRepository),
+        nowMillis = nowMillis,
+        loadCachedStoryHeader = storyCache::loadStoryHeader,
+        loadCachedStories = storyCache::recentStories,
+        hasCachedStories = storyCache::hasRecentStories,
+        startStoryCache = { storyCacheRuntime.start(it) },
+        previewResourceService = previewResources,
+        storyResourceTints = storyResourceTints,
+    )
+    return StoriesFeatureStore(
+        scope = featureScope,
+        sessionState = host.sessionState,
+        runtime = runtime,
+        storyCache = storyCacheRuntime,
+        observeSavedItems = { emit -> savedItems.changes.collect { emit(it.source) } },
+        observeStoryUpdates = { emit -> storyUpdates.updates.collect { emit(it) } },
+        commentedStories = commentedStories,
+        accountStates = host.platform.accounts.accountState,
+    )
+}
+
+fun HarmonicAppComposition.createCommentsFeatureStore(
+    host: CommentsFeatureHost,
+): CommentsFeatureStore {
+    val featureScope = host.scope.childFeatureScope()
+    val captchaActions = host.captchaResponder?.let { CaptchaAwareHackerNewsActions(hackerNewsUser, it) }
+    val actions = SavedItemActionUseCase(
+        repository = savedItems,
+        nowMillis = nowMillis,
+        voteRequest = { id, direction ->
+            captchaActions?.vote(id.toString(), direction) ?: hackerNewsUser.vote(id.toString(), direction)
+        },
+        favoriteRequest = { id, favorite ->
+            captchaActions?.setFavorite(id, favorite) ?: hackerNewsUser.setFavorite(id, favorite)
+        },
+        accountRequest = { action ->
+            when (action.kind) {
+                SavedItemActionKind.VOTE -> if (captchaActions != null) captchaActions.voteForAccount(
+                    action.accountName, action.itemId.toString(), requireNotNull(action.voteDirection),
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                ) else hackerNewsUser.voteForAccount(
+                    action.accountName, action.itemId.toString(), requireNotNull(action.voteDirection),
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                )
+                SavedItemActionKind.FAVORITE -> if (captchaActions != null) captchaActions.setFavoriteForAccount(
+                    action.accountName, action.itemId, action.targetPresent,
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                ) else hackerNewsUser.setFavoriteForAccount(
+                    action.accountName, action.itemId, action.targetPresent,
+                    isAccountCurrent = { savedItems.currentAccountRevision == action.accountRevision },
+                )
+            }
+        },
+    )
+    val presenter = CommentsPresenter(
+        featureScope,
+        host.sessionState,
+        CommentThreadRepository(
+            network.algoliaRepository,
+            network.hackerNewsRepository,
+            preloads = commentsPreloads,
+        ),
+        network.pollOptionsRepository,
+        actions,
+        captchaActions ?: hackerNewsUser,
+        performanceTrace = host.performanceTrace,
+        threadPreparationDispatcher = Dispatchers.Default,
+        prepareInitialContent = host.prepareInitialContent,
+    )
+    val runtime = CommentsFeatureRuntime(
+        scope = featureScope,
+        sessionState = host.sessionState,
+        presenter = presenter,
+        nowMillis = nowMillis,
+        archiveUrlResolver = ArchiveUrlResolver(network.linkPreviewRepository),
+        userSettings = host.userSettings,
+        loadContentFilters = contentFilters::load,
+        accounts = host.platform.accounts,
+        summarySettings = aiSummarySettings,
+        localSummaryAvailable = {
+            localSummaryEngine?.isReady(
+                aiSummarySettings.snapshot().geminiNanoSummaryMode == GeminiNanoSummaryMode.THREE_BULLETS,
+            ) == true
+        },
+        summaryRuntime = createStorySummaryRuntime(featureScope),
+        canLoadArticleTextOnDemand = host.canLoadArticleTextOnDemand,
+        loadCachedStoryHeader = { storyCache.loadStoryHeader(it) },
+        isThreadCached = storyCache::hasStoryPayload,
+        hasViewedComments = storyCache::hasViewedComments,
+        markCommentsViewed = storyCache::markCommentsViewed,
+        loadPreparedThread = storyCache::loadPreparedThread,
+        loadCachedThread = { storyId ->
+            withContext(Dispatchers.Default) { storyCache.loadStoryPayload(storyId) }
+        },
+        awaitInitialPresentation = host.awaitInitialPresentation,
+        openingRequest = host.openingRequest,
+        storeCachedThread = storyCache::cacheParsedStory,
+        publishStoryUpdate = storyUpdates::publish,
+        previewResourceService = previewResources,
+        storyResourceTints = storyResourceTints,
+    )
+    return CommentsFeatureStore(
+        featureScope,
+        runtime,
+        createReferenceLinkPreviewRuntime(featureScope),
+        commentedStoryIds = commentedStories.ids,
+    )
+}
+
+private fun CoroutineScope.childFeatureScope(): CoroutineScope = CoroutineScope(
+    coroutineContext + SupervisorJob(coroutineContext[Job]),
+)
+
+fun HarmonicAppComposition.createSubmissionsStore(
+    scope: CoroutineScope,
+    sessionState: SubmissionsSessionState,
+    userSettings: UserSettings = this.userSettings,
+): SubmissionsFeatureStore = SubmissionsFeatureStore(
+    scope = scope.childFeatureScope(),
+    sessionState = sessionState,
+    rootStoryResolver = CommentMasterResolver(network.hackerNewsRepository),
+    useIntegratedWebView = { userSettings.reading.integratedWebView },
+)
+
+fun HarmonicAppComposition.createEditorFeatureSession(
+    scope: CoroutineScope,
+    type: EditorType,
+    itemId: Int,
+    rootStoryId: Int = -1,
+    connectivity: ConnectivityService = platform.connectivity,
+): EditorFeatureSession {
+    val events = MutableSharedFlow<EditorFeatureSessionEvent>(extraBufferCapacity = 16)
+    val workflow = EditorSubmissionWorkflow(
+        type = type,
+        itemId = itemId,
+        service = hackerNewsUser,
+        connectivity = connectivity,
+        onSubmittingChanged = { events.tryEmit(EditorFeatureSessionEvent.Submitting(it)) },
+    )
+    return EditorFeatureSession(scope, workflow, events) {
+        // The editor closes on success, so record outside its scope.
+        if (type != EditorType.POST && rootStoryId > 0) {
+            network.scope.launch { commentedStories.record(rootStoryId) }
+        }
+    }
+}
+
+fun HarmonicAppComposition.createStoryLinkPreviewSession(
+    scope: CoroutineScope,
+    story: Story?,
+    readingPreferences: ReadingPreferences,
+    onPreviewChanged: () -> Unit,
+): StoryLinkPreviewSession = StoryLinkPreviewSession(
+    scope = scope,
+    story = story,
+    useCase = LinkPreviewUseCase(network.linkPreviewRepository),
+    readingPreferences = readingPreferences,
+    onPreviewChanged = onPreviewChanged,
+)

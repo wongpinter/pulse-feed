@@ -1,0 +1,237 @@
+package com.simon.harmonichackernews.cache
+
+import com.simon.harmonichackernews.data.ArticleSnapshotPolicy
+import com.simon.harmonichackernews.data.PreparedCommentThread
+import com.simon.harmonichackernews.data.Story
+import com.simon.harmonichackernews.data.StoryCacheRepository
+import com.simon.harmonichackernews.network.AlgoliaCommentsParser
+import com.simon.harmonichackernews.network.AlgoliaStorySummary
+import com.simon.harmonichackernews.network.ApiDecodingException
+import com.simon.harmonichackernews.network.CachedDownloadService
+import com.simon.harmonichackernews.network.CachedStoryHeader
+import com.simon.harmonichackernews.network.DownloadCachePolicy
+import com.simon.harmonichackernews.network.DownloadStore
+import com.simon.harmonichackernews.network.HttpMediaType
+import com.simon.harmonichackernews.network.KtorHttpClient
+import com.simon.harmonichackernews.network.KtorTransferClient
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+/** Portable article-snapshot transfer and cache policy over a platform filesystem adapter. */
+class ArticleSnapshotService(
+    httpClient: KtorHttpClient,
+    store: DownloadStore?,
+) {
+    private val mutationMutex = Mutex()
+    private val downloads = store?.let {
+        CachedDownloadService(
+            client = KtorTransferClient(httpClient),
+            store = it,
+            policy = DownloadCachePolicy(
+                maxFileBytes = ArticleSnapshotPolicy.MAX_BYTES,
+                maxCacheBytes = MAX_ARTICLE_CACHE_BYTES,
+                maxTemporaryAgeMillis = MAX_TEMPORARY_AGE_MILLIS,
+            ),
+            cacheLabel = "Article HTML",
+        )
+    }
+
+    val supported: Boolean get() = downloads != null
+
+    suspend fun download(
+        storyId: Int,
+        articleUrl: String,
+        nowMillis: Long,
+        mutations: Mutex = mutationMutex,
+        canCommit: () -> Boolean = { true },
+    ): Boolean {
+        val service = downloads ?: return false
+        if (storyId <= 0 || articleUrl.isBlank()) return false
+        return try {
+            service.download(
+                url = articleUrl,
+                accept = "text/html,application/xhtml+xml",
+                key = storyId.toString(),
+                nowMillis = nowMillis,
+                reuseExisting = false,
+                acceptsContentType = ::isHtml,
+                mutationMutex = mutations,
+                canCommit = canCommit,
+            )
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private companion object {
+        const val MAX_ARTICLE_CACHE_BYTES = 200L * 1_024L * 1_024L
+        const val MAX_TEMPORARY_AGE_MILLIS = 24L * 60L * 60L * 1_000L
+
+        fun isHtml(contentType: HttpMediaType?): Boolean {
+            if (contentType == null) return false
+            val type = contentType.type.lowercase()
+            val subtype = contentType.subtype.lowercase()
+            return (type == "text" && subtype == "html") ||
+                (type == "application" && subtype == "xhtml+xml")
+        }
+    }
+}
+
+/**
+ * Application-scoped story cache façade. Repository access and concurrent batch writes are owned
+ * here so every platform uses the same cache behavior without process-global service locators.
+ */
+class StoryCacheService(
+    private val repository: StoryCacheRepository,
+    private val articleSnapshots: ArticleSnapshotService,
+    private val nowMillis: () -> Long,
+) : StoryCacheSink {
+    private val writeMutex = Mutex()
+    private val articleRegistrationMutex = Mutex()
+    // Registration and removal use the gate; completion only uses writeMutex so deletion can join.
+    private val articleJobs = mutableMapOf<Job, Int>()
+    private val articleLocks = mutableMapOf<Int, Mutex>()
+    private val commentsParser = AlgoliaCommentsParser()
+
+    /** Missing, old-schema and corrupt entries rebuild from retained JSON, including offline. */
+    suspend fun loadPreparedThread(storyId: Int): PreparedCommentThread? = withContext(Dispatchers.Default) {
+        // Atomic files make a complete hit safe to read during a concurrent refresh. Do not make
+        // reopening wait for an unrelated article download holding the cache's mutation lock.
+        repository.loadPreparedThread(storyId)?.let { return@withContext it }
+        writeMutex.withLock {
+            repository.loadPreparedThread(storyId)?.let { return@withLock it }
+            val response = repository.loadStoryPayload(storyId) ?: return@withLock null
+            val story = Story().apply { id = storyId }
+            repository.hydrateStory(story)
+            try {
+                commentsParser.prepare(response, story.kids?.toList().orEmpty()).also {
+                    repository.storePreparedThread(storyId, it)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: IllegalArgumentException) {
+                null
+            } catch (_: ApiDecodingException) {
+                null
+            }
+        }
+    }
+
+    /** Hits need no mutation lock; legacy rebuilds cannot overwrite a concurrent fresh write. */
+    suspend fun loadStoryHeader(
+        storyId: Int,
+        rebuildIfMissing: Boolean = true,
+    ): CachedStoryHeader? = withContext(Dispatchers.Default) {
+        if (!repository.hasStoryPayload(storyId)) return@withContext null
+        repository.loadStoryHeader(storyId, rebuildIfMissing = false)?.let { return@withContext it }
+        if (!rebuildIfMissing) return@withContext null
+        writeMutex.withLock { repository.loadStoryHeader(storyId) }
+    }
+
+    fun hydrateStory(story: Story?): Boolean =
+        repository.hydrateStory(story)
+
+    fun recentStories(): List<Story> =
+        repository.recentStories(nowMillis())
+
+    fun hasRecentStories(): Boolean = repository.hasRecentStories(nowMillis())
+
+    fun loadStoryPayload(storyId: Int): String? = repository.loadStoryPayload(storyId)
+
+    fun hasViewedComments(storyId: Int): Boolean = repository.hasViewedComments(storyId)
+
+    suspend fun markCommentsViewed(storyId: Int) = withContext(Dispatchers.Default) {
+        writeMutex.withLock { repository.markCommentsViewed(storyId) }
+    }
+
+    fun hasStoryPayload(storyId: Int): Boolean = repository.hasStoryPayload(storyId)
+
+    fun loadArticle(storyId: Int): String? = repository.loadArticle(storyId, nowMillis())
+
+    fun articleUrl(storyId: Int): String? = repository.articleUrl(storyId)
+
+    fun itemCount(): Int = repository.cachedItemIds().size
+
+    suspend fun clear(): Int = removeWithArticles(null) { repository.clear() }
+
+    suspend fun remove(storyId: Int) = removeWithArticles(storyId) { repository.remove(storyId) }
+
+    private suspend fun <T> removeWithArticles(storyId: Int?, remove: () -> T): T =
+        withContext(Dispatchers.Default) {
+            articleRegistrationMutex.withLock {
+                val pending = writeMutex.withLock {
+                    articleJobs.filterValues { storyId == null || it == storyId }.keys.toList()
+                }
+                pending.forEach { it.cancel() }
+                pending.forEach { it.join() }
+                // All matching temporary files are closed before deleting, including on Windows.
+                writeMutex.withLock { remove() }
+            }
+        }
+
+    suspend fun storeStory(id: Int, payload: String): Boolean = withContext(Dispatchers.Default) {
+        // Background/offline downloads enter here without a parsed response. Prepare them eagerly
+        // too, so their first offline open gets the same benefit as an already-viewed thread.
+        val summary = try {
+            commentsParser.prepare(payload).cacheSummary()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: IllegalArgumentException) {
+            null
+        } catch (_: ApiDecodingException) {
+            null
+        }
+        writeMutex.withLock { repository.storeStory(id, payload, nowMillis(), summary) }
+    }
+
+    override suspend fun cacheStory(id: Int, payload: String) {
+        check(storeStory(id, payload)) { "Could not save story $id" }
+    }
+
+    suspend fun cacheParsedStory(
+        id: Int,
+        payload: String,
+        summary: AlgoliaStorySummary?,
+    ) = withContext(Dispatchers.Default) {
+        writeMutex.withLock { repository.storeStory(id, payload, nowMillis(), summary) }
+        Unit
+    }
+
+    override suspend fun cacheArticle(id: Int, url: String): Boolean = coroutineScope {
+        val job = currentCoroutineContext().job
+        val (articleLock, hadStory) = articleRegistrationMutex.withLock {
+            writeMutex.withLock {
+                articleJobs[job] = id
+                articleLocks.getOrPut(id) { Mutex() } to repository.hasStoryPayload(id)
+            }
+        }
+        try {
+            // Only storage preparation/commit share the cache lock, never the network transfer.
+            // Preserve request ordering for the same story while other stories download together.
+            articleLock.withLock {
+                articleSnapshots.download(id, url, nowMillis(), writeMutex) {
+                    // A size-limit eviction must not be undone by a late article response.
+                    !hadStory || repository.hasStoryPayload(id)
+                }
+            }
+        } finally {
+            withContext(NonCancellable) {
+                writeMutex.withLock {
+                    articleJobs.remove(job)
+                    if (id !in articleJobs.values) articleLocks.remove(id)
+                }
+            }
+        }
+    }
+}

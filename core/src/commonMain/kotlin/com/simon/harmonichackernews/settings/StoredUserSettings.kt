@@ -1,0 +1,525 @@
+package com.simon.harmonichackernews.settings
+
+import com.simon.harmonichackernews.StoryTypeMenuPolicy
+import com.simon.harmonichackernews.network.NitterInstance
+import com.simon.harmonichackernews.data.LinkPreviewType
+import com.simon.harmonichackernews.utils.ArchiveRedirectPolicy
+import kotlinx.coroutines.flow.Flow
+
+/** Preference keys consumed by common settings snapshots. */
+object UserPreferenceKeys {
+    const val STORY_LOAD_FAILURE_PERCENT = "debug_story_load_failure_percent"
+    const val SPLIT_RATIO_PORTRAIT = "pref_split_ratio_portrait"
+    const val SPLIT_RATIO_LANDSCAPE = "pref_split_ratio_landscape"
+    const val EXTRA_SIDE_PADDING = "pref_extra_side_padding"
+    const val SHOW_POINTS = "pref_show_points"
+    const val COMPACT_POINTS = "pref_compact_points"
+    const val INCLUDE_TOP_LEVEL_DOMAIN = "pref_include_top_level_domain"
+    const val SHOW_COMMENTS_COUNT = "pref_show_comments_count"
+    const val COMPACT_VIEW = "pref_compact_view"
+    const val THUMBNAILS = "pref_thumbnails"
+    const val STORY_PREVIEW_IMAGE_MODE = "pref_story_preview_image_mode"
+    const val STORY_PREVIEW_IMAGE_BORDERLESS = "pref_story_preview_image_borderless"
+    const val SHOW_STORY_SUMMARY = "pref_show_story_summary"
+    const val STORY_SPACING = "pref_story_spacing"
+    const val COMMENT_SPACING = "pref_comment_spacing"
+    const val STORY_DIVIDERS = "pref_story_dividers"
+    const val STORY_TEXT_SIZE = "pref_story_text_size"
+    const val COMMENT_TEXT_SIZE = "pref_comment_text_size"
+    const val SHOW_INDEX = "pref_show_index"
+    const val COMPACT_HEADER = "pref_compact_header"
+    const val STORY_LIST_SELECTOR = "pref_story_list_selector"
+    const val CATEGORY_TAG_LOCATION = "pref_category_tag_location"
+    const val STORIES_HEADER_PILL = "pref_stories_header_pill"
+    const val STORIES_HEADER_PILL_ELEVATION = "pref_stories_header_pill_elevation"
+    const val LEFT_ALIGN = "pref_left_align"
+    const val STORY_DISPLAY_STYLE = "pref_story_display_style"
+    const val COMMENT_DISPLAY_STYLE = "pref_comment_display_style"
+    const val TINT_CARD_USING_PREVIEW = "pref_tint_card_using_preview"
+    const val PALETTE_TINT_MODE = "pref_palette_tint_mode"
+    const val PALETTE_TINT_STRENGTH = "pref_palette_tint_strength"
+    const val PALETTE_TINT_COLORFULNESS = "pref_palette_tint_colorfulness"
+    const val PALETTE_TINT_TONE = "pref_palette_tint_tone"
+    const val PALETTE_TINT_AVOID_BACKGROUND_COLOR = "pref_palette_tint_avoid_background_color"
+    const val MARK_SCROLLED_POSTS_READ = "pref_mark_scrolled_posts_read"
+    const val GRAY_OUT_CLICKED = "pref_gray_out_clicked"
+    const val HOTNESS = "pref_hotness"
+    const val FAVICON_PROVIDER = "pref_favicon_provider"
+    const val FONT = "pref_font"
+    const val APPLY_FONT_EVERYWHERE = "pref_apply_font_everywhere"
+    const val HIDE_JOBS = "pref_hide_jobs"
+    const val SWIPE_TO_HIDE = "pref_swipe_to_hide"
+    const val HIDE_CLICKED = "pref_hide_clicked"
+    const val ALWAYS_OPEN_COMMENTS = "pref_always_open_comments"
+    const val PAGINATION_MODE = "pref_pagination_mode"
+    const val ALWAYS_SHOW_TAP_TO_REFRESH = "pref_always_show_tap_to_refresh"
+    const val DEFAULT_STORY_TYPE = "pref_default_story_type"
+    const val ADDITIONAL_FRONTPAGES = "pref_additional_frontpages"
+    const val FRONTPAGE_ORDER = "pref_frontpage_order"
+
+    const val COLLAPSE_PARENT = "pref_collapse_parent"
+    const val COMMENTS_HEADER_PREVIEW_IMAGE = "pref_enable_comments_header_preview_image"
+    const val COMMENTS_HEADER_TINT = "pref_enable_comments_header_tint"
+    const val COMMENTS_HEADER_TINT_SOURCE = "pref_comments_header_tint_source"
+    const val COMMENTS_HEADER_DOMAIN = "pref_comments_header_domain"
+    const val COMMENTS_HEADER_CATEGORIES = "pref_comments_header_categories"
+    const val COMMENTS_HEADER_FAVICON = "pref_comments_header_favicon"
+    const val COMMENTS_HEADER_POINTS = "pref_comments_header_points"
+    const val COMMENTS_HEADER_LAYOUT = "pref_comments_header_layout"
+    const val COMMENTS_HEADER_EDGE = "pref_comments_header_edge"
+    const val COMMENTS_HEADER_META_INFO = "pref_comments_header_meta_info"
+    // Legacy boolean retained for importing older backups.
+    const val COMMENTS_COMBINE_HEADER_ACTIONS = "pref_comments_combine_header_author"
+    const val COMMENTS_SHOW_UP_BUTTON = "pref_comments_show_up_button"
+    const val COMMENTS_PEEK_STORY_HEADER = "pref_comments_peek_story_header"
+    const val COMMENT_DEPTH_INDICATORS = "pref_comment_depth_indicators"
+    const val LAST_ENABLED_COMMENT_DEPTH_INDICATORS = "pref_last_enabled_comment_depth_indicators"
+    const val COMMENT_INDICATOR_THICKNESS = "pref_comment_indicator_thickness"
+    const val QUOTE_SPACING = "pref_quote_spacing"
+    const val QUOTE_HIGHLIGHT_COLOR = "pref_quote_highlight_color"
+    const val QUOTE_HIGHLIGHT_STYLE = "pref_quote_highlight_style"
+    const val QUOTE_PADDING = "pref_quote_padding"
+    const val HIGHLIGHT_QUOTES = "pref_highlight_quotes"
+    const val ROUNDED_DEPTH_INDICATORS = "pref_rounded_depth_indicators"
+    const val CONTINUOUS_DEPTH_INDICATORS = "pref_continuous_depth_indicators"
+    const val USER_AVATARS_ENABLED = "pref_user_avatars_enabled"
+    const val USER_AVATAR_OPTIONS = "pref_user_avatar_options"
+    const val MONOCHROME_COMMENT_DEPTH = "pref_monochrome_comment_depth"
+    const val SCROLL_NAVIGATION = "pref_scroll_navigation"
+    const val TOP_LEVEL_THREAD_INDICATORS = "pref_top_level_thread_indicators"
+    const val COMMENTS_SWAP_LONG = "pref_comments_swap_long"
+    // Keep the released, negatively named key so both legacy choices survive upgrades.
+    const val COMMENTS_DISABLE_SWIPE_BACK = "pref_comments_disable_swipeback"
+    const val COMMENT_DIVIDERS = "pref_comment_dividers"
+    const val MARK_NEW_COMMENTS = "pref_mark_new_comments"
+    const val HIGHLIGHT_COMMENT_META = "pref_highlight_comment_meta"
+    const val EXPAND_COLLECTED_LINKS = "pref_expand_collected_links"
+    const val COLLECT_LINKS_IN_COMMENTS = "pref_collect_links_in_comments"
+    const val COLLAPSE_TOP_LEVEL = "pref_collapse_top_level"
+    const val HIDE_DELAYED_COMMENTS = "pref_hide_delayed_comments"
+    const val HIDE_DEAD_COMMENTS = "pref_hide_dead_comments"
+    const val HIDE_FLAGGED_COMMENTS = "pref_hide_flagged_comments"
+    const val PRELOAD_COMMENTS_MODE = "pref_preload_comments_mode"
+    const val PRELOAD_COMMENTS_MINIMUM_BATTERY = "pref_preload_comments_minimum_battery"
+    const val COMMENT_SORTING = "pref_comment_sorting"
+    const val COMMENTS_SCROLLBAR = "pref_comments_scrollbar"
+    const val COMMENTS_ANIMATION = "pref_comments_animation"
+    const val COMMENTS_SMOOTH_SCROLL = "pref_comments_animation_navigation"
+    const val COMMENTS_VOLUME_NAVIGATION = "pref_comments_volume_navigation"
+
+    const val WEBVIEW = "pref_webview"
+    const val PRELOAD_WEBVIEW = "pref_preload_webview"
+    const val PRELOAD_WEBVIEW_MINIMUM_BATTERY = "pref_preload_webview_minimum_battery"
+    const val WEBVIEW_MATCH_THEME = "pref_webview_match_theme"
+    const val LINK_PREVIEWS_ENABLED = "pref_link_previews_enabled"
+    const val READER_MODE_ENABLED = "pref_webview_reader_mode_enabled"
+    const val READER_MODE_DEFAULT = "pref_webview_reader_mode_default"
+    const val WEBVIEW_ADBLOCK = "pref_webview_adblock"
+    const val CLOSE_WEBVIEW_ON_BACK = "pref_close_webview_on_back"
+    const val COMMENTS_PROVIDER = "pref_comments_provider"
+    const val STORIES_TO_CACHE = "pref_stories_to_cache"
+    const val READER_MODE_FONT = "pref_webview_reader_mode_font"
+    const val READER_MODE_LINE_HEIGHT = "pref_webview_reader_mode_line_height"
+    const val READER_MODE_FONT_SIZE = "pref_webview_reader_mode_font_size"
+    const val PULL_TO_OPEN_BROWSER = "pref_pull_to_open_browser"
+    const val EXTERNAL_BROWSER = "pref_external_browser"
+    const val REDIRECT_NITTER = "pref_redirect_nitter"
+    const val NITTER_INSTANCE_URL = "pref_nitter_instance_url"
+    const val ARCHIVE_REDIRECT_DOMAINS = "pref_archive_redirect_domains"
+    const val BOOKMARKS_ENABLED = "pref_bookmarks_enabled"
+    const val TRANSPARENT_STATUS_BAR = "pref_transparent_status_bar"
+    const val SPECIAL_NIGHTTIME = "pref_special_nighttime"
+    const val SHOW_CHANGELOG = "pref_show_changelog"
+}
+
+/**
+ * Common interpretation of the app's persisted settings.
+ *
+ * Android supplies the key/value adapter, change flow and current theme; every default, clamp and
+ * cross-preference rule below is reusable by later platforms.
+ */
+class StoredUserSettings(
+    private val store: KeyValueStore,
+    override val changes: Flow<Unit>,
+    private val theme: () -> String? = { null },
+    private val showCommentsUpButtonByDefault: Boolean = false,
+    private val preloadCommentsFromStoriesByDefault: Boolean = false,
+    private val defaultSurfaceEffectMode: SurfaceEffectMode = SurfaceEffectMode.Frosted,
+) : UserSettings {
+    override val story: StoryPreferences
+        get() {
+            val paletteConfig = paletteTintConfigKey()
+            return StoryPreferences(
+                showPoints = boolean(UserPreferenceKeys.SHOW_POINTS, true),
+                compactPoints = boolean(UserPreferenceKeys.COMPACT_POINTS, false),
+                includeTopLevelDomain =
+                    boolean(UserPreferenceKeys.INCLUDE_TOP_LEVEL_DOMAIN, true),
+                showCommentsCount = boolean(UserPreferenceKeys.SHOW_COMMENTS_COUNT, true),
+                compactView = boolean(UserPreferenceKeys.COMPACT_VIEW, false),
+                showFavicons = boolean(UserPreferenceKeys.THUMBNAILS, true),
+                previewImageMode = previewImageMode(),
+                borderlessLargePreviewImage =
+                    boolean(UserPreferenceKeys.STORY_PREVIEW_IMAGE_BORDERLESS, false),
+                showPreviewText = boolean(UserPreferenceKeys.SHOW_STORY_SUMMARY, false),
+                spacing = RowSpacingPreferences.sanitize(integer(UserPreferenceKeys.STORY_SPACING, RowSpacingPreferences.DEFAULT)),
+                showDividers = boolean(UserPreferenceKeys.STORY_DIVIDERS, false),
+                storyTextSize = storyTextSize(),
+                commentTextSize = commentTextSize(),
+                showIndex = boolean(UserPreferenceKeys.SHOW_INDEX, true),
+                compactHeader = boolean(UserPreferenceKeys.COMPACT_HEADER, false),
+                listSelector = StoryListSelector.fromStored(
+                    string(UserPreferenceKeys.STORY_LIST_SELECTOR, StoryListSelector.DROPDOWN.storedValue),
+                ),
+                categoryTagLocation = CategoryTagLocation.fromStored(string(UserPreferenceKeys.CATEGORY_TAG_LOCATION, CategoryTagLocation.TITLE.storedValue)),
+                headerPill = StoriesHeaderPill.fromStored(
+                    string(UserPreferenceKeys.STORIES_HEADER_PILL, StoriesHeaderPill.OFF.storedValue),
+                ),
+                headerPillElevation = boolean(UserPreferenceKeys.STORIES_HEADER_PILL_ELEVATION, true),
+                commentsButtonOnLeft = boolean(UserPreferenceKeys.LEFT_ALIGN, false),
+                displayStyle = DisplayStyle.forStories(
+                    string(UserPreferenceKeys.STORY_DISPLAY_STYLE, STANDARD),
+                    boolean(UserPreferenceKeys.TINT_CARD_USING_PREVIEW, true),
+                ),
+                tintCardsFromImages =
+                    boolean(UserPreferenceKeys.TINT_CARD_USING_PREVIEW, true),
+                paletteTintConfigKey = paletteConfig,
+                dimReadStories = boolean(UserPreferenceKeys.GRAY_OUT_CLICKED, true),
+                markScrolledPostsRead = boolean(UserPreferenceKeys.MARK_SCROLLED_POSTS_READ, false) &&
+                    !boolean(UserPreferenceKeys.HIDE_CLICKED, false),
+                hotnessThreshold = string(UserPreferenceKeys.HOTNESS, "-1").toIntOrNull() ?: -1,
+                faviconProvider = FaviconPreferences.sanitizeProvider(
+                    string(UserPreferenceKeys.FAVICON_PROVIDER, FaviconPreferences.GOOGLE),
+                ),
+                font = preferredFont(),
+                hideJobs = boolean(UserPreferenceKeys.HIDE_JOBS, false),
+                hideRead = boolean(UserPreferenceKeys.HIDE_CLICKED, false),
+                swipeToHide = boolean(UserPreferenceKeys.SWIPE_TO_HIDE, false),
+                alwaysOpenComments = boolean(UserPreferenceKeys.ALWAYS_OPEN_COMMENTS, false),
+                pagination = boolean(UserPreferenceKeys.PAGINATION_MODE, false),
+                alwaysShowTapToRefresh =
+                    boolean(UserPreferenceKeys.ALWAYS_SHOW_TAP_TO_REFRESH, false),
+                preferredStoryType = preferredStoryType(),
+                frontpageOrder = StoryTypeMenuPolicy.sanitizeOrder(
+                    string(UserPreferenceKeys.FRONTPAGE_ORDER, "").split(','),
+                ),
+                additionalFrontpages = AdditionalFrontpagePreferences.sanitize(
+                    runCatching {
+                        store.getStringSet(UserPreferenceKeys.ADDITIONAL_FRONTPAGES)
+                    }.getOrDefault(emptySet()),
+                ),
+            )
+        }
+
+    override val comments: CommentPreferences
+        get() {
+            val tintCard = boolean(UserPreferenceKeys.TINT_CARD_USING_PREVIEW, true)
+            val headerPreviewImageEnabled =
+                boolean(UserPreferenceKeys.COMMENTS_HEADER_PREVIEW_IMAGE, true)
+            val headerTintEnabled = boolean(UserPreferenceKeys.COMMENTS_HEADER_TINT, true)
+            val headerTint = CommentsHeaderTint.fromStored(
+                store.getString(UserPreferenceKeys.COMMENTS_HEADER_TINT_SOURCE), headerTintEnabled && tintCard,
+            )
+            return CommentPreferences(
+                collapseParent = boolean(UserPreferenceKeys.COLLAPSE_PARENT, false),
+                showFavicons = boolean(UserPreferenceKeys.COMMENTS_HEADER_FAVICON, true),
+                showHeaderDomain = boolean(UserPreferenceKeys.COMMENTS_HEADER_DOMAIN, true),
+                showHeaderPoints = boolean(UserPreferenceKeys.COMMENTS_HEADER_POINTS, true),
+                showHeaderCategories = boolean(UserPreferenceKeys.COMMENTS_HEADER_CATEGORIES, true),
+                headerButtons = CommentsHeaderButtons(CommentsHeaderButton.entries
+                    .filter { it.configurable && store.contains(it.storageKey) }
+                    .associateWith { boolean(it.storageKey, false) }),
+                headerPreviewImageEnabled = headerPreviewImageEnabled,
+                showHeaderPreviewImage = previewImageMode() != StoryPreviewMode.OFF &&
+                    headerPreviewImageEnabled,
+                headerTintEnabled = headerTintEnabled,
+                tintHeader = headerTint != CommentsHeaderTint.OFF,
+                headerTint = headerTint,
+                headerLayout = CommentsHeaderLayout.fromStored(
+                    string(UserPreferenceKeys.COMMENTS_HEADER_LAYOUT, CommentsHeaderLayout.STANDARD.storedValue),
+                ),
+                headerEdge = CommentsHeaderEdge.fromStored(
+                    string(UserPreferenceKeys.COMMENTS_HEADER_EDGE, CommentsHeaderEdge.FADE.storedValue),
+                ),
+                headerMetaInfo = CommentsHeaderMetaInfo.fromStored(
+                    store.getString(UserPreferenceKeys.COMMENTS_HEADER_META_INFO),
+                    boolean(UserPreferenceKeys.COMMENTS_COMBINE_HEADER_ACTIONS, false),
+                ),
+                showUpButton = boolean(
+                    UserPreferenceKeys.COMMENTS_SHOW_UP_BUTTON,
+                    showCommentsUpButtonByDefault,
+                ),
+                paletteTintConfigKey = paletteTintConfigKey(),
+                peekStoryHeader = boolean(UserPreferenceKeys.COMMENTS_PEEK_STORY_HEADER, true),
+                textSize = commentTextSize(),
+                depthIndicatorMode = commentDepthMode(),
+                indicatorThickness = CommentIndicatorThickness.fromStored(
+                    string(UserPreferenceKeys.COMMENT_INDICATOR_THICKNESS, "standard"),
+                ),
+                highlightQuotes = boolean(UserPreferenceKeys.HIGHLIGHT_QUOTES, false),
+                quotePadding = boolean(UserPreferenceKeys.QUOTE_PADDING, true),
+                quoteSpacing = QuoteSpacing.fromStored(string(UserPreferenceKeys.QUOTE_SPACING, "comfortable")),
+                quoteHighlightColor = QuoteHighlightColor.fromStored(string(UserPreferenceKeys.QUOTE_HIGHLIGHT_COLOR, "material")),
+                quoteHighlightStyle = QuoteHighlightStyle.fromStored(string(UserPreferenceKeys.QUOTE_HIGHLIGHT_STYLE, "both")),
+                roundedDepthIndicators = boolean(UserPreferenceKeys.ROUNDED_DEPTH_INDICATORS, true),
+                continuousDepthIndicators = boolean(UserPreferenceKeys.CONTINUOUS_DEPTH_INDICATORS, false),
+                userAvatarsEnabled = boolean(UserPreferenceKeys.USER_AVATARS_ENABLED, true),
+                userAvatarOptions = UserAvatarOptions.decode(
+                    string(UserPreferenceKeys.USER_AVATAR_OPTIONS, ""),
+                ),
+                showNavigationButtons = boolean(UserPreferenceKeys.SCROLL_NAVIGATION, false),
+                font = preferredFont(),
+                showTopLevelDepthIndicator =
+                    boolean(UserPreferenceKeys.TOP_LEVEL_THREAD_INDICATORS, false),
+                theme = theme(),
+                faviconProvider = FaviconPreferences.sanitizeProvider(
+                    string(UserPreferenceKeys.FAVICON_PROVIDER, FaviconPreferences.GOOGLE),
+                ),
+                swapLongPressTap = boolean(UserPreferenceKeys.COMMENTS_SWAP_LONG, false),
+                swipeBack = !boolean(UserPreferenceKeys.COMMENTS_DISABLE_SWIPE_BACK, true),
+                displayStyle = DisplayStyle.fromStored(
+                    string(UserPreferenceKeys.COMMENT_DISPLAY_STYLE, STANDARD),
+                ),
+                spacing = RowSpacingPreferences.sanitize(integer(UserPreferenceKeys.COMMENT_SPACING, RowSpacingPreferences.DEFAULT)),
+                showDividers = boolean(UserPreferenceKeys.COMMENT_DIVIDERS, false),
+                markNewComments = boolean(UserPreferenceKeys.MARK_NEW_COMMENTS, true),
+                highlightMetadata = boolean(UserPreferenceKeys.HIGHLIGHT_COMMENT_META, false),
+                expandedReferenceLinks = boolean(UserPreferenceKeys.EXPAND_COLLECTED_LINKS, true),
+                collectReferenceLinks =
+                    boolean(UserPreferenceKeys.COLLECT_LINKS_IN_COMMENTS, true),
+                collapseTopLevel = boolean(UserPreferenceKeys.COLLAPSE_TOP_LEVEL, false),
+                hideDelayedComments = boolean(UserPreferenceKeys.HIDE_DELAYED_COMMENTS, false),
+                hideDeadComments = boolean(UserPreferenceKeys.HIDE_DEAD_COMMENTS, true),
+                hideFlaggedComments = boolean(UserPreferenceKeys.HIDE_FLAGGED_COMMENTS, false),
+                preloadCommentsMode = WebViewPreloadMode.fromStored(
+                    string(
+                        UserPreferenceKeys.PRELOAD_COMMENTS_MODE,
+                        if (preloadCommentsFromStoriesByDefault) {
+                            WebViewPreferences.PRELOAD_ALWAYS
+                        } else {
+                            WebViewPreferences.PRELOAD_NEVER
+                        },
+                    ),
+                ),
+                preloadCommentsMinimumBattery = WebViewPreferences.clampBatteryPercent(
+                    integer(UserPreferenceKeys.PRELOAD_COMMENTS_MINIMUM_BATTERY, 0),
+                ),
+                sorting = CommentSortingPreference.fromStored(
+                    string(UserPreferenceKeys.COMMENT_SORTING, CommentSortingPreference.DEFAULT.storedValue),
+                ),
+                showScrollbar = boolean(UserPreferenceKeys.COMMENTS_SCROLLBAR, false),
+                animateChanges = boolean(UserPreferenceKeys.COMMENTS_ANIMATION, true),
+                smoothScroll = boolean(UserPreferenceKeys.COMMENTS_SMOOTH_SCROLL, true),
+                volumeNavigationMode = CommentVolumeNavigationMode.fromStored(
+                    string(
+                        UserPreferenceKeys.COMMENTS_VOLUME_NAVIGATION,
+                        CommentVolumeNavigationMode.DISABLED.storedValue,
+                    ),
+                ),
+            )
+        }
+
+    override val reading: ReadingPreferences
+        get() {
+            val readerModeEnabled = boolean(UserPreferenceKeys.READER_MODE_ENABLED, true)
+            return ReadingPreferences(
+                integratedWebView = boolean(UserPreferenceKeys.WEBVIEW, true),
+                preloadWebViewMode = WebViewPreloadMode.fromStored(
+                    string(UserPreferenceKeys.PRELOAD_WEBVIEW, WebViewPreferences.PRELOAD_NEVER),
+                ),
+                preloadWebViewMinimumBattery = WebViewPreferences.clampBatteryPercent(
+                    integer(UserPreferenceKeys.PRELOAD_WEBVIEW_MINIMUM_BATTERY, 0),
+                ),
+                matchWebViewTheme = boolean(UserPreferenceKeys.WEBVIEW_MATCH_THEME, false),
+                readerModeEnabled = readerModeEnabled,
+                readerModeDefault = readerModeEnabled &&
+                    boolean(UserPreferenceKeys.READER_MODE_DEFAULT, false),
+                blockAds = boolean(UserPreferenceKeys.WEBVIEW_ADBLOCK, false),
+                closeWebViewOnBack = boolean(UserPreferenceKeys.CLOSE_WEBVIEW_ON_BACK, false),
+                useAlgoliaApi = CommentsProvider.fromStored(
+                    string(UserPreferenceKeys.COMMENTS_PROVIDER, CommentsProvider.ALGOLIA.storedValue),
+                ) == CommentsProvider.ALGOLIA,
+                readerModeFont = AppFont.fromStored(
+                    string(UserPreferenceKeys.READER_MODE_FONT, "googlesansflexrounded"),
+                ),
+                readerModeLineHeight = ReaderLineHeight.fromStored(
+                    string(UserPreferenceKeys.READER_MODE_LINE_HEIGHT, ReaderLineHeight.STANDARD.storedValue),
+                ),
+                readerModeFontSize = TextPreferences.clampReaderModeFontSize(
+                    integer(UserPreferenceKeys.READER_MODE_FONT_SIZE, TextPreferences.DEFAULT_READER_MODE_FONT_SIZE),
+                ),
+                pullToOpenBrowser = boolean(UserPreferenceKeys.PULL_TO_OPEN_BROWSER, false),
+                externalBrowser = boolean(UserPreferenceKeys.EXTERNAL_BROWSER, false),
+                redirectNitter = boolean(UserPreferenceKeys.REDIRECT_NITTER, false),
+                nitterInstanceUrl = NitterInstance.effectiveUrl(
+                    string(UserPreferenceKeys.NITTER_INSTANCE_URL, NitterInstance.DEFAULT_URL),
+                ),
+                archiveRedirectDomains = ArchiveRedirectPolicy.parseDomains(
+                    string(UserPreferenceKeys.ARCHIVE_REDIRECT_DOMAINS, ""),
+                ),
+                linkPreviewsEnabled = boolean(UserPreferenceKeys.LINK_PREVIEWS_ENABLED, true),
+                enabledLinkPreviews = LinkPreviewType.entries.filterTo(linkedSetOf()) { type ->
+                    boolean(type.preferenceKey, type.defaultEnabled)
+                },
+            )
+        }
+
+    override val cache: CachePreferences
+        get() = CachePreferences(
+            storiesToCache = StoryCachePreferences.sanitizeCount(
+                integer(UserPreferenceKeys.STORIES_TO_CACHE, StoryCachePreferences.DEFAULT_COUNT),
+            ),
+            cacheArticleSnapshots = boolean(UserPreferenceKeys.WEBVIEW, true),
+        )
+
+    override val general: GeneralPreferences
+        get() = GeneralPreferences(
+            bookmarksEnabled = boolean(UserPreferenceKeys.BOOKMARKS_ENABLED, true),
+            transparentStatusBar = boolean(UserPreferenceKeys.TRANSPARENT_STATUS_BAR, false),
+            specialNighttimeTheme = boolean(UserPreferenceKeys.SPECIAL_NIGHTTIME, false),
+            showChangelog = boolean(UserPreferenceKeys.SHOW_CHANGELOG, true),
+        )
+
+    override val appearance: AppearancePreferences
+        get() {
+            val legacyTheme = string(ThemePreferences.KEY, ThemePreferences.DEFAULT)
+            return AppearancePreferences(
+                followSystem = if (store.contains(ThemePreferences.FOLLOW_SYSTEM_KEY)) {
+                    boolean(ThemePreferences.FOLLOW_SYSTEM_KEY, true)
+                } else {
+                    ThemePreferences.isAutomatic(legacyTheme)
+                },
+                manualDark = if (store.contains(ThemePreferences.MANUAL_DARK_KEY)) {
+                    boolean(ThemePreferences.MANUAL_DARK_KEY, false)
+                } else {
+                    ThemePreferences.isDark(legacyTheme)
+                },
+                colorSchemes = ColorSchemePreferences.read(store),
+                font = configuredFont(),
+                applyFontEverywhere = boolean(UserPreferenceKeys.APPLY_FONT_EVERYWHERE, false),
+                portraitSplitRatio = SplitRatioPreferences.sanitize(
+                    store.getFloat(UserPreferenceKeys.SPLIT_RATIO_PORTRAIT, Float.NaN),
+                ),
+                landscapeSplitRatio = SplitRatioPreferences.sanitize(
+                    store.getFloat(UserPreferenceKeys.SPLIT_RATIO_LANDSCAPE, Float.NaN),
+                ),
+                surfaceEffectMode = SurfaceEffectMode.fromStored(
+                    store.getString(SurfaceEffectMode.STORAGE_KEY),
+                    defaultSurfaceEffectMode,
+                ),
+                extraSidePadding = ExtraSidePadding.fromStored(
+                    store.getString(UserPreferenceKeys.EXTRA_SIDE_PADDING),
+                ),
+            )
+        }
+
+    override val debug: DebugPreferences
+        get() = DebugPreferences(
+            alwaysShowTapToRefresh = boolean(UserPreferenceKeys.ALWAYS_SHOW_TAP_TO_REFRESH, false),
+            showWidgetDebugInfo = boolean(DebugBooleanPreference.SHOW_WIDGET_DEBUG_INFO.storageKey, false),
+            mockAiAnswers = boolean(DebugBooleanPreference.MOCK_AI_ANSWERS.storageKey, false),
+            storyLoadFailurePercent = integer(UserPreferenceKeys.STORY_LOAD_FAILURE_PERCENT, 0).coerceIn(0, 100),
+            glass = GlassPreferences(
+                parameters = GlassParameter.entries.filter { store.contains(it.storageKey) }
+                    .associateWith { it.sanitize(store.getFloat(it.storageKey, it.default)) },
+                switches = GlassSwitch.entries.filter { store.contains(it.storageKey) }
+                    .associateWith { store.getBoolean(it.storageKey, it.default) },
+                surfaceProfile = GlassSurfaceProfile.fromStored(
+                    store.getString(GlassSurfaceProfile.STORAGE_KEY),
+                ),
+            ),
+        )
+
+    override fun setStoriesToCache(count: Int) {
+        store.putInt(
+            UserPreferenceKeys.STORIES_TO_CACHE,
+            StoryCachePreferences.sanitizeCount(count),
+        )
+    }
+
+    private fun paletteTintConfigKey(): String = PaletteTintPreferences.configKey(
+        string(UserPreferenceKeys.PALETTE_TINT_MODE, PaletteTintPreferences.DEFAULT),
+        integer(UserPreferenceKeys.PALETTE_TINT_STRENGTH, PaletteTintPreferences.DEFAULT_STRENGTH),
+        integer(
+            UserPreferenceKeys.PALETTE_TINT_COLORFULNESS,
+            PaletteTintPreferences.DEFAULT_COLORFULNESS,
+        ),
+        integer(UserPreferenceKeys.PALETTE_TINT_TONE, PaletteTintPreferences.DEFAULT_TONE),
+        boolean(
+            UserPreferenceKeys.PALETTE_TINT_AVOID_BACKGROUND_COLOR,
+            PaletteTintPreferences.DEFAULT_AVOID_BACKGROUND_COLOR,
+        ),
+    )
+
+    private fun previewImageMode(): StoryPreviewMode = StoryPreviewMode.fromStored(
+        string(UserPreferenceKeys.STORY_PREVIEW_IMAGE_MODE, StoryPreviewMode.MEDIUM.storedValue),
+    )
+
+    private fun storyTextSize(): Float = TextPreferences.clampStoryTextSize(
+        numericPreference(UserPreferenceKeys.STORY_TEXT_SIZE, TextPreferences.DEFAULT_STORY_TEXT_SIZE),
+    )
+
+    private fun commentTextSize(): Float = TextPreferences.clampCommentTextSize(
+        numericPreference(
+            UserPreferenceKeys.COMMENT_TEXT_SIZE,
+            TextPreferences.DEFAULT_COMMENT_TEXT_SIZE,
+        ),
+    )
+
+    private fun preferredFont(): String = configuredFont()
+
+    private fun configuredFont(): String =
+        TextPreferences.sanitizeFont(string(UserPreferenceKeys.FONT, "googlesansflexrounded"))
+
+    private fun commentDepthMode(): String {
+        if (store.contains(UserPreferenceKeys.COMMENT_DEPTH_INDICATORS)) {
+            return CommentDepthPreferences.sanitizeMode(
+                string(
+                    UserPreferenceKeys.COMMENT_DEPTH_INDICATORS,
+                    CommentDepthPreferences.THEME_DEFAULT,
+                ),
+            )
+        }
+        return if (boolean(UserPreferenceKeys.MONOCHROME_COMMENT_DEPTH, false)) {
+            CommentDepthPreferences.MONOCHROME
+        } else {
+            CommentDepthPreferences.THEME_DEFAULT
+        }
+    }
+
+    private fun preferredStoryType(): String {
+        val preferred = string(UserPreferenceKeys.DEFAULT_STORY_TYPE, TOP_STORIES)
+        val enabled = AdditionalFrontpagePreferences.sanitize(
+            runCatching { store.getStringSet(UserPreferenceKeys.ADDITIONAL_FRONTPAGES) }
+                .getOrDefault(emptySet()),
+        )
+        return if (
+            (AdditionalFrontpagePreferences.isLabel(preferred) && preferred !in enabled)
+        ) {
+            TOP_STORIES
+        } else {
+            preferred
+        }
+    }
+
+    private fun numericPreference(key: String, default: Float): Float {
+        val stringValue = runCatching { store.getString(key) }.getOrNull()
+        if (stringValue != null) return stringValue.toFloatOrNull() ?: default
+        return runCatching { store.getFloat(key, default) }
+            .recoverCatching { store.getInt(key, default.toInt()).toFloat() }
+            .getOrDefault(default)
+    }
+
+    private fun string(key: String, default: String): String =
+        runCatching { store.getString(key, default) }.getOrNull() ?: default
+
+    private fun boolean(key: String, default: Boolean): Boolean =
+        runCatching { store.getBoolean(key, default) }.getOrDefault(default)
+
+    private fun integer(key: String, default: Int): Int =
+        runCatching { store.getInt(key, default) }.getOrDefault(default)
+
+    private companion object {
+        const val STANDARD = "standard"
+        const val TOP_STORIES = "Top Stories"
+    }
+}

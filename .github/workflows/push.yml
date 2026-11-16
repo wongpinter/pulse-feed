@@ -1,0 +1,344 @@
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Select platform checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      android: ${{ steps.platforms.outputs.android }}
+      desktop: ${{ steps.platforms.outputs.desktop }}
+      ios: ${{ steps.platforms.outputs.ios }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Test CI scripts
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
+      - name: Find last successful push
+        if: github.event_name == 'push'
+        id: last-success
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Include changes from failed/cancelled runs, not just the last commit.
+        # An unavailable baseline selects every platform.
+        run: |
+          base=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow push.yml \
+            --branch "$GITHUB_REF_NAME" --event push --status success --limit 1 \
+            --json headSha --jq '.[0].headSha // empty') || base=""
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+      - name: Select affected platforms
+        id: platforms
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || steps.last-success.outputs.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 -B .github/scripts/ci_platforms.py
+
+  verify:
+    name: KMP and host tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Run KMP, Android host, and desktop tests
+        run: >-
+          ./gradlew
+          :resources:verifyGeneratedAdblocklist
+          :core:desktopTest
+          :core:testAndroidHostTest
+          :ui:desktopTest
+          :ui:testAndroidHostTest
+          :desktop_app:desktopTest
+          :app:testDebugUnitTest
+          --warning-mode all
+          --no-daemon
+          --max-workers=2
+          --parallel
+      - name: Test Play local AI runtime delivery and Nano prompts
+        run: >-
+          ./gradlew -Pharmonic.testBuildType=debugLLM
+          :app:testDebugLLMUnitTest --tests '*LocalAiRuntimeStatusTest' --tests '*NanoPromptIntegrationTest'
+          :local_ai_runtime:testDebugLLMUnitTest
+          --no-daemon --max-workers=2
+      - name: Upload JVM test reports on failure
+        if: failure()
+        # Diagnostics are useful, but an artifact-service outage must not decide test status.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    env:
+      BUNDLETOOL_VERSION: '1.18.3'
+      BUNDLETOOL_SHA256: 'A099CFA1543F55593BC2ED16A70A7C67FE54B1747BB7301F37FDFD6D91028E29'
+      RELEASE_BUNDLE: app/build/outputs/bundle/playRelease/app-playRelease.aab
+      CI_LLM_APKS: app/build/outputs/apk/playRelease/app-release-llm-ci.apks
+      CI_LLM_APK: app/build/outputs/apk/playRelease/app-release-llm-ci.apk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Install NDK for stripping packaged native libraries
+        run: sdkmanager "ndk;29.0.13113456"
+      - name: Build with Gradle
+        run: >-
+          ./gradlew
+          :app:assembleFossRelease
+          :app:bundlePlayRelease
+          :app:lintFossRelease
+          :app:lintPlayRelease
+          :app:verifyFossDependencies
+          --warning-mode all
+          --no-daemon
+          --max-workers=2
+          --parallel
+      - name: Build fused LLM APK
+        run: |
+          set -euo pipefail
+
+          BUNDLETOOL_JAR="$RUNNER_TEMP/bundletool.jar"
+          KEYSTORE_PATH="$RUNNER_TEMP/ci-debug.jks"
+          KEYSTORE_PASSWORD_FILE="$RUNNER_TEMP/ci-keystore-password.txt"
+          KEY_PASSWORD_FILE="$RUNNER_TEMP/ci-key-password.txt"
+
+          curl -fsSL \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar" \
+            -o "$BUNDLETOOL_JAR"
+          echo "${BUNDLETOOL_SHA256}  ${BUNDLETOOL_JAR}" | sha256sum --check -
+
+          printf '%s' 'android' > "$KEYSTORE_PASSWORD_FILE"
+          printf '%s' 'android' > "$KEY_PASSWORD_FILE"
+          keytool -genkeypair -noprompt \
+            -keystore "$KEYSTORE_PATH" \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          java -jar "$BUNDLETOOL_JAR" build-apks \
+            --bundle="$RELEASE_BUNDLE" \
+            --output="$CI_LLM_APKS" \
+            --mode=universal \
+            --ks="$KEYSTORE_PATH" \
+            --ks-pass="file:$KEYSTORE_PASSWORD_FILE" \
+            --ks-key-alias=androiddebugkey \
+            --key-pass="file:$KEY_PASSWORD_FILE" \
+            --overwrite
+          unzip -p "$CI_LLM_APKS" universal.apk > "$CI_LLM_APK"
+          unzip -t "$CI_LLM_APK" 'lib/*/liblitertlm_jni.so'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apks
+          path: |
+            app/build/outputs/apk
+            app/build/outputs/bundle/playRelease/app-playRelease.aab
+
+  desktop:
+    name: Desktop ${{ matrix.artifact_name }}
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ${{ matrix.os }}
+    env:
+      ORG_GRADLE_PROJECT_harmonicAndroidHostEnabled: 'false'
+      # Exercise optimized dependency bytecode on every PR, not only tagged releases.
+      ORG_GRADLE_PROJECT_harmonicDesktopOptimize: ${{ matrix.os == 'macos-15' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            task: packageReleaseDmg
+            artifact_name: macos-dmg-arm64
+            artifact_path: desktop_app/build/compose/binaries/**/*.dmg
+          - os: windows-2025
+            task: packageReleaseMsi
+            artifact_name: windows-msi-x64
+            artifact_path: desktop_app/build/compose/binaries/**/*.msi
+          - os: windows-11-arm
+            task: createReleaseDistributable
+            artifact_name: windows-exe-arm64
+            artifact_path: desktop_app/build/compose/binaries/main-release/exe/*.exe
+          - os: ubuntu-24.04
+            task: packageReleaseDeb
+            artifact_name: linux-deb-x64
+            artifact_path: desktop_app/build/compose/binaries/**/*.deb
+          - os: ubuntu-24.04-arm
+            task: packageReleaseDeb
+            artifact_name: linux-deb-arm64
+            artifact_path: desktop_app/build/compose/binaries/**/*.deb
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: ${{ matrix.os == 'windows-11-arm' && 'microsoft' || 'temurin' }}
+          java-version: '21'
+          architecture: ${{ runner.arch == 'ARM64' && 'aarch64' || 'x64' }}
+      - name: Select Windows ARM64 packaging JDK
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: echo "ORG_GRADLE_PROJECT_harmonicDesktopJavaHome=$JAVA_HOME" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v6
+      # The shared KMP modules still configure an Android library target.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Install Linux ARM64 desktop dependencies
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y fakeroot xvfb xauth libgl1 libgl1-mesa-dri libegl1 libfontconfig1 libfreetype6 libasound2t64 libx11-6 libxext6 libxi6 libxrender1 libxtst6
+      - name: Add WiX Toolset to PATH
+        if: runner.os == 'Windows' && runner.arch != 'ARM64'
+        shell: pwsh
+        run: |
+          $wix = Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset v3.*\bin" -Directory |
+            Select-Object -First 1
+          if (-not $wix) {
+            throw "WiX Toolset 3.x is required to build the MSI"
+          }
+          $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Test Windows ARM64 installer scripts
+        if: matrix.os == 'windows-11-arm'
+        run: python -B -m unittest discover -s .github/scripts -p 'test_package_windows_arm64.py'
+      - name: Build desktop package
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run --auto-servernum ./gradlew :desktop_app:${{ matrix.task }} --warning-mode all --no-daemon --max-workers=2
+          else
+            ./gradlew :desktop_app:${{ matrix.task }} --warning-mode all --no-daemon --max-workers=2
+          fi
+      - name: Verify desktop AppCDS archive
+        if: matrix.os != 'windows-11-arm'
+        run: python .github/scripts/verify-desktop-appcds.py desktop_app/build/compose/binaries/main-release/app
+      - name: Verify processed desktop runtime
+        run: >-
+          java -Xverify:all "-Djava.awt.headless=true"
+          -cp "desktop_app/build/compose/tmp/main-release/proguard/*"
+          .github/scripts/VerifyDesktopRelease.java
+      - name: Build Windows ARM64 installer
+        if: matrix.os == 'windows-11-arm'
+        run: python .github/scripts/package_windows_arm64.py
+      - name: Verify Windows ARM64 installation and uninstallation
+        if: matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: .github/scripts/verify_windows_arm64_install.ps1
+      - name: Upload Windows ARM64 verification logs
+        if: failure() && matrix.os == 'windows-11-arm'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-arm64-verification-logs
+          path: ${{ runner.temp }}/harmonic-arm64-verification/*.log
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          name: harmonic-${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  ios:
+    name: iOS KMP and Xcode verification
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
+    # FoundationModels integration uses iOS 27 SDK APIs.
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      # Inherited by both Gradle and the Gradle invocation inside xcodebuild.
+      ORG_GRADLE_PROJECT_harmonicAndroidHostEnabled: 'false'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+      # The shared KMP modules still configure an Android library target.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Identify Kotlin and Apple toolchains
+        id: konan-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          kotlin=$(sed -n 's/^kotlin = "\([^"]*\)"/\1/p' gradle/libs.versions.toml)
+          test -n "$kotlin"
+          xcode_version=$(xcodebuild -version)
+          test -n "$xcode_version"
+          printf '%s\n' "$xcode_version"
+          echo "kotlin=$kotlin" >> "$GITHUB_OUTPUT"
+          echo "xcode=$(printf '%s' "$xcode_version" | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Cache Kotlin Native toolchain and dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          # No fallback across Kotlin/Xcode versions: native compiler caches
+          # must match the compiler and Apple SDK that produced them.
+          key: konan-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.konan-toolchain.outputs.kotlin }}-${{ steps.konan-toolchain.outputs.xcode }}-${{ hashFiles('gradle/libs.versions.toml', 'gradle.properties') }}
+      - name: Run iOS KMP tests
+        run: >-
+          ./gradlew
+          :core:iosSimulatorArm64Test
+          :ui:iosSimulatorArm64Test
+          --warning-mode all
+          --no-daemon
+          --max-workers=2
+          --parallel
+      - name: Compile the iOS host and UI tests
+        run: >-
+          xcodebuild
+          -project ios_app/HarmonicIos.xcodeproj
+          -scheme HarmonicIos
+          -configuration Debug
+          -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          ARCHS=arm64
+          ONLY_ACTIVE_ARCH=YES
+          CODE_SIGNING_ALLOWED=NO
+          build-for-testing
+      # Keep native download fixtures compiled above and available for local runs. Their
+      # loopback-server and cancellation timing is unreliable on hosted simulators.
+      - name: Upload iOS test reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-test-reports
+          path: |
+            core/build/reports/tests/iosSimulatorArm64Test
+            core/build/test-results/iosSimulatorArm64Test
+            ui/build/reports/tests/iosSimulatorArm64Test
+            ui/build/test-results/iosSimulatorArm64Test
+          if-no-files-found: ignore

@@ -1,0 +1,100 @@
+package com.simon.harmonichackernews.ui.settings
+
+import android.os.Build
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import androidx.glance.appwidget.updateAll
+import com.simon.harmonichackernews.widget.StoriesGlanceWidget
+import com.simon.harmonichackernews.debug.DebugCachedPostFixture
+import com.simon.harmonichackernews.navigation.StoryDestination
+import com.simon.harmonichackernews.navigation.toDestination
+import com.simon.harmonichackernews.network.LinkPreviewUseCase
+import com.simon.harmonichackernews.ui.LocalHarmonicUiDependencies
+import kotlinx.coroutines.launch
+
+private const val OpenWithoutCacheStoryId = 49089500
+
+@Composable
+fun AndroidDebugSettingsScreen(
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onOpenLinkPreviews: () -> Unit,
+    onOpenGlassSettings: () -> Unit,
+    onOpenAccountSettings: () -> Unit,
+) {
+    val app = LocalHarmonicUiDependencies.current
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    DebugSettingsRoute(
+        repository = app.settings,
+        debugAccountIdentity = app.debugAccountIdentity,
+        onOpenAccountSettings = onOpenAccountSettings,
+        onWidgetDebugInfoChanged = { scope.launch { StoriesGlanceWidget().updateAll(context) } },
+        environment = DebugEnvironmentUiState(
+            appVersion = app.metadata.versionName,
+            appBuild = app.metadata.buildNumber,
+            buildVersion = app.metadata.buildType,
+            platformVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+        ),
+        showNavigation = showNavigation,
+        onBack = onBack,
+        onOpenHnId = { app.navigation.openStory(StoryDestination(it)) },
+        onOpenUserProfile = { app.navigation.showUserDialog(it) },
+        onOpenWithoutCache = {
+            scope.launch {
+                app.storyCache.remove(OpenWithoutCacheStoryId)
+                app.network.removeCachedStoryResponses(OpenWithoutCacheStoryId)
+                app.navigation.openStory(StoryDestination(OpenWithoutCacheStoryId))
+            }
+        },
+        onCachePost = {
+            scope.launch {
+                if (DebugCachedPostFixture.seed(app.storyCache::storeStory)) {
+                    app.navigation.openStory(DebugCachedPostFixture.story().toDestination())
+                }
+            }
+        },
+        onOpenNewCommentsPost = {
+            scope.launch {
+                if (DebugCachedPostFixture.seed(app.storyCache::storeStory)) {
+                    app.navigation.openStory(DebugCachedPostFixture.story().toDestination().copy(debugMarkAllCommentsNew = true))
+                }
+            }
+        },
+        onOpenLink = { app.links.open(it) },
+        onOpenLinkPreviews = onOpenLinkPreviews,
+        onOpenGlassSettings = onOpenGlassSettings,
+        onEasterEggRequested = app.navigation::openCoulombGas,
+        onWelcomeRequested = { app.navigation.openWelcome() },
+        dialogContent = { dialog, dismiss ->
+            when (dialog) {
+                DebugSettingsDialog.CHANGELOG -> SettingsChangelogDialog(
+                    onDismiss = dismiss,
+                    onOpenGithub = {
+                        app.links.open(app.metadata.projectUrl)
+                        dismiss()
+                    },
+                )
+                DebugSettingsDialog.NOTIFICATIONS -> AndroidDebugNotificationsDialog(
+                    onDismiss = dismiss,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+fun AndroidLinkPreviewsDebugScreen(onBack: () -> Unit) {
+    val app = LocalHarmonicUiDependencies.current
+    val useCase = remember(app.network.linkPreviewRepository) {
+        LinkPreviewUseCase(app.network.linkPreviewRepository)
+    }
+    LinkPreviewsDebugScreen(
+        comments = app.userSettings.comments,
+        loadPreview = useCase::load,
+        onOpenLink = app.links::open,
+        onBack = onBack,
+    )
+}

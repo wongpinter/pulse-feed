@@ -1,0 +1,552 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
+package com.simon.harmonichackernews.ui.settings
+
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedIconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
+import com.simon.harmonichackernews.resources.*
+import com.simon.harmonichackernews.resources.HarmonicDimens
+import com.simon.harmonichackernews.settings.AppFont
+import com.simon.harmonichackernews.settings.WebViewPreloadMode
+import com.simon.harmonichackernews.ui.content.FontMetrics
+import com.simon.harmonichackernews.ui.theme.AppUiFontFamily
+import org.jetbrains.compose.resources.Font
+import org.jetbrains.compose.resources.painterResource
+import kotlinx.coroutines.flow.first
+
+@Composable
+fun FontSelectionDialog(
+    readerMode: Boolean,
+    selected: AppFont,
+    options: List<Pair<String, AppFont>>,
+    onSelected: (AppFont) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    SettingsAlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            SettingsDialogTitle(if (readerMode) "Reader mode font" else "Font")
+        },
+        edgeToEdgeContent = true,
+        scrollableContent = true,
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp).selectableGroup(),
+                contentPadding = PaddingValues(top = 4.dp, bottom = 8.dp),
+            ) {
+                items(options, key = { it.second.storedValue }, contentType = { "font-option" }) { (label, value) ->
+                    val fontFamily = fontFamilyForSetting(value.storedValue)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 64.dp)
+                            .selectable(
+                                selected = value == selected,
+                                role = Role.RadioButton,
+                                onClick = {
+                                    onSelected(value)
+                                    onDismiss()
+                                },
+                            )
+                            .padding(horizontal = 24.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SettingsRadioButton(selected = value == selected)
+                        Spacer(Modifier.width(4.dp))
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy((-3).dp),
+                        ) {
+                            Text(
+                                text = label,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontFamily = fontFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                            )
+                            Text(
+                                text = "205 points · science.org · 8h",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontFamily = fontFamily,
+                                fontSize = FontMetrics.forFont(value.storedValue).storyMeta.sp,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        showButtons = false,
+    )
+}
+
+@Composable
+fun PreloadWebViewDialog(
+    initialMode: WebViewPreloadMode,
+    initialBattery: Int,
+    onSave: (mode: WebViewPreloadMode, minimumBattery: Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    PreloadPolicyDialog(
+        title = "Preload websites",
+        description = "When you open comments for a link, Pulse Feed can load the website " +
+            "in the background while you read. This makes switching to the website " +
+            "faster, but uses network data, CPU, memory, and battery.",
+        initialMode = initialMode,
+        initialBattery = initialBattery,
+        onSave = onSave,
+        onDismiss = onDismiss,
+    )
+}
+
+@Composable
+fun PreloadCommentsDialog(
+    initialMode: WebViewPreloadMode,
+    initialBattery: Int,
+    onSave: (mode: WebViewPreloadMode, minimumBattery: Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    PreloadPolicyDialog(
+        title = "Preload comments",
+        description = "Pulse Feed can download and prepare comments for discussions visible " +
+            "on the stories screen. This makes opening them faster, but uses network data, " +
+            "CPU, memory, and battery—even for stories you never open. The official HN API " +
+            "requires a separate request for every comment, so it can use substantially more " +
+            "network data than Algolia.",
+        initialMode = initialMode,
+        initialBattery = initialBattery,
+        onSave = onSave,
+        onDismiss = onDismiss,
+    )
+}
+
+@Composable
+private fun PreloadPolicyDialog(
+    title: String,
+    description: String,
+    initialMode: WebViewPreloadMode,
+    initialBattery: Int,
+    onSave: (mode: WebViewPreloadMode, minimumBattery: Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var modeValue by rememberSaveable { mutableStateOf(initialMode.storedValue) }
+    val mode = WebViewPreloadMode.fromStored(modeValue)
+    var battery by rememberSaveable {
+        mutableFloatStateOf(((initialBattery / 5) * 5).toFloat().coerceIn(0f, 100f))
+    }
+    val enabled = mode != WebViewPreloadMode.NEVER
+    val options = WebViewPreloadMode.entries
+
+    SettingsAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { SettingsDialogTitle(title) },
+        edgeToEdgeContent = true,
+        scrollableContent = true,
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                Text(
+                    text = description,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontFamily = AppUiFontFamily,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                )
+                Column(modifier = Modifier.padding(top = 12.dp).selectableGroup()) {
+                    options.forEach { value ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .selectable(
+                                    selected = mode == value,
+                                    role = Role.RadioButton,
+                                    onClick = { modeValue = value.storedValue },
+                                )
+                                .padding(horizontal = 24.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SettingsRadioButton(selected = mode == value)
+                            Text(
+                                text = value.label,
+                                modifier = Modifier.padding(start = 4.dp),
+                                fontFamily = AppUiFontFamily,
+                                fontSize = 16.sp,
+                            )
+                        }
+                    }
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .alpha(if (enabled) 1f else 0.5f)
+                        .padding(start = 24.dp, top = 8.dp, end = 24.dp),
+                ) {
+                    Text(
+                        text = "Minimum battery: " +
+                            if (battery <= 0f) "Any" else "${battery.toInt()}%",
+                        fontFamily = AppUiFontFamily,
+                        fontSize = 14.sp,
+                    )
+                    Slider(
+                        value = battery,
+                        onValueChange = { battery = (it / 5f).toInt() * 5f },
+                        enabled = enabled,
+                        valueRange = 0f..100f,
+                        steps = 19,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            SettingsDialogTextButton(
+                onClick = {
+                    onSave(mode, battery.toInt())
+                    onDismiss()
+                },
+            ) {
+                Text("OK")
+            }
+        },
+        dismissButton = {
+            SettingsDialogTextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+fun StringListEditorDialog(
+    title: String,
+    subtitle: String,
+    inputLabel: String,
+    initialItems: List<String>,
+    emptyMessage: String,
+    suggestedItems: List<String> = emptyList(),
+    suggestionsLabel: String = "Suggestions",
+    parseInput: (String) -> List<String>,
+    emptyInputError: String = "",
+    disableSuggestions: Boolean = false,
+    onItemProfileRequested: ((String) -> Unit)? = null,
+    nestedDialog: (@Composable () -> Unit)? = null,
+    onItemsChanged: (List<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var items by remember(initialItems) { mutableStateOf(uniqueEditorItems(initialItems)) }
+    var input by rememberSaveable { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    val dismissal = remember { SettingsDialogDismissState() }
+    fun dismiss() = dismissal.request(onDismiss)
+    val suggestions = suggestedItems.filter { suggestion ->
+        items.none { it.equals(suggestion, ignoreCase = true) }
+    }
+
+    val additions = remember(input, parseInput, items) {
+        newEditorItems(items, parseInput(input))
+    }
+    val canAdd = additions.isNotEmpty()
+
+    fun updateItems(updated: List<String>) {
+        if (dismissal.isClosing) return
+        items = updated
+        onItemsChanged(updated)
+    }
+
+    fun addValues(rawValue: String = input) {
+        if (dismissal.isClosing) return
+        val toAdd = newEditorItems(items, parseInput(rawValue))
+        if (toAdd.isNotEmpty()) {
+            updateItems(items + toAdd)
+            if (rawValue == input) {
+                input = ""
+            }
+        }
+    }
+
+    SettingsAlertDialog(
+        onDismissRequest = ::dismiss,
+        properties = DialogProperties(dismissOnClickOutside = true),
+        scrollableContent = true,
+        title = { SettingsDialogTitle(title) },
+        text = {
+            com.simon.harmonichackernews.ui.common.PlatformDisableDialogWindowAnimations()
+            CompleteSettingsDialogDismissal(dismissal)
+            RequestSettingsDialogFocus(focusRequester, enabled = !dismissal.isClosing)
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                Text(
+                    text = subtitle,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontFamily = AppUiFontFamily,
+                    fontSize = 14.sp,
+                    lineHeight = 18.sp,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = { if (!dismissal.isClosing) input = it },
+                        modifier = Modifier.weight(1f).focusRequester(focusRequester),
+                        label = { Text(inputLabel) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = if (disableSuggestions) {
+                                KeyboardType.Ascii
+                            } else {
+                                KeyboardType.Text
+                            },
+                            autoCorrectEnabled = !disableSuggestions,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { addValues(input) }),
+                    )
+                    OutlinedIconButton(
+                        onClick = { addValues(input) },
+                        enabled = canAdd && !dismissal.isClosing,
+                        modifier = Modifier
+                            .padding(start = 10.dp, top = 12.dp)
+                            .size(48.dp),
+                    ) {
+                        Icon(
+                            painter = painterResource(Res.drawable.ic_add),
+                            contentDescription = "Add",
+                            tint = if (canAdd) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                            },
+                        )
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("filter-list")
+                        .heightIn(max = 224.dp),
+                ) {
+                    if (items.isEmpty()) {
+                        item(key = "empty-list-message", contentType = "empty-list-message") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(72.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = emptyMessage,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontFamily = AppUiFontFamily,
+                                    fontSize = 15.sp,
+                                )
+                            }
+                        }
+                    } else {
+                        items(items, key = { it.lowercase() }, contentType = { "editable-string" }) { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .animateItem(
+                                        fadeInSpec = tween(160),
+                                        placementSpec = tween(
+                                            durationMillis = 220,
+                                            easing = FastOutSlowInEasing,
+                                        ),
+                                        // Retained exit layers enlarge a wrap-content lazy list's
+                                        // measured viewport. Let the enclosing size animation own
+                                        // removal so the dialog can start shrinking immediately.
+                                        fadeOutSpec = null,
+                                    ),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = item,
+                                    modifier = Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontFamily = AppUiFontFamily,
+                                    fontSize = 16.sp,
+                                    lineHeight = 20.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                onItemProfileRequested?.let { openProfile ->
+                                    IconButton(
+                                        onClick = { openProfile(item) },
+                                        enabled = !dismissal.isClosing,
+                                        modifier = Modifier.size(48.dp),
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(Res.drawable.ic_person),
+                                            contentDescription = "View profile for $item",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = { updateItems(items.filterNot { it == item }) },
+                                    enabled = !dismissal.isClosing,
+                                    modifier = Modifier.size(48.dp),
+                                ) {
+                                    Icon(
+                                        painter = painterResource(Res.drawable.ic_close),
+                                        contentDescription = "Remove $item",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (suggestions.isNotEmpty()) {
+                    Column {
+                        Text(
+                            text = suggestionsLabel,
+                            modifier = Modifier.padding(top = 18.dp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontFamily = AppUiFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                        )
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            suggestions.forEach { suggestion ->
+                                AssistChip(
+                                    onClick = { addValues(suggestion) },
+                                    enabled = !dismissal.isClosing,
+                                    label = { Text(suggestion) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        showButtons = false,
+        foreground = { nestedDialog?.invoke() },
+    )
+}
+
+/** Open the IME only after this dialog owns focus and its insets/layout have had a frame. */
+@Composable
+internal fun RequestSettingsDialogFocus(focusRequester: FocusRequester, enabled: Boolean = true) {
+    val windowInfo = LocalWindowInfo.current
+    var requested by remember(focusRequester) { mutableStateOf(false) }
+    LaunchedEffect(focusRequester, windowInfo, enabled) {
+        if (!enabled || requested) return@LaunchedEffect
+        do {
+            snapshotFlow { windowInfo.isWindowFocused }.first { it }
+            withFrameNanos { }
+        } while (!windowInfo.isWindowFocused)
+        focusRequester.requestFocus()
+        requested = true
+    }
+}
+
+// Imported and older stored lists can contain values that collide with the lazy row's key.
+// Preserve the first spelling and ordering without changing persistence until the user edits.
+internal fun uniqueEditorItems(items: List<String>): List<String> = items.distinctBy(String::lowercase)
+
+internal fun newEditorItems(items: List<String>, candidates: List<String>): List<String> {
+    val existing = items.mapTo(mutableSetOf(), String::lowercase)
+    return candidates.filter { existing.add(it.lowercase()) }
+}
+
+@Composable
+private fun fontFamilyForSetting(value: String): FontFamily = when (value) {
+    "googlesansflexrounded" -> FontFamily(
+        Font(Res.font.google_sans_flex_rounded_regular, FontWeight.Normal),
+        Font(Res.font.google_sans_flex_rounded_bold, FontWeight.Bold),
+    )
+    "googlesans" -> FontFamily(
+        Font(Res.font.google_sans_regular, FontWeight.Normal),
+        Font(Res.font.google_sans_bold, FontWeight.Bold),
+    )
+    "productsans" -> FontFamily(
+        Font(Res.font.product_sans_regular, FontWeight.Normal),
+        Font(Res.font.product_sans_medium, FontWeight.Medium),
+        Font(Res.font.product_sans_bold, FontWeight.Bold),
+    )
+    "verdana" -> FontFamily(
+        Font(Res.font.verdana_regular, FontWeight.Normal),
+        Font(Res.font.verdana_bold, FontWeight.Bold),
+    )
+    "jetbrainsmono" -> FontFamily(
+        Font(Res.font.jetbrains_mono_regular, FontWeight.Normal),
+        Font(Res.font.jetbrains_mono_bold, FontWeight.Bold),
+    )
+    "googlesanscode" -> FontFamily(
+        Font(Res.font.google_sans_code_regular, FontWeight.Normal),
+        Font(Res.font.google_sans_code_regular, FontWeight.Bold),
+    )
+    "georgia" -> FontFamily(
+        Font(Res.font.georgia_regular, FontWeight.Normal),
+        Font(Res.font.georgia_bold, FontWeight.Bold),
+    )
+    "robotoslab" -> FontFamily(
+        Font(Res.font.roboto_slab_regular, FontWeight.Normal),
+        Font(Res.font.roboto_slab_bold, FontWeight.Bold),
+    )
+    else -> FontFamily.SansSerif
+}

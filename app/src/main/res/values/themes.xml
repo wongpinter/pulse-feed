@@ -1,0 +1,131 @@
+<resources>
+    <bool name="before_android_15">true</bool>
+    <style name="AppThemeBase" parent="Theme.AppCompat.NoActionBar" />
+    <style name="AppThemeLightBase" parent="Theme.AppCompat.Light.NoActionBar" />
+    <style name="AppThemeMaterialFixedBase" parent="Theme.AppCompat.NoActionBar" />
+    <style name="AppThemeMaterialFixedLightBase" parent="Theme.AppCompat.Light.NoActionBar" />
+    <style name="AppThemeMaterialDayNight" parent="AppThemeMaterialLight" />
+    <style name="AppThemeMaterialFixedDayNight" parent="AppThemeMaterialFixedLight" />
+    <style name="AppThemeDarkLightDayNight" parent="AppThemeLight" />
+    <style name="AppThemeAmoledWhiteDayNight" parent="AppThemeWhite" />
+    <style name="AppThemeMaterialDark" parent="@style/AppThemeBase">
+        <item name="android:textViewStyle">@style/ProductSansTextViewStyle</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@color/material_you_neutral_900</item>
+        <item name="android:colorBackground">@color/material_you_neutral_900</item>
+        <item name="android:statusBarColor">@color/material_you_neutral_900</item>
+        <item name="iconTintColor">@color/darkContentPrimary</item>
+        <item name="colorAccent">#D0BCFF</item>
+    </style>
+    <style name="AppThemeMaterialFixedDark" parent="@style/AppThemeMaterialFixedBase">
+        <item name="android:textViewStyle">@style/ProductSansTextViewStyle</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@color/material_fixed_surface_dark</item>
+        <item name="android:colorBackground">@color/material_fixed_surface_dark</item>
+        <item name="android:statusBarColor">@color/material_fixed_surface_dark</item>
+        <item name="iconTintColor">@color/darkContentPrimary</item>
+        <item name="colorAccent">#D0BCFF</item>
+    </style>
+    <style name="AppTheme" parent="AppThemeBase">
+        <item name="iconTintColor">@color/darkIconTint</item>
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+        <item name="colorAccent">@color/colorAccent</item>
+        <item name="android:windowBackground">@color/base_surface_dark</item>
+        <item name="android:colorBackground">@color/base_surface_dark</item>
+        <item name="android:textColorPrimary">@color/darkTextColorDefault</item>
+        <item name="android:textColorSecondary">@color/darkTextColorDisabled</item>
+        <item name="android:textColorTertiary">@color/darkTextColorDisabled</item>
+        <item name="android:textColorHighlight">#5299595E</item>
+        <item name="android:textColorLink">?attr/colorAccent</item>
+        <item name="colorControlHighlight">#40ffffff</item>
+        <item name="android:textViewStyle">@style/ProductSansTextViewStyle</item>
+        <item name="android:statusBarColor">@color/statusBarColor</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+    <style name="AppThemeAmoledDark" parent="AppTheme">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+        <item name="colorAccent">@color/colorAccent</item>
+    </style>
+    <style name="AppThemeHacker" parent="AppThemeAmoledDark">
+        <item name="iconTintColor">@color/hackerTextColor</item>
+        <item name="colorPrimary">@color/hackerAccent</item>
+        <item name="colorPrimaryDark">@color/hackerAccent</item>
+        <item name="colorAccent">@color/hackerAccent</item>
+        <item name="colorControlHighlight">#3300FF00</item>
+        <item name="android:textViewStyle">@style/JetBrainsMonoTextViewStyle</item>
+        <item name="android:windowBackground">@color/hackerBackground</item>
+        <item name="android:colorBackground">@color/hackerBackground</item>
+        <item name="android:statusBarColor">@color/hackerBackground</item>
+        <item name="android:textColorPrimary">@color/hackerTextColor</item>
+        <item name="android:textColorSecondary">@color/hackerTextColorDisabled</item>
+        <item name="android:textColorTertiary">@color/hackerTextColorDisabled</item>
+        <item name="android:fontFamily">@font/jetbrains_mono</item>
+        <item name="android:textColorHighlight">#5200FF00</item>
+    </style>
+    <style name="AppThemeGray" parent="AppTheme">
+        <item name="android:windowBackground">@color/grayBackground</item>
+        <item name="android:colorBackground">@color/grayBackground</item>
+        <item name="android:statusBarColor">@color/grayStatusBarColor</item>
+    </style>
+    <style name="AppThemeLight" parent="AppThemeLightBase">
+        <item name="iconTintColor">@color/lightIconTint</item>
+        <item name="colorPrimary">@color/colorPrimaryGreen</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryGreen</item>
+        <item name="colorAccent">@color/colorPrimaryGreen</item>
+        <item name="android:windowBackground">@color/page_background_light</item>
+        <item name="android:colorBackground">@color/base_surface_light</item>
+        <item name="android:textColorPrimary">@color/lightTextColorDefault</item>
+        <item name="android:textColorSecondary">@color/lightTextColorDisabled</item>
+        <item name="android:textColorTertiary">@color/lightTextColorDisabled</item>
+        <item name="android:textColorHighlight">#52478A74</item>
+        <item name="android:textColorLink">?attr/colorAccent</item>
+        <item name="colorControlHighlight">#20000000</item>
+        <item name="android:textViewStyle">@style/ProductSansTextViewStyle</item>
+        <item name="android:statusBarColor">@color/lightStatusBarColor</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+    <style name="AppThemeMaterialLight" parent="@style/AppThemeLightBase">
+        <item name="android:textViewStyle">@style/ProductSansTextViewStyle</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/material_you_neutral_50</item>
+        <item name="android:colorBackground">@color/material_you_neutral_50</item>
+        <item name="android:statusBarColor">@color/material_you_neutral_50</item>
+        <item name="iconTintColor">@color/lightContentPrimary</item>
+        <item name="colorAccent">#6750A4</item>
+    </style>
+    <style name="AppThemeMaterialFixedLight" parent="@style/AppThemeMaterialFixedLightBase">
+        <item name="android:textViewStyle">@style/ProductSansTextViewStyle</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/material_fixed_surface_light</item>
+        <item name="android:colorBackground">@color/material_fixed_surface_light</item>
+        <item name="android:statusBarColor">@color/material_fixed_surface_light</item>
+        <item name="iconTintColor">@color/lightContentPrimary</item>
+        <item name="colorAccent">#6750A4</item>
+    </style>
+    <style name="AppThemeHackerNews" parent="AppThemeLight">
+        <item name="iconTintColor">@color/hackerNewsIconTint</item>
+        <item name="colorPrimary">@color/hackerNewsAccent</item>
+        <item name="colorPrimaryDark">@color/hackerNewsAccentDark</item>
+        <item name="colorAccent">@color/hackerNewsAccent</item>
+        <item name="android:windowBackground">@color/page_background_hacker_news</item>
+        <item name="android:colorBackground">@color/base_surface_hacker_news</item>
+        <item name="android:statusBarColor">@color/page_background_hacker_news</item>
+        <item name="android:textColorPrimary">@color/hackerNewsTextColorDefault</item>
+        <item name="android:textColorSecondary">@color/hackerNewsTextColorDisabled</item>
+        <item name="android:textColorTertiary">@color/hackerNewsTextColorDisabled</item>
+        <item name="android:textColorHighlight">#52B34700</item>
+    </style>
+    <style name="AppThemeWhite" parent="@style/AppThemeLight">
+        <item name="android:windowBackground">@color/whiteBackground</item>
+        <item name="android:colorBackground">@color/whiteBackground</item>
+        <item name="android:statusBarColor">@color/whiteStatusBarColor</item>
+    </style>
+</resources>

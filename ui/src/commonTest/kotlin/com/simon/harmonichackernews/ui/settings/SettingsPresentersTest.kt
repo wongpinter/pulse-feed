@@ -1,0 +1,209 @@
+package com.simon.harmonichackernews.ui.settings
+
+import com.simon.harmonichackernews.data.LinkPreviewType
+import com.simon.harmonichackernews.settings.AppSettingsRepository
+import com.simon.harmonichackernews.settings.CommentSortingPreference
+import com.simon.harmonichackernews.settings.CommentsProvider
+import com.simon.harmonichackernews.settings.ContentFilterRepository
+import com.simon.harmonichackernews.settings.ContentFilterType
+import com.simon.harmonichackernews.settings.InMemoryKeyValueStore
+import com.simon.harmonichackernews.settings.StoryListSelector
+import com.simon.harmonichackernews.settings.SurfaceEffectMode
+import com.simon.harmonichackernews.settings.UserTagColor
+import com.simon.harmonichackernews.settings.UserTagsRepository
+import com.simon.harmonichackernews.settings.WebViewPreloadMode
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class SettingsPresentersTest {
+    @Test
+    fun appearanceReflectsHostSurfaceDefaultAndStoredSelection() {
+        val store = InMemoryKeyValueStore()
+        val repository = AppSettingsRepository(
+            store, store.changes, defaultSurfaceEffectMode = SurfaceEffectMode.Glass,
+        )
+        val presenter = AppearanceSettingsPresenter(repository)
+        assertEquals(
+            SurfaceEffectMode.Glass,
+            presenter.state("Default", "Default", showTransparentStatusBar = true).surfaceEffectMode,
+        )
+        repository.setSurfaceEffectMode(SurfaceEffectMode.Solid)
+        assertEquals(
+            SurfaceEffectMode.Solid,
+            presenter.state("Default", "Default", showTransparentStatusBar = true).surfaceEffectMode,
+        )
+    }
+
+    @Test
+    fun appearanceReflectsThePersistedStoryListSelector() {
+        val store = InMemoryKeyValueStore()
+        val repository = AppSettingsRepository(store, store.changes)
+        val presenter = AppearanceSettingsPresenter(repository)
+        repository.setStoryListSelector(StoryListSelector.CHIPS)
+
+        assertEquals(
+            StoryListSelector.CHIPS,
+            presenter.state("Default", "Default", showTransparentStatusBar = true).storyListSelector,
+        )
+    }
+
+    @Test
+    fun storiesMapsActionsToTypedSettingsAndPlatformEffects() {
+        val presenter = fixture().stories
+
+        assertEquals(
+            setOf(SettingsPlatformEffect.RefreshStoryWidgets),
+            presenter.setBoolean(StoriesBooleanSetting.ShowIndex, true),
+        )
+        assertTrue(presenter.snapshot.story.showIndex)
+        assertEquals(
+            emptySet(),
+            presenter.setBoolean(StoriesBooleanSetting.HideRead, true),
+        )
+        assertTrue(presenter.snapshot.story.hideRead)
+        assertEquals(
+            emptySet(),
+            presenter.setStartingPage("best"),
+        )
+        assertEquals("best", presenter.snapshot.story.preferredStoryType)
+    }
+
+    @Test
+    fun scrollMarkingAndHidingClickedPostsAreMutuallyExclusive() {
+        val presenter = fixture().stories
+        assertFalse(presenter.snapshot.story.markScrolledPostsRead)
+        presenter.setBoolean(StoriesBooleanSetting.MarkScrolledPostsRead, true)
+        assertTrue(presenter.snapshot.story.markScrolledPostsRead)
+        assertFalse(presenter.snapshot.story.hideRead)
+        presenter.setBoolean(StoriesBooleanSetting.HideRead, true)
+        assertTrue(presenter.snapshot.story.hideRead)
+        assertFalse(presenter.snapshot.story.markScrolledPostsRead)
+    }
+
+    @Test
+    fun storiesLayoutResetRefreshesWidgetsWithoutResettingBehavior() {
+        val presenter = fixture().stories
+        presenter.setBoolean(StoriesBooleanSetting.ShowIndex, false)
+        presenter.setBoolean(StoriesBooleanSetting.HideRead, true)
+
+        assertEquals(
+            setOf(SettingsPlatformEffect.RefreshStoryWidgets),
+            presenter.resetLayout(),
+        )
+        assertTrue(presenter.snapshot.story.showIndex)
+        assertTrue(presenter.snapshot.story.hideRead)
+    }
+
+    @Test
+    fun commentsAndWebLinksBuildStateFromSharedSettings() {
+        val fixture = fixture()
+        fixture.comments.setBoolean(CommentsBooleanSetting.Scrollbar, false)
+        fixture.comments.setBoolean(CommentsBooleanSetting.ShowUpButton, true)
+        fixture.comments.setPreload(WebViewPreloadMode.WIFI_ONLY, 40)
+        fixture.comments.setSorting(CommentSortingPreference.NEWEST_FIRST.storedValue)
+        fixture.comments.setProvider(CommentsProvider.OFFICIAL.storedValue)
+        fixture.webLinks.setLinkPreview(LinkPreviewType.GITHUB_REPOSITORY, false)
+        fixture.webLinks.setLinkPreview(LinkPreviewType.HUGGING_FACE_MODEL, false)
+        fixture.webLinks.setLinkPreview(LinkPreviewType.OPENROUTER_MODEL, false)
+        fixture.webLinks.setLinkPreview(LinkPreviewType.USGS_EARTHQUAKE, false)
+
+        val comments = fixture.comments.state()
+        val webLinks = fixture.webLinks.state(fontLabel = "System")
+
+        assertFalse(comments.showScrollbar)
+        assertTrue(comments.showUpButton)
+        assertEquals("Only on WiFi, battery at least 40%", comments.preloadCommentsSummary)
+        assertEquals(CommentSortingPreference.NEWEST_FIRST, comments.sorting)
+        assertEquals(CommentsProvider.OFFICIAL, comments.provider)
+        assertFalse(LinkPreviewType.GITHUB_REPOSITORY in webLinks.enabledLinkPreviews)
+        assertFalse(LinkPreviewType.HUGGING_FACE_MODEL in webLinks.enabledLinkPreviews)
+        assertFalse(LinkPreviewType.OPENROUTER_MODEL in webLinks.enabledLinkPreviews)
+        assertFalse(LinkPreviewType.USGS_EARTHQUAKE in webLinks.enabledLinkPreviews)
+        assertEquals("System", webLinks.readerModeFontLabel)
+    }
+
+    @Test
+    fun appearanceOnlyRequestsPlatformThemeWorkWhenRequired() {
+        val presenter = fixture().appearance
+
+        assertEquals(
+            emptySet(),
+            presenter.setBoolean(AppearanceBooleanSetting.CompactHeader, true),
+        )
+        assertEquals(
+            setOf(SettingsPlatformEffect.ThemeChanged),
+            presenter.setBoolean(AppearanceBooleanSetting.SpecialNighttime, true),
+        )
+        assertEquals(
+            setOf(SettingsPlatformEffect.ThemeChanged),
+            presenter.setColorScheme("pure"),
+        )
+        assertEquals("pure", presenter.snapshot.appearance.colorSchemes.dark)
+    }
+
+    @Test
+    fun filtersAndTagsAreNormalizedAndPresentedInPortableState() {
+        val fixture = fixture()
+        fixture.filtersTags.setFilterItems(
+            ContentFilterType.DOMAIN,
+            listOf(" example.com ", "example.com", "news.example"),
+        )
+        fixture.filtersTags.setTag("Zed", "friend")
+        fixture.filtersTags.setTag("alice", "author", UserTagColor.Blue)
+        fixture.filtersTags.setHideJobs(true)
+
+        assertEquals(
+            listOf("example.com", "news.example"),
+            fixture.filtersTags.filterItems(ContentFilterType.DOMAIN),
+        )
+        assertEquals(listOf("alice", "Zed"), fixture.filtersTags.state().tags.map { it.username })
+        assertEquals(listOf(UserTagColor.Blue, UserTagColor.Theme),
+            fixture.filtersTags.state().tags.map { it.color })
+        assertEquals(2, fixture.filtersTags.state().domainFilterCount)
+        fixture.filtersTags.setFilterItems(ContentFilterType.STORY_TITLE, listOf("AI", "Kotlin"))
+        assertEquals(2, fixture.filtersTags.state().titleFilterCount)
+        assertTrue(fixture.filtersTags.state().hideJobs)
+        assertEquals(ContentFilterType.USER, ContentFilterDialog.User.content.type)
+    }
+
+    @Test
+    fun legacyStoredSpellingsAreActiveWithoutReview() {
+        val store = InMemoryKeyValueStore()
+        val originalTags = """{"Alice":"case retained","alice":"stored lowercase"}"""
+        store.putString(com.simon.harmonichackernews.settings.UserTagKeys.TAGS, originalTags)
+        store.putString(com.simon.harmonichackernews.settings.ContentFilterKeys.USERS, "alice")
+        val settings = AppSettingsRepository(store, store.changes)
+        val presenter = FiltersTagsSettingsPresenter(settings, ContentFilterRepository(store), UserTagsRepository(store))
+        assertEquals(listOf("Alice", "alice"), presenter.state().tags.map { it.username })
+        assertEquals(emptyList(), presenter.state().legacyTags)
+        assertEquals(1, presenter.state().blockedUserCount)
+        assertEquals(0, presenter.state().legacyBlockedUserCount)
+        assertEquals(originalTags, store.getString(com.simon.harmonichackernews.settings.UserTagKeys.TAGS))
+    }
+
+    private fun fixture(): PresenterFixture {
+        val store = InMemoryKeyValueStore()
+        val settings = AppSettingsRepository(store, store.changes)
+        return PresenterFixture(
+            stories = StoriesSettingsPresenter(settings),
+            comments = CommentsSettingsPresenter(settings),
+            webLinks = WebLinksSettingsPresenter(settings),
+            appearance = AppearanceSettingsPresenter(settings),
+            filtersTags = FiltersTagsSettingsPresenter(
+                settings,
+                ContentFilterRepository(store),
+                UserTagsRepository(store),
+            ),
+        )
+    }
+
+    private data class PresenterFixture(
+        val stories: StoriesSettingsPresenter,
+        val comments: CommentsSettingsPresenter,
+        val webLinks: WebLinksSettingsPresenter,
+        val appearance: AppearanceSettingsPresenter,
+        val filtersTags: FiltersTagsSettingsPresenter,
+    )
+}

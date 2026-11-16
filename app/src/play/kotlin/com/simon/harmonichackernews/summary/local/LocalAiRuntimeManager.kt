@@ -1,0 +1,780 @@
+package com.simon.harmonichackernews.summary.local
+
+import android.app.Activity
+import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.IntentSender
+import android.os.Bundle
+import androidx.core.content.ContextCompat
+import com.google.android.play.core.splitinstall.SplitInstallException
+import com.google.android.play.core.splitinstall.SplitInstallManager
+import com.google.android.play.core.splitinstall.SplitInstallManagerFactory
+import com.google.android.play.core.splitinstall.SplitInstallRequest
+import com.google.android.play.core.splitinstall.SplitInstallSessionState
+import com.google.android.play.core.splitinstall.SplitInstallStateUpdatedListener
+import com.google.android.play.core.splitinstall.model.SplitInstallErrorCode
+import com.google.android.play.core.splitinstall.model.SplitInstallSessionStatus
+import com.simon.harmonichackernews.summary.LocalModelRuntime
+import com.simon.harmonichackernews.summary.LocalModelCatalog
+import com.simon.harmonichackernews.summary.LocalModelDefinition
+import com.simon.harmonichackernews.summary.LocalRuntimeInstallState
+import com.simon.harmonichackernews.summary.LocalRuntimeInstallStatus
+import com.simon.harmonichackernews.MainActivity
+import com.simon.harmonichackernews.settings.AndroidKeyValueStore
+import java.lang.ref.WeakReference
+import java.util.EnumMap
+import java.util.HashSet
+import java.util.concurrent.CopyOnWriteArraySet
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+/** Installs Play-delivered local-AI runtimes before their model download starts.  */
+internal class LocalAiRuntimeManager(
+    private val installManagerFactory: (Context) -> SplitInstallManager = SplitInstallManagerFactory::create,
+    private val preferencesName: String = "local_ai_runtime_delivery",
+) : Application.ActivityLifecycleCallbacks {
+    private val MODULE_RUNTIME = "local_ai_runtime"
+    private val ENGINE_LITERT =
+        "com.simon.harmonichackernews.localai.litert.LiteRtInferenceEngine"
+    private val KEY_PENDING_MODEL_PREFIX = "pending_model_"
+    private val CONFIRMATION_REQUEST_CODE = 0x4c41
+
+    private val LOCK = Any()
+    private val LISTENERS: MutableSet<StatusListener> = CopyOnWriteArraySet()
+    private val STATUSES: MutableMap<LocalModelRuntime, LocalRuntimeInstallStatus> =
+        EnumMap(LocalModelRuntime::class.java)
+    private val CONFIRMATION_REQUESTED: MutableSet<Int> = HashSet()
+
+    private var appContext: Context? = null
+    @Volatile private var installManager: SplitInstallManager? = null
+    private lateinit var deliveryPreferences: AndroidKeyValueStore
+    private val initializationMutex = Mutex()
+    @Volatile private var runtimeModuleInstalled = false
+    private var confirmationActivity: WeakReference<Activity> = WeakReference(null)
+    private var confirmationOwner: WeakReference<Activity> = WeakReference(null)
+    private var application: Application? = null
+    private val pendingConfirmations = mutableMapOf<Int, SplitInstallSessionState>()
+    private val canceledSessions = mutableSetOf<Int>()
+    private val requestGenerations = mutableMapOf<LocalModelRuntime, Int>()
+    private val deferredInstallStates = mutableMapOf<Int, SplitInstallSessionState>()
+    @Volatile private var initialized = false
+    private var modelDownloadStarter: (suspend (String) -> String?)? = null
+    private val handoffScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val handoffJobs = mutableMapOf<LocalModelRuntime, Job>()
+
+    private val INSTALL_LISTENER: SplitInstallStateUpdatedListener =
+        SplitInstallStateUpdatedListener { installState: SplitInstallSessionState ->
+            handleInstallState(installState)
+        }
+
+    // Register before MainActivity resumes; disk and package inspection are awaited separately.
+    fun bindActivityLifecycle(context: Context) {
+        if (application != null) return
+        application = context.applicationContext as? Application
+        application?.registerActivityLifecycleCallbacks(this)
+    }
+
+    override fun onActivityResumed(activity: Activity) {
+        if (activity !is MainActivity) return
+        confirmationActivity = WeakReference(activity)
+        pendingConfirmations.values.toList().forEach { state ->
+            getRuntimeForModules(state.moduleNames())?.let { requestConfirmation(it, state) }
+        }
+        // A confirmation destroyed without a choice can still be waiting in Play.
+        installManager?.sessionStates?.addOnSuccessListener { states ->
+            states.forEach(::handleInstallState)
+        }
+    }
+
+    override fun onActivityPaused(activity: Activity) {
+        if (confirmationActivity.get() === activity) confirmationActivity.clear()
+    }
+
+    override fun onActivityDestroyed(activity: Activity) {
+        if (confirmationActivity.get() === activity) confirmationActivity.clear()
+        if (confirmationOwner.get() === activity) {
+            confirmationOwner.clear()
+            synchronized(LOCK) { CONFIRMATION_REQUESTED.clear() }
+        }
+    }
+
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+    override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+
+    internal fun close() {
+        handoffScope.cancel()
+        application?.unregisterActivityLifecycleCallbacks(this)
+        application = null
+        installManager?.unregisterListener(INSTALL_LISTENER)
+        confirmationActivity.clear()
+        confirmationOwner.clear()
+    }
+
+    fun isLocalAiIncluded(): Boolean = true
+
+    fun addStatusListener(context: Context, listener: StatusListener) {
+        requirePreloaded()
+        LISTENERS.add(listener)
+        listener.onRuntimeStatusChanged()
+    }
+
+    fun removeStatusListener(listener: StatusListener) {
+        LISTENERS.remove(listener)
+    }
+
+    fun getStatus(context: Context, runtime: LocalModelRuntime): LocalRuntimeInstallStatus {
+        requirePreloaded()
+        if (runtime == LocalModelRuntime.GEMINI_NANO) {
+            return status(
+                runtime,
+                LocalRuntimeInstallState.INSTALLED,
+                0L,
+                0L,
+                "",
+                "",
+                0
+            )
+        }
+        val tracked = synchronized(LOCK) { STATUSES[runtime] }
+        return if (isRuntimeInstalled(context, runtime)) {
+            // The split can finish despite an earlier install/cancel failure. Keep genuine
+            // model-start errors separately while reporting the runtime's actual availability.
+            tracked?.takeIf { it.state == LocalRuntimeInstallState.INSTALLED } ?: status(
+                runtime,
+                LocalRuntimeInstallState.INSTALLED,
+                0L,
+                0L,
+                "",
+                "",
+                0
+            )
+        } else {
+            tracked?.takeUnless { it.state == LocalRuntimeInstallState.INSTALLED } ?: status(
+                runtime,
+                LocalRuntimeInstallState.NOT_INSTALLED,
+                0L,
+                0L,
+                "",
+                "",
+                0
+            )
+        }
+    }
+
+    fun isRuntimeInstalled(
+        context: Context,
+        runtime: LocalModelRuntime
+    ): Boolean {
+        if (runtime == LocalModelRuntime.GEMINI_NANO) {
+            return true
+        }
+        if (getModuleName(runtime) == null) return false
+        requirePreloaded()
+        return runtimeModuleInstalled
+    }
+
+    fun requestRuntimeAndModelDownload(context: Context, model: LocalModelDefinition): String? {
+        requirePreloaded()
+        if (!model.downloadable) {
+            return "${model.displayName} is built into supported devices."
+        }
+        val moduleName = getModuleName(model.runtime)
+            ?: return "${getRuntimeLabel(model.runtime)} cannot be downloaded on Android."
+
+        findActivity(context)?.let { confirmationActivity = WeakReference(it) }
+
+        val current = getStatus(context, model.runtime)
+        if (current.isActive) {
+            if (model.id == current.pendingModelId) {
+                return null
+            }
+            return "Wait for the current ${getRuntimeLabel(model.runtime)} installation to finish."
+        }
+        val generation = synchronized(LOCK) {
+            ((requestGenerations[model.runtime] ?: 0) + 1).also {
+                requestGenerations[model.runtime] = it
+            }
+        }
+        setPendingModel(model.runtime, model.id)
+        if (isRuntimeInstalled(context, model.runtime)) {
+            startPendingModelDownload(model.runtime)
+            return null
+        }
+
+        setStatus(
+            status(
+                model.runtime,
+                LocalRuntimeInstallState.PENDING,
+                0L,
+                0L,
+                "",
+                model.id,
+                0
+            )
+        )
+        val request = SplitInstallRequest.newBuilder()
+            .addModule(moduleName)
+            .build()
+        requireNotNull(installManager).startInstall(request)
+            .addOnSuccessListener { sessionId ->
+                if (synchronized(LOCK) { requestGenerations[model.runtime] != generation }) {
+                    cancelSession(sessionId)
+                    return@addOnSuccessListener
+                }
+                if (synchronized(LOCK) { sessionId in canceledSessions }) {
+                    failInstall(model.runtime, "The previous runtime download is still canceling. Try again.", sessionId)
+                    return@addOnSuccessListener
+                }
+                if (sessionId == 0 || isRuntimeInstalled(requireNotNull(appContext), model.runtime)) {
+                    deferredInstallStates.clear()
+                    onRuntimeInstalled(model.runtime)
+                    return@addOnSuccessListener
+                }
+                val latest = getTrackedStatus(model.runtime)
+                setStatus(
+                    status(
+                        model.runtime,
+                        LocalRuntimeInstallState.PENDING,
+                        latest.bytesDownloaded,
+                        latest.totalBytes,
+                        "",
+                        model.id,
+                        sessionId
+                    )
+                )
+                // A listener can beat startInstall's task. Apply only the state belonging
+                // to the session Play returned for this request.
+                val deferred = deferredInstallStates.remove(sessionId)
+                deferredInstallStates.clear()
+                deferred?.let(::handleInstallState)
+            }
+            .addOnFailureListener { failure ->
+                if (synchronized(LOCK) { requestGenerations[model.runtime] != generation }) {
+                    return@addOnFailureListener
+                }
+                deferredInstallStates.clear()
+                failInstall(
+                    model.runtime, getInstallFailureMessage(failure), 0
+                )
+            }
+        return null
+    }
+
+    fun cancelRuntimeInstall(
+        context: Context,
+        runtime: LocalModelRuntime
+    ) {
+        requirePreloaded()
+        val current = getStatus(context, runtime)
+        synchronized(LOCK) { requestGenerations[runtime] = (requestGenerations[runtime] ?: 0) + 1 }
+        deferredInstallStates.clear()
+        synchronized(LOCK) { handoffJobs.remove(runtime) }?.cancel()
+        clearPendingModel(runtime)
+        cancelSession(current.sessionId)
+        setStatus(
+            status(
+                runtime,
+                LocalRuntimeInstallState.CANCELED,
+                current.bytesDownloaded,
+                current.totalBytes,
+                "",
+                current.pendingModelId,
+                current.sessionId
+            )
+        )
+    }
+
+    private fun cancelSession(sessionId: Int) {
+        if (sessionId <= 0) return
+        pendingConfirmations.remove(sessionId)
+        deferredInstallStates.remove(sessionId)
+        synchronized(LOCK) {
+            CONFIRMATION_REQUESTED.remove(sessionId)
+            canceledSessions.add(sessionId)
+        }
+        requireNotNull(installManager).cancelInstall(sessionId)
+    }
+
+    fun getRuntimeLabel(runtime: LocalModelRuntime): String = when (runtime) {
+        LocalModelRuntime.LITERT_LM -> "local AI runtime"
+        LocalModelRuntime.APPLE_FOUNDATION_MODELS -> "Apple Intelligence"
+        LocalModelRuntime.GEMINI_NANO -> "Gemini Nano"
+    }
+
+    fun getEngineClassName(runtime: LocalModelRuntime): String = when (runtime) {
+        LocalModelRuntime.LITERT_LM -> ENGINE_LITERT
+        LocalModelRuntime.APPLE_FOUNDATION_MODELS,
+        LocalModelRuntime.GEMINI_NANO ->
+            throw IllegalArgumentException("System models do not use a feature runtime")
+    }
+
+    /** Complete all cold storage/package work before publishing the application graph. */
+    suspend fun preload(context: Context) = withContext(Dispatchers.IO) {
+        initializationMutex.withLock {
+            if (initialized) return@withLock
+            val applicationContext = context.applicationContext
+            val preferences = AndroidKeyValueStore.named(applicationContext, preferencesName)
+            preferences.awaitLoaded()
+            // A queued GGUF request must not become an implicit multi-GB LiteRT download.
+            preferences.remove("pending_model_LLAMA_CPP")
+            val pendingKey = KEY_PENDING_MODEL_PREFIX + LocalModelRuntime.LITERT_LM.name
+            val pendingModel = preferences.getString(pendingKey, "").orEmpty()
+            if (pendingModel.isNotEmpty() && LocalModelCatalog.models.none {
+                    it.id == pendingModel && it.downloadable && it.runtime == LocalModelRuntime.LITERT_LM
+                }
+            ) {
+                preferences.remove(pendingKey)
+            }
+            val manager = installManagerFactory(applicationContext)
+            val installed = manager.installedModules.contains(MODULE_RUNTIME)
+            appContext = applicationContext
+            deliveryPreferences = preferences
+            runtimeModuleInstalled = installed
+            installManager = manager
+            manager.registerListener(INSTALL_LISTENER)
+            initialized = true
+
+            manager.sessionStates.addOnSuccessListener { states ->
+                states.forEach(::handleInstallState)
+                resumeInstalledPendingDownloads()
+            }
+            resumeInstalledPendingDownloads()
+        }
+    }
+
+    private fun requirePreloaded() {
+        check(initialized) { "Await runtime delivery preload before accessing it" }
+    }
+
+    private fun resumeInstalledPendingDownloads() {
+        val runtime = LocalModelRuntime.LITERT_LM
+        if (runtimeModuleInstalled && getPendingModel(runtime).isNotEmpty()) {
+            ContextCompat.getMainExecutor(requireNotNull(appContext)).execute {
+                onRuntimeInstalled(runtime)
+            }
+        }
+    }
+
+    private fun handleInstallState(installState: SplitInstallSessionState) {
+        if (installState.status() == SplitInstallSessionStatus.INSTALLED &&
+            MODULE_RUNTIME in installState.moduleNames()
+        ) {
+            // Play finishes SplitCompat emulation before delivering INSTALLED, including
+            // an install that races cancellation. Availability is cached without Main IPC.
+            runtimeModuleInstalled = true
+        }
+        // A delayed listener/query response for a canceled session must not attach to a
+        // newer request for the same shared module or reopen its confirmation dialog.
+        if (synchronized(LOCK) { installState.sessionId() in canceledSessions }) return
+        val runtime: LocalModelRuntime? = getRuntimeForModules(installState.moduleNames())
+        if (runtime == null) {
+            return
+        }
+        val current = getTrackedStatus(runtime)
+        if (current.isActive && current.sessionId == 0) {
+            deferredInstallStates[installState.sessionId()] = installState
+            return
+        }
+        if (current.isActive && current.sessionId != installState.sessionId()) return
+        if (installState.status() != SplitInstallSessionStatus.REQUIRES_USER_CONFIRMATION) {
+            pendingConfirmations.remove(installState.sessionId())
+            synchronized(LOCK) { CONFIRMATION_REQUESTED.remove(installState.sessionId()) }
+        }
+        val pendingModel = getPendingModel(runtime)
+        when (installState.status()) {
+            SplitInstallSessionStatus.PENDING -> setStatus(
+                status(
+                    runtime,
+                    LocalRuntimeInstallState.PENDING,
+                    installState.bytesDownloaded(),
+                    installState.totalBytesToDownload(),
+                    "",
+                    pendingModel,
+                    installState.sessionId()
+                )
+            )
+
+            SplitInstallSessionStatus.DOWNLOADING -> setStatus(
+                status(
+                    runtime,
+                    LocalRuntimeInstallState.DOWNLOADING,
+                    installState.bytesDownloaded(),
+                    installState.totalBytesToDownload(),
+                    "",
+                    pendingModel,
+                    installState.sessionId()
+                )
+            )
+
+            SplitInstallSessionStatus.DOWNLOADED, SplitInstallSessionStatus.INSTALLING -> setStatus(
+                status(
+                    runtime,
+                    LocalRuntimeInstallState.INSTALLING,
+                    installState.bytesDownloaded(),
+                    installState.totalBytesToDownload(),
+                    "",
+                    pendingModel,
+                    installState.sessionId()
+                )
+            )
+
+            SplitInstallSessionStatus.REQUIRES_USER_CONFIRMATION -> {
+                setStatus(
+                    status(
+                        runtime,
+                        LocalRuntimeInstallState.PENDING,
+                        installState.bytesDownloaded(),
+                        installState.totalBytesToDownload(),
+                        "",
+                        pendingModel,
+                        installState.sessionId()
+                    )
+                )
+                requestConfirmation(runtime, installState)
+            }
+
+            SplitInstallSessionStatus.INSTALLED -> {
+                synchronized(LOCK) {
+                    CONFIRMATION_REQUESTED.remove(installState.sessionId())
+                }
+                onRuntimeInstalled(runtime)
+            }
+
+            SplitInstallSessionStatus.FAILED -> failInstall(
+                runtime, getInstallErrorMessage(installState.errorCode()),
+                installState.sessionId()
+            )
+
+            SplitInstallSessionStatus.CANCELING -> setStatus(
+                status(
+                    runtime,
+                    LocalRuntimeInstallState.PENDING,
+                    installState.bytesDownloaded(),
+                    installState.totalBytesToDownload(),
+                    "",
+                    pendingModel,
+                    installState.sessionId()
+                )
+            )
+
+            SplitInstallSessionStatus.CANCELED -> {
+                clearPendingModel(runtime)
+                setStatus(
+                    status(
+                        runtime,
+                        LocalRuntimeInstallState.CANCELED,
+                        installState.bytesDownloaded(),
+                        installState.totalBytesToDownload(),
+                        "",
+                        pendingModel,
+                        installState.sessionId()
+                    )
+                )
+            }
+
+            else -> {}
+        }
+    }
+
+    private fun requestConfirmation(
+        runtime: LocalModelRuntime,
+        state: SplitInstallSessionState
+    ) {
+        pendingConfirmations[state.sessionId()] = state
+        val activity = confirmationActivity.get()
+        // Keep the session pending while backgrounded; resume presents it from the new host.
+        if (activity == null || activity.isFinishing || activity.isDestroyed) return
+        synchronized(LOCK) {
+            if (!CONFIRMATION_REQUESTED.add(state.sessionId())) {
+                return
+            }
+        }
+        try {
+            confirmationOwner = WeakReference(activity)
+            if (!requireNotNull(installManager).startConfirmationDialogForResult(
+                    state, activity, CONFIRMATION_REQUEST_CODE
+                )
+            ) {
+                failInstall(
+                    runtime, "Could not show the runtime download confirmation.",
+                    state.sessionId()
+                )
+            }
+        } catch (_: IntentSender.SendIntentException) {
+            failInstall(
+                runtime, "Could not show the runtime download confirmation.",
+                state.sessionId()
+            )
+        }
+    }
+
+    private fun onRuntimeInstalled(runtime: LocalModelRuntime) {
+        // Startup enables existing splits on IO; Play enables newly delivered splits itself.
+        runtimeModuleInstalled = true
+        // Repeated callbacks must preserve a model handoff failure until a successful retry.
+        if (getTrackedStatus(runtime).state != LocalRuntimeInstallState.INSTALLED) {
+            setStatus(status(runtime, LocalRuntimeInstallState.INSTALLED, 0L, 0L, "", "", 0))
+        }
+        startPendingModelDownload(runtime)
+    }
+
+    private fun startPendingModelDownload(runtime: LocalModelRuntime) {
+        val modelId = getPendingModel(runtime)
+        if (modelId.isEmpty()) {
+            return
+        }
+        // No starter yet means initialization has not finished; retain the pending model.
+        val starter = modelDownloadStarter ?: return
+        val job = synchronized(LOCK) {
+            if (runtime in handoffJobs) return
+            val generation = requestGenerations[runtime]
+            handoffScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val error = starter(modelId)
+                    if (synchronized(LOCK) { requestGenerations[runtime] != generation } ||
+                        getPendingModel(runtime) != modelId
+                    ) return@launch
+                    clearPendingModel(runtime)
+                    if (!error.isNullOrEmpty()) {
+                        setStatus(
+                            status(
+                                runtime,
+                                LocalRuntimeInstallState.INSTALLED,
+                                0L,
+                                0L,
+                                "",
+                                modelId,
+                                0,
+                                modelDownloadError = error,
+                            )
+                        )
+                    } else {
+                        setStatus(status(runtime, LocalRuntimeInstallState.INSTALLED, 0L, 0L, "", "", 0))
+                    }
+                } finally {
+                    synchronized(LOCK) {
+                        if (handoffJobs[runtime] === coroutineContext[Job]) handoffJobs.remove(runtime)
+                    }
+                }
+            }.also { handoffJobs[runtime] = it }
+        }
+        job.start()
+    }
+
+    private fun failInstall(
+        runtime: LocalModelRuntime,
+        error: String, sessionId: Int
+    ) {
+        synchronized(LOCK) {
+            CONFIRMATION_REQUESTED.remove(sessionId)
+        }
+        pendingConfirmations.remove(sessionId)
+        setStatus(
+            status(
+                runtime,
+                LocalRuntimeInstallState.FAILED,
+                0L,
+                0L,
+                error,
+                getPendingModel(runtime),
+                sessionId
+            )
+        )
+    }
+
+    private fun getTrackedStatus(runtime: LocalModelRuntime): LocalRuntimeInstallStatus {
+        synchronized(LOCK) {
+            return STATUSES[runtime]
+                ?: status(
+                    runtime,
+                    LocalRuntimeInstallState.NOT_INSTALLED,
+                    0L,
+                    0L,
+                    "",
+                    "",
+                    0,
+                )
+        }
+    }
+
+    private fun setStatus(status: LocalRuntimeInstallStatus) {
+        synchronized(LOCK) {
+            STATUSES[requireNotNull(status.runtime)] = status
+        }
+        notifyListeners()
+    }
+
+    private fun status(
+        runtime: LocalModelRuntime, state: LocalRuntimeInstallState,
+        bytesDownloaded: Long, totalBytes: Long, error: String,
+        pendingModelId: String, sessionId: Int,
+        modelDownloadError: String = "",
+    ): LocalRuntimeInstallStatus {
+        return LocalRuntimeInstallStatus(
+            state = state,
+            pendingModelId = pendingModelId,
+            downloadedBytes = bytesDownloaded,
+            totalBytes = totalBytes,
+            runtime = runtime,
+            error = error,
+            sessionId = sessionId,
+            modelDownloadError = modelDownloadError,
+        )
+    }
+
+    private fun notifyListeners() {
+        if (appContext == null) {
+            return
+        }
+        ContextCompat.getMainExecutor(requireNotNull(appContext)).execute {
+            for (listener in LISTENERS) {
+                listener.onRuntimeStatusChanged()
+            }
+        }
+    }
+
+    // Shared callers can query every runtime, including ones owned by another platform.
+    private fun getModuleName(runtime: LocalModelRuntime): String? = when (runtime) {
+        LocalModelRuntime.LITERT_LM -> MODULE_RUNTIME
+        LocalModelRuntime.APPLE_FOUNDATION_MODELS,
+        LocalModelRuntime.GEMINI_NANO -> null
+    }
+
+    private fun getRuntimeForModules(
+        modules: List<String>,
+    ): LocalModelRuntime? {
+        if (!modules.contains(MODULE_RUNTIME)) {
+            return null
+        }
+        val runtime = LocalModelRuntime.LITERT_LM
+        return runtime.takeIf {
+            getTrackedStatus(it).isActive || getPendingModel(it).isNotEmpty()
+        }
+    }
+
+    private fun setPendingModel(runtime: LocalModelRuntime, modelId: String) {
+        deliveryPreferences.putString(KEY_PENDING_MODEL_PREFIX + runtime.name, modelId)
+    }
+
+    private fun getPendingModel(runtime: LocalModelRuntime): String {
+        return deliveryPreferences.getString(
+            KEY_PENDING_MODEL_PREFIX + runtime.name, ""
+        ).orEmpty()
+    }
+
+    private fun clearPendingModel(runtime: LocalModelRuntime) {
+        deliveryPreferences.remove(KEY_PENDING_MODEL_PREFIX + runtime.name)
+    }
+
+    private fun findActivity(context: Context): Activity? {
+        var current: Context = context
+        while (true) {
+            if (current is Activity) {
+                return current
+            }
+            val base = (current as? ContextWrapper)?.baseContext ?: return null
+            if (base === current) {
+                return null
+            }
+            current = base
+        }
+    }
+
+    private fun getInstallFailureMessage(failure: Exception): String =
+        if (failure is SplitInstallException) {
+            getInstallErrorMessage(failure.errorCode)
+        } else {
+            failure.message?.takeIf(String::isNotEmpty)?.let {
+                "Could not install the local AI runtime: $it"
+            } ?: "Could not install the local AI runtime."
+        }
+
+    private fun getInstallErrorMessage(errorCode: Int): String = when (errorCode) {
+        SplitInstallErrorCode.NETWORK_ERROR ->
+            "The runtime download failed because of a network error."
+        SplitInstallErrorCode.INSUFFICIENT_STORAGE ->
+            "Not enough free space to install the local AI runtime."
+        SplitInstallErrorCode.PLAY_STORE_NOT_FOUND ->
+            "Google Play is required to download the local AI runtime."
+        SplitInstallErrorCode.API_NOT_AVAILABLE ->
+            "On-demand runtime delivery is unavailable on this device."
+        SplitInstallErrorCode.MODULE_UNAVAILABLE ->
+            "This local AI runtime is unavailable for the installed app version."
+        SplitInstallErrorCode.APP_NOT_OWNED ->
+            "Install Harmonic from Google Play to download this runtime."
+        SplitInstallErrorCode.ACCESS_DENIED ->
+            "Keep Harmonic in the foreground while starting the runtime download."
+        SplitInstallErrorCode.ACTIVE_SESSIONS_LIMIT_EXCEEDED ->
+            "Another app feature is currently being installed. Try again shortly."
+        else -> "Could not install the local AI runtime (error $errorCode)."
+    }
+
+    fun interface StatusListener {
+        fun onRuntimeStatusChanged()
+    }
+
+    internal fun setModelDownloadStarter(starter: suspend (String) -> String?) {
+        modelDownloadStarter = starter
+        if (initialized) resumeInstalledPendingDownloads()
+    }
+
+    internal fun clearModelDownloadError(modelId: String) {
+        val affected = synchronized(LOCK) {
+            STATUSES.values.filter { it.pendingModelId == modelId && it.modelDownloadError.isNotEmpty() }
+        }
+        affected.forEach { setStatus(it.copy(pendingModelId = "", modelDownloadError = "")) }
+    }
+
+}
+
+internal fun createAndroidLocalRuntimeDelivery(context: Context): AndroidLocalRuntimeDelivery {
+    val manager = LocalAiRuntimeManager().also { it.bindActivityLifecycle(context) }
+    return object : AndroidLocalRuntimeDelivery {
+        private var listener: LocalAiRuntimeManager.StatusListener? = null
+
+        override val included: Boolean get() = manager.isLocalAiIncluded()
+
+        override suspend fun preload() = manager.preload(context)
+
+        override fun status(runtime: LocalModelRuntime): LocalRuntimeInstallStatus =
+            manager.getStatus(context, runtime)
+
+        override fun isInstalled(runtime: LocalModelRuntime): Boolean =
+            manager.isRuntimeInstalled(context, runtime)
+
+        override suspend fun request(model: LocalModelDefinition): String? =
+            manager.requestRuntimeAndModelDownload(context, model)
+
+        override fun cancel(runtime: LocalModelRuntime) =
+            manager.cancelRuntimeInstall(context, runtime)
+
+        override fun setObserver(observer: () -> Unit) {
+            listener?.let(manager::removeStatusListener)
+            val created = LocalAiRuntimeManager.StatusListener(observer)
+            listener = created
+            manager.addStatusListener(context, created)
+        }
+
+        override fun setModelDownloadStarter(starter: suspend (String) -> String?) =
+            manager.setModelDownloadStarter(starter)
+
+        override fun clearModelDownloadError(modelId: String) = manager.clearModelDownloadError(modelId)
+
+        override fun engineClassName(runtime: LocalModelRuntime): String? =
+            manager.getEngineClassName(runtime)
+
+        override fun runtimeLabel(runtime: LocalModelRuntime): String =
+            manager.getRuntimeLabel(runtime)
+    }
+}

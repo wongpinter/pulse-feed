@@ -1,0 +1,215 @@
+package com.simon.harmonichackernews.settings
+
+import com.simon.harmonichackernews.network.NitterInstance
+import com.simon.harmonichackernews.data.LinkPreviewType
+import kotlinx.coroutines.flow.Flow
+
+/**
+ * Typed, platform-neutral view of the user's persisted preferences.
+ *
+ * The Android implementation deliberately remains backed by the app's existing preference keys.
+ * Consumers depend on these snapshots rather than Context or SharedPreferences, which lets another
+ * platform provide the same contract later without changing business or presentation logic.
+ */
+interface UserSettings {
+    val story: StoryPreferences
+    val comments: CommentPreferences
+    val reading: ReadingPreferences
+    val cache: CachePreferences
+    val general: GeneralPreferences
+    val appearance: AppearancePreferences
+    val debug: DebugPreferences
+
+    /** Emits after persisted user preferences change. Consumers can then read fresh snapshots. */
+    val changes: Flow<Unit>
+
+    fun setStoriesToCache(count: Int)
+}
+
+data class StoryPreferences(
+    val showPoints: Boolean,
+    val compactPoints: Boolean,
+    val includeTopLevelDomain: Boolean,
+    val showCommentsCount: Boolean,
+    val compactView: Boolean,
+    val showFavicons: Boolean,
+    val previewImageMode: StoryPreviewMode,
+    val borderlessLargePreviewImage: Boolean,
+    val showPreviewText: Boolean,
+    val storyTextSize: Float,
+    val commentTextSize: Float,
+    val showIndex: Boolean,
+    val compactHeader: Boolean,
+    val commentsButtonOnLeft: Boolean,
+    val displayStyle: DisplayStyle,
+    val tintCardsFromImages: Boolean,
+    val paletteTintConfigKey: String,
+    val dimReadStories: Boolean,
+    val hotnessThreshold: Int,
+    val faviconProvider: String,
+    val font: String,
+    val hideJobs: Boolean,
+    val hideRead: Boolean,
+    val alwaysOpenComments: Boolean,
+    val pagination: Boolean,
+    val alwaysShowTapToRefresh: Boolean,
+    val preferredStoryType: String,
+    val additionalFrontpages: Set<String>,
+    val listSelector: StoryListSelector = StoryListSelector.DROPDOWN,
+    val frontpageOrder: List<String> = emptyList(),
+    val markScrolledPostsRead: Boolean = false,
+    val swipeToHide: Boolean = false,
+    val headerPill: StoriesHeaderPill = StoriesHeaderPill.OFF,
+    val headerPillElevation: Boolean = true,
+    val categoryTagLocation: CategoryTagLocation = CategoryTagLocation.TITLE,
+    val spacing: Int = RowSpacingPreferences.DEFAULT,
+    val showDividers: Boolean = false,
+) {
+    val cardStyle: Boolean
+        get() = displayStyle == DisplayStyle.RAISED || displayStyle == DisplayStyle.OUTLINED
+    val fontChoice: AppFont
+        get() = AppFont.fromStored(font)
+}
+
+data class CommentPreferences(
+    val collapseParent: Boolean,
+    val showFavicons: Boolean,
+    /** The user's stored choice, before preview-image availability is applied. */
+    val headerPreviewImageEnabled: Boolean,
+    val showHeaderPreviewImage: Boolean,
+    /** The user's stored choice, before story-card tint availability is applied. */
+    val headerTintEnabled: Boolean,
+    val tintHeader: Boolean,
+    val showUpButton: Boolean,
+    val paletteTintConfigKey: String,
+    val textSize: Float,
+    val depthIndicatorMode: String,
+    val showNavigationButtons: Boolean,
+    val font: String,
+    val showTopLevelDepthIndicator: Boolean,
+    val theme: String?,
+    val faviconProvider: String,
+    val swapLongPressTap: Boolean,
+    val displayStyle: DisplayStyle,
+    val showDividers: Boolean,
+    val highlightMetadata: Boolean,
+    val collectReferenceLinks: Boolean,
+    val collapseTopLevel: Boolean,
+    val hideDelayedComments: Boolean,
+    val hideDeadComments: Boolean,
+    val hideFlaggedComments: Boolean,
+    val preloadCommentsMode: WebViewPreloadMode,
+    val preloadCommentsMinimumBattery: Int,
+    val sorting: CommentSortingPreference,
+    val showScrollbar: Boolean,
+    val animateChanges: Boolean,
+    val smoothScroll: Boolean,
+    val volumeNavigationMode: CommentVolumeNavigationMode,
+    val indicatorThickness: CommentIndicatorThickness = CommentIndicatorThickness.STANDARD,
+    val highlightQuotes: Boolean = false,
+    val quoteHighlightColor: QuoteHighlightColor = QuoteHighlightColor.MATERIAL,
+    val quoteSpacing: QuoteSpacing = QuoteSpacing.COMFORTABLE,
+    val quoteHighlightStyle: QuoteHighlightStyle = QuoteHighlightStyle.BOTH,
+    val quotePadding: Boolean = true,
+    val roundedDepthIndicators: Boolean = true,
+    val continuousDepthIndicators: Boolean = false,
+    val expandedReferenceLinks: Boolean = true,
+    val userAvatarsEnabled: Boolean = true,
+    val userAvatarOptions: UserAvatarOptions = UserAvatarOptions(),
+    val markNewComments: Boolean = true,
+    val headerLayout: CommentsHeaderLayout = CommentsHeaderLayout.STANDARD,
+    val headerEdge: CommentsHeaderEdge = CommentsHeaderEdge.FADE,
+    val headerMetaInfo: CommentsHeaderMetaInfo = CommentsHeaderMetaInfo.ON_IMAGE,
+    val headerTint: CommentsHeaderTint = CommentsHeaderTint.IMAGE,
+    val showHeaderDomain: Boolean = true,
+    val showHeaderPoints: Boolean = true,
+    val showHeaderCategories: Boolean = true,
+    val headerButtons: CommentsHeaderButtons = CommentsHeaderButtons(),
+    val swipeBack: Boolean = false,
+    val peekStoryHeader: Boolean = true,
+    val spacing: Int = RowSpacingPreferences.DEFAULT,
+) {
+    val cardStyle: Boolean
+        get() = displayStyle == DisplayStyle.RAISED || displayStyle == DisplayStyle.OUTLINED
+    val fontChoice: AppFont
+        get() = AppFont.fromStored(font)
+    val preloadCommentsFromStories: Boolean
+        get() = preloadCommentsMode != WebViewPreloadMode.NEVER
+}
+
+data class ReadingPreferences(
+    val integratedWebView: Boolean,
+    val preloadWebViewMode: WebViewPreloadMode,
+    val preloadWebViewMinimumBattery: Int,
+    val matchWebViewTheme: Boolean,
+    val readerModeEnabled: Boolean,
+    val readerModeDefault: Boolean,
+    val blockAds: Boolean,
+    val closeWebViewOnBack: Boolean,
+    val useAlgoliaApi: Boolean,
+    val readerModeFont: AppFont,
+    val readerModeFontSize: Int,
+    val externalBrowser: Boolean,
+    val redirectNitter: Boolean,
+    val archiveRedirectDomains: List<String>,
+    val enabledLinkPreviews: Set<LinkPreviewType>,
+    val nitterInstanceUrl: String = NitterInstance.DEFAULT_URL,
+    val readerModeLineHeight: ReaderLineHeight = ReaderLineHeight.STANDARD,
+    val linkPreviewsEnabled: Boolean = true,
+    val pullToOpenBrowser: Boolean = false,
+) {
+    val activeLinkPreviews: Set<LinkPreviewType>
+        get() = if (linkPreviewsEnabled) enabledLinkPreviews else emptySet()
+
+    val commentsProvider: CommentsProvider
+        get() = if (useAlgoliaApi) CommentsProvider.ALGOLIA else CommentsProvider.OFFICIAL
+}
+
+data class CachePreferences(
+    val storiesToCache: Int,
+    val cacheArticleSnapshots: Boolean,
+)
+
+data class GeneralPreferences(
+    val bookmarksEnabled: Boolean,
+    val transparentStatusBar: Boolean,
+    val specialNighttimeTheme: Boolean,
+    val showChangelog: Boolean,
+)
+
+data class AppearancePreferences(
+    val followSystem: Boolean,
+    val manualDark: Boolean,
+    val colorSchemes: ColorSchemeSelection = ColorSchemeSelection(),
+    /** Saved font choice, shared by every color scheme. */
+    val font: String = "googlesansflexrounded",
+    val applyFontEverywhere: Boolean = false,
+    /** Null preserves the host’s original pane proportions until the user chooses a ratio. */
+    val portraitSplitRatio: Float? = null,
+    val landscapeSplitRatio: Float? = null,
+    val extraSidePadding: ExtraSidePadding = ExtraSidePadding.Standard,
+    val surfaceEffectMode: SurfaceEffectMode = SurfaceEffectMode.Frosted,
+) {
+    fun splitRatio(orientation: SplitOrientation): Float? = when (orientation) {
+        SplitOrientation.Portrait -> portraitSplitRatio
+        SplitOrientation.Landscape -> landscapeSplitRatio
+    }
+}
+
+data class DebugPreferences(
+    val alwaysShowTapToRefresh: Boolean,
+    val glass: GlassPreferences = GlassPreferences(),
+    val showWidgetDebugInfo: Boolean = false,
+    val mockAiAnswers: Boolean = false,
+    val storyLoadFailurePercent: Int = 0,
+)
+
+data class AppSettings(
+    val story: StoryPreferences,
+    val comments: CommentPreferences,
+    val reading: ReadingPreferences,
+    val cache: CachePreferences,
+    val general: GeneralPreferences,
+    val appearance: AppearancePreferences,
+    val debug: DebugPreferences,
+)

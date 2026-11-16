@@ -1,0 +1,178 @@
+package com.simon.harmonichackernews.summary
+
+import kotlin.coroutines.resume
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+
+data class LocalModelDeviceCapabilities(
+    val supportsDownloadableModels: Boolean,
+    val supportsLiteRtModels: Boolean,
+    val liteRtUnsupportedReason: LocalModelUnsupportedReason =
+        LocalModelUnsupportedReason.PROCESS_ARCHITECTURE,
+)
+
+enum class LocalModelUnsupportedReason {
+    PLATFORM_VERSION,
+    PROCESS_ARCHITECTURE,
+    RUNTIME_UNAVAILABLE,
+}
+
+fun LocalModelDeviceCapabilities.unsupportedReason(
+    model: LocalModelDefinition,
+): LocalModelUnsupportedReason? = when {
+    !model.downloadable -> null
+    model.runtime == LocalModelRuntime.LITERT_LM && !supportsLiteRtModels ->
+        liteRtUnsupportedReason
+    !supportsDownloadableModels -> LocalModelUnsupportedReason.PLATFORM_VERSION
+    else -> null
+}
+
+data class LocalModelStorageSnapshot(
+    val finalFileBytes: Long? = null,
+    val partialFileBytes: Long = 0L,
+    val usableSpaceBytes: Long = 0L,
+)
+
+sealed interface LocalModelStoragePreparation {
+    data class Ready(val snapshot: LocalModelStorageSnapshot) : LocalModelStoragePreparation
+    data class Failed(val message: String) : LocalModelStoragePreparation
+}
+
+/** Filesystem operations required by the portable model lifecycle. */
+interface LocalModelStorage {
+    fun snapshot(model: LocalModelDefinition): LocalModelStorageSnapshot
+    fun prepareDownload(model: LocalModelDefinition): LocalModelStoragePreparation
+    fun remove(model: LocalModelDefinition, includeFinalFile: Boolean)
+    fun installedPath(model: LocalModelDefinition): String
+    fun storedBytes(): Long
+    fun clearStoredModels(): Boolean
+}
+
+/** Optional host-controlled directory used for local-model files. */
+interface LocalModelStorageLocation {
+    val directoryPath: String
+    fun changeDirectory(path: String): String?
+}
+
+/** Background-transfer operations required by the portable model lifecycle. */
+interface LocalModelTransferScheduler {
+    fun work(modelId: String): LocalModelWorkSnapshot?
+    fun isActive(modelId: String): Boolean
+    fun enqueue(model: LocalModelDefinition)
+    /** Additional disk space before the safety buffer; called on the storage dispatcher. */
+    fun requiredSpaceBytes(model: LocalModelDefinition, partialFileBytes: Long): Long =
+        (model.sizeBytes - partialFileBytes).coerceAtLeast(0L)
+    fun cancel(modelId: String, onCancelled: () -> Unit)
+    fun setObserver(observer: () -> Unit) = Unit
+    fun reset() = Unit
+}
+
+sealed interface LocalModelDownloadResult {
+    data object Started : LocalModelDownloadResult
+    data object AlreadyDownloaded : LocalModelDownloadResult
+    data object AlreadyActive : LocalModelDownloadResult
+    data object BuiltIn : LocalModelDownloadResult
+    data class Unsupported(val reason: LocalModelUnsupportedReason) : LocalModelDownloadResult
+    data class NotEnoughSpace(val requiredBytes: Long) : LocalModelDownloadResult
+    data class StorageFailure(val message: String) : LocalModelDownloadResult
+}
+
+/**
+ * Platform-neutral selection, support, storage-space and transfer lifecycle for local models.
+ * Hosts provide file and background-work adapters, but do not duplicate lifecycle decisions.
+ */
+class LocalModelLifecycle(
+    private val models: List<LocalModelDefinition>,
+    private val stateStore: LocalModelStateStore,
+    private val storage: LocalModelStorage,
+    private val transfers: LocalModelTransferScheduler,
+    private val capabilities: LocalModelDeviceCapabilities,
+    private val storageBufferBytes: Long = DEFAULT_STORAGE_BUFFER_BYTES,
+    private val storageDispatcher: CoroutineDispatcher = Dispatchers.Default,
+) {
+    val selectedModel: LocalModelDefinition
+        get() = model(stateStore.selectedModelId)
+
+    fun model(id: String?): LocalModelDefinition =
+        models.firstOrNull { it.id == id } ?: models.first()
+
+    fun unsupportedReason(model: LocalModelDefinition): LocalModelUnsupportedReason? =
+        capabilities.unsupportedReason(model)
+
+    fun isSupported(model: LocalModelDefinition): Boolean = unsupportedReason(model) == null
+
+    suspend fun isDownloaded(model: LocalModelDefinition): Boolean =
+        model.downloadable && withContext(storageDispatcher) { storage.snapshot(model).finalFileBytes == model.sizeBytes }
+
+    suspend fun select(modelId: String?): Boolean {
+        val candidate = model(modelId)
+        return stateStore.select(candidate.id, isSupported(candidate), isDownloaded(candidate))
+    }
+
+    fun clearSelection() = stateStore.clearSelection()
+
+    suspend fun status(model: LocalModelDefinition): LocalModelTransferStatus {
+        val snapshot = withContext(storageDispatcher) { storage.snapshot(model) }
+        return stateStore.resolveStatus(
+            modelId = model.id,
+            finalFileBytes = snapshot.finalFileBytes,
+            partialFileBytes = snapshot.partialFileBytes,
+            work = transfers.work(model.id),
+        )
+    }
+
+    suspend fun requestDownload(modelId: String?): LocalModelDownloadResult {
+        val candidate = model(modelId)
+        if (!candidate.downloadable) return LocalModelDownloadResult.BuiltIn
+        unsupportedReason(candidate)?.let { return LocalModelDownloadResult.Unsupported(it) }
+        if (isDownloaded(candidate)) return LocalModelDownloadResult.AlreadyDownloaded
+        if (transfers.isActive(candidate.id)) return LocalModelDownloadResult.AlreadyActive
+
+        val prepared = withContext(storageDispatcher) { storage.prepareDownload(candidate) }
+        if (prepared is LocalModelStoragePreparation.Failed) {
+            return LocalModelDownloadResult.StorageFailure(prepared.message)
+        }
+        val snapshot = (prepared as LocalModelStoragePreparation.Ready).snapshot
+        val transferBytes = withContext(storageDispatcher) {
+            transfers.requiredSpaceBytes(candidate, snapshot.partialFileBytes)
+        }
+        val requiredBytes = LocalModelDownloadSpacePolicy.withBuffer(transferBytes, storageBufferBytes)
+        if (snapshot.usableSpaceBytes < requiredBytes) {
+            return LocalModelDownloadResult.NotEnoughSpace(requiredBytes)
+        }
+        transfers.enqueue(candidate)
+        return LocalModelDownloadResult.Started
+    }
+
+    suspend fun cancel(modelId: String?, onCancelled: () -> Unit = {}) {
+        val candidate = model(modelId)
+        suspendCancellableCoroutine { continuation ->
+            transfers.cancel(candidate.id) {
+                if (continuation.isActive) continuation.resume(Unit)
+            }
+        }
+        withContext(storageDispatcher) { storage.remove(candidate, includeFinalFile = false) }
+        onCancelled()
+    }
+
+    suspend fun remove(modelId: String?, onChanged: () -> Unit = {}) {
+        val candidate = model(modelId)
+        if (!candidate.downloadable) return
+        if (transfers.isActive(candidate.id)) {
+            cancel(candidate.id, onChanged)
+            return
+        }
+        withContext(storageDispatcher) { storage.remove(candidate, includeFinalFile = true) }
+        if (candidate.id == selectedModel.id) clearSelection()
+        onChanged()
+    }
+
+    fun installedPath(model: LocalModelDefinition = selectedModel): String =
+        storage.installedPath(model)
+
+    companion object {
+        const val DEFAULT_STORAGE_BUFFER_BYTES: Long = 256L * 1024L * 1024L
+    }
+}

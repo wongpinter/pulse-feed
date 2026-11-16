@@ -1,0 +1,1200 @@
+package com.simon.harmonichackernews.ui.content
+
+import com.simon.harmonichackernews.settings.UserTagColor
+
+import com.simon.harmonichackernews.settings.QuoteSpacing
+import com.simon.harmonichackernews.settings.QuoteHighlightColor
+import com.simon.harmonichackernews.settings.QuoteHighlightStyle
+
+import androidx.compose.material3.MaterialTheme
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.settings.UserAvatarOptions
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextMotion
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
+import androidx.compose.ui.unit.offset
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.settings.DisplayStyle
+import com.simon.harmonichackernews.settings.CommentDepthPreferences
+import com.simon.harmonichackernews.settings.CommentIndicatorThickness
+import com.simon.harmonichackernews.ui.common.relativeTimeOnResume
+import com.simon.harmonichackernews.ui.LocalHarmonicUiDependencies
+import com.simon.harmonichackernews.ui.theme.CommentDepthPaletteCatalog
+import com.simon.harmonichackernews.presentation.PortableCommentItem
+import com.simon.harmonichackernews.ui.comments.CommentActionSourceGeometry
+import com.simon.harmonichackernews.ui.comments.captureCommentActionSourceContent
+import com.simon.harmonichackernews.ui.common.onSecondaryClick
+import com.simon.harmonichackernews.utils.CollectedReferenceLinks
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+@Immutable
+data class CommentRowModel(
+    val author: String,
+    val age: String,
+    val body: String,
+    val referenceMarker: String,
+    val referenceUrl: String,
+)
+
+@Immutable
+data class CommentRowStyle(
+    val displayStyle: DisplayStyle,
+    val textSize: Float,
+    val collectLinks: Boolean,
+    val emphasizeMeta: Boolean,
+    val depthIndicatorMode: String,
+    val showDivider: Boolean,
+    val preferredFont: String,
+    val animateChanges: Boolean = true,
+    val transparentNonCardBackground: Boolean = false,
+    val indicatorThickness: CommentIndicatorThickness = CommentIndicatorThickness.STANDARD,
+    val highlightQuotes: Boolean = false,
+    val quoteHighlightColor: QuoteHighlightColor = QuoteHighlightColor.MATERIAL,
+    val quoteSpacing: QuoteSpacing = QuoteSpacing.COMFORTABLE,
+    val quoteHighlightStyle: QuoteHighlightStyle = QuoteHighlightStyle.BOTH,
+    val quotePadding: Boolean = true,
+    val roundedDepthIndicators: Boolean = false,
+    val continuousDepthIndicators: Boolean = false,
+    val expandedReferenceLinks: Boolean = true,
+    val userAvatarsEnabled: Boolean = false,
+    val userAvatarOptions: UserAvatarOptions = UserAvatarOptions(),
+    val markNewComments: Boolean = true,
+    val spacingScale: Float = 1f,
+) {
+    val showOutline: Boolean get() = displayStyle == DisplayStyle.OUTLINED
+    val cardStyle: Boolean get() = displayStyle == DisplayStyle.RAISED || displayStyle == DisplayStyle.OUTLINED
+    val hasBackground: Boolean get() = displayStyle != DisplayStyle.FLAT
+}
+
+internal fun commentSurfaceColor(baseBackground: Color, textColor: Color, highlighted: Boolean): Color {
+    // Compositing two zero-alpha colors discards the RGB needed for a clean fade.
+    if (!highlighted) return baseBackground
+    val overlayAlpha = if (baseBackground.luminance() < 0.5f) 0.14f else 0.08f
+    return textColor.copy(alpha = overlayAlpha).compositeOver(baseBackground)
+}
+
+private class CommentRowGeometry {
+    var coordinates: LayoutCoordinates? = null
+    var contentLayer: GraphicsLayer? = null
+    var indicatorCoordinates: LayoutCoordinates? = null
+    var indicatorLayer: GraphicsLayer? = null
+    var containerColor: Color = Color.Transparent
+    var containerCornerRadiusDp: Float = 0f
+    var containerElevationDp: Float = 0f
+    var containerBorderColor: Color = Color.Transparent
+    var containerBorderWidthDp: Float = 0f
+
+    fun boundsInWindowOrNull(): Rect? = coordinates
+        ?.takeIf { it.isAttached }
+        ?.let {
+            Rect(
+                offset = it.positionInWindow(),
+                size = Size(it.size.width.toFloat(), it.size.height.toFloat()),
+            )
+        }
+        ?.takeIf { it.width > 0f && it.height > 0f }
+
+    fun snapshot(): CommentActionSourceGeometry? {
+        val container = boundsInWindowOrNull() ?: return null
+        return CommentActionSourceGeometry(
+            container = container,
+            containerColor = containerColor,
+            containerCornerRadiusDp = containerCornerRadiusDp,
+            containerElevationDp = containerElevationDp,
+            containerBorderColor = containerBorderColor,
+            containerBorderWidthDp = containerBorderWidthDp,
+            contentLayer = contentLayer?.takeUnless(GraphicsLayer::isReleased),
+            indicatorBounds = indicatorCoordinates?.takeIf { it.isAttached }?.let {
+                Rect(it.positionInWindow(), Size(it.size.width.toFloat(), it.size.height.toFloat()))
+            },
+            indicatorLayer = indicatorLayer?.takeUnless(GraphicsLayer::isReleased),
+            currentGeometry = ::snapshot,
+        )
+    }
+}
+
+private enum class CommentActionSourceGesture {
+    Click,
+    LongClick,
+}
+
+val SettingsCommentPreviewModel = CommentRowModel(
+    author = "pg",
+    age = "1h",
+    body = "This reminds me of the old systems where the boring path was often the most durable one. " +
+        "The less hidden state there is, the easier it is to reason about [0]." +
+        "<p>[0] <a href=\"https://example.com/reference\">https://example.com/reference</a></p>",
+    referenceMarker = "[0]",
+    referenceUrl = "https://example.com/reference",
+)
+
+/** Settings preview rendered by the same shared row primitives as runtime comments. */
+@Composable
+fun CommentRow(
+    model: CommentRowModel,
+    style: CommentRowStyle,
+    modifier: Modifier = Modifier,
+    verticalPadding: Dp = 10.dp,
+) {
+    val typography = rememberContentTypography(
+        preferredFont = style.preferredFont,
+        commentTextSize = style.textSize,
+    )
+    val previewReferences = remember(model.body) {
+        CollectedReferenceLinks.parse(model.body)
+    }
+    val hasPreviewReference = previewReferences.hasLinks()
+    val previewBody = if (hasPreviewReference) previewReferences.bodyHtml else model.body
+    val inlineReferenceHtml = remember(model.referenceMarker, model.referenceUrl) {
+        "${model.referenceMarker} <a href=\"${model.referenceUrl}\">${model.referenceUrl}</a>"
+    }
+    val bodySize = animatedCommentValue(
+        typography.commentTextSize,
+        animateChanges = style.animateChanges,
+        label = "comment preview text size",
+    )
+    val indicatorColor = animatedCommentValue(
+        commentDepthColor(style.depthIndicatorMode, 0, model.author),
+        animateChanges = style.animateChanges,
+        label = "comment preview indicator color",
+    )
+    val dividerAlpha = animatedCommentValue(if (style.showDivider) 1f else 0f, style.animateChanges, "comment preview divider")
+    val dividerColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = dividerAlpha)
+    CommentSurface(
+        modifier = modifier.fillMaxWidth().drawBehind {
+            if (dividerAlpha > 0f) {
+                // Keep the divider in the preview's bottom gap, outside the comment surface.
+                val thickness = 1.dp.toPx()
+                val inset = 16.dp.toPx()
+                drawRect(
+                    color = dividerColor,
+                    topLeft = Offset(inset, size.height - verticalPadding.toPx() / 2 - thickness),
+                    size = Size((size.width - inset * 2).coerceAtLeast(0f), thickness),
+                )
+            }
+        }.padding(horizontal = 8.dp, vertical = verticalPadding),
+        style = style,
+        showIndicator = style.depthIndicatorMode != "none",
+        indicatorColor = indicatorColor,
+        highlighted = false,
+        onClick = {},
+        onLongClick = {},
+    ) {
+        CommentMeta(
+            author = model.author,
+            isNew = style.markNewComments,
+            avatarsEnabled = style.userAvatarsEnabled,
+            avatarOptions = style.userAvatarOptions,
+            age = model.age,
+            byOp = false,
+            byUser = false,
+            userTag = null,
+            hiddenPreview = null,
+            subtreeReplyCount = null,
+            showHiddenReplyCount = false,
+            emphasized = style.emphasizeMeta,
+            fontFamily = typography.family,
+            animateChanges = style.animateChanges,
+        )
+        CommentBodyText(
+            highlightQuotes = style.highlightQuotes,
+            quoteSpacing = style.quoteSpacing,
+            quoteHighlightColor = style.quoteHighlightColor,
+            quoteHighlightStyle = style.quoteHighlightStyle,
+            quotePadding = style.quotePadding,
+            html = previewBody,
+            searchTerm = "",
+            markedColor = MaterialTheme.colorScheme.onSurface,
+            fontFamily = typography.family,
+            fontSize = bodySize,
+            animateSearchMatches = false,
+            onLinkClick = {},
+            onLinkLongClick = { _, _, _ -> },
+        )
+        if (hasPreviewReference) {
+            AnimatedContent(
+                targetState = style.collectLinks,
+                transitionSpec = {
+                    val direction = if (targetState) 1 else -1
+                    val enter = fadeIn(
+                        animationSpec = tween(durationMillis = 150, delayMillis = 70),
+                    ) + slideInVertically(
+                        animationSpec = contentTween(),
+                        initialOffsetY = { height -> direction * height / 6 },
+                    )
+                    val exit = fadeOut(
+                        animationSpec = tween(durationMillis = 90),
+                    ) + slideOutVertically(
+                        animationSpec = contentTween(),
+                        targetOffsetY = { height -> -direction * height / 6 },
+                    )
+                    (enter togetherWith exit).using(
+                        SizeTransform(clip = true) { _, _ -> contentTween() },
+                    )
+                },
+                contentAlignment = Alignment.TopStart,
+                label = "comment preview reference collection",
+            ) { collectLinks ->
+                if (collectLinks) {
+                    ReferenceLinkRow(
+                        marker = model.referenceMarker,
+                        label = if (style.expandedReferenceLinks) "Reference article" else model.referenceUrl,
+                        expandedUrl = model.referenceUrl.takeIf { style.expandedReferenceLinks },
+                        typography = typography,
+                        modifier = Modifier.padding(top = 5.dp),
+                        onClick = {},
+                        onLongClick = { _, _ -> },
+                    )
+                } else {
+                    CommentBodyText(
+                        highlightQuotes = style.highlightQuotes,
+                        quoteSpacing = style.quoteSpacing,
+                        quoteHighlightColor = style.quoteHighlightColor,
+                        quoteHighlightStyle = style.quoteHighlightStyle,
+                        quotePadding = style.quotePadding,
+                        html = inlineReferenceHtml,
+                        modifier = Modifier.padding(top = 16.dp),
+                        searchTerm = "",
+                        markedColor = MaterialTheme.colorScheme.onSurface,
+                        fontFamily = typography.family,
+                        fontSize = bodySize,
+                        animateSearchMatches = false,
+                        onLinkClick = {},
+                        onLinkLongClick = { _, _, _ -> },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Complete platform-neutral runtime comment row. Android now supplies only link-opening effects;
+ * hierarchy, collapse presentation, rich HTML, references, search highlighting and gestures live
+ * in shared UI.
+ */
+@Composable
+fun CommentRow(
+    comment: PortableCommentItem,
+    style: CommentRowStyle,
+    storyAuthor: String?,
+    accountUser: String?,
+    userTag: String?,
+    subtreeReplyCount: Int,
+    collapseParent: Boolean,
+    showTopLevelIndicator: Boolean,
+    nextCommentDepth: Int? = null,
+    modifier: Modifier = Modifier,
+    highlighted: Boolean = false,
+    flattenHierarchy: Boolean = false,
+    forceExpanded: Boolean = false,
+    searchTerm: String = "",
+    animateSearchMatches: Boolean = false,
+    suppressedReferenceUrl: String? = null,
+    captureActionSource: Boolean = false,
+    suppressActionSource: Boolean = false,
+    showActionsOnClick: Boolean = false,
+    enableLongClick: Boolean = true,
+    onToggleExpanded: (Rect?) -> Unit,
+    onShowActions: (Rect?) -> Unit,
+    onActionSourceGeometryChanged: ((CommentActionSourceGeometry) -> Unit)? = null,
+    onLinkLongClick: (String, String, Rect) -> Unit,
+    onReferenceLongClick: (CollectedReferenceLinks.ReferenceLink, Rect, GraphicsLayer?) -> Unit,
+    onLinkClick: (String) -> Unit = {},
+    typography: ContentTypography = rememberContentTypography(
+        preferredFont = style.preferredFont,
+        commentTextSize = style.textSize,
+    ),
+    age: String = relativeTimeOnResume(comment.time),
+    userTagColor: UserTagColor = UserTagColor.Theme,
+) {
+    val colors = MaterialTheme.colorScheme
+    val bodySize = animatedCommentValue(
+        typography.commentTextSize,
+        animateChanges = style.animateChanges,
+        label = "runtime comment text size",
+    )
+    val effectiveDepth = if (flattenHierarchy) 0 else comment.depth
+    val showIndicator = !flattenHierarchy && style.depthIndicatorMode != "none" &&
+        (effectiveDepth > 0 || showTopLevelIndicator)
+    val indicatorIndex = (effectiveDepth + if (showTopLevelIndicator) 0 else -1)
+        .coerceAtLeast(0)
+    val indicatorColor = animatedCommentValue(
+        commentDepthColor(style.depthIndicatorMode, indicatorIndex, comment.by.orEmpty()),
+        animateChanges = style.animateChanges,
+        label = "runtime comment indicator color",
+    )
+    val textCollapsed = !forceExpanded && !comment.expanded && collapseParent
+    val renderModel = remember(
+        comment.id,
+        comment.expandedAnchorText,
+        style.collectLinks,
+    ) {
+        CommentRenderModelCache.get(
+            commentId = comment.id,
+            expandedHtml = comment.expandedAnchorText,
+            collectLinks = style.collectLinks,
+        )
+    }
+    val references = renderModel.references
+    val contentBlocks = renderModel.contentBlocks
+    val hasInterleavedReferences = references?.hasInterleavedLinks() == true
+    val firstReferenceIndex = contentBlocks.indexOfFirst { it.getLink() != null }
+    val markedColor = if (colors.surface.luminance() < 0.5f) Color(0xfffce205) else Color(0xffcc7722)
+    val hiddenPreview = remember(comment.id, comment.text, textCollapsed) {
+        collapsedCommentPreview(comment.id, comment.text, textCollapsed)
+    }
+
+    // Equal space on either side of the row boundary centers its divider between surfaces.
+    val top = animatedCommentValue(
+        if (style.hasBackground) 0.dp else 8.dp * style.spacingScale,
+        animateChanges = style.animateChanges,
+        label = "comment row spacing",
+    )
+    val cardGap = animatedCommentValue(
+        if (style.hasBackground) 4.dp * style.spacingScale else 0.dp,
+        animateChanges = style.animateChanges,
+        label = "comment rail gap",
+    )
+    val bottom = top
+    val indicatorGeometry = animatedCommentIndicatorGeometry(style, showIndicator)
+    val continuousProgress = indicatorGeometry.continuous
+    val firstRailDepth = if (showTopLevelIndicator) 0 else 1
+    val railColors = if (continuousProgress > 0f) (firstRailDepth..effectiveDepth).map { depth ->
+        commentDepthColor(style.depthIndicatorMode, depth - firstRailDepth, "")
+    } else emptyList()
+    val dividerAlpha = animatedCommentValue(if (style.showDivider) 1f else 0f, style.animateChanges, "comment divider")
+    val dividerColor = colors.outlineVariant.copy(alpha = dividerAlpha)
+    val decorations = Modifier.drawWithCache {
+        // Match the row layout's pixel rounding, including devices with fractional density.
+        val railWidth = indicatorGeometry.width.roundToPx().toFloat()
+        val inset = (if (style.hasBackground) cardGap else top).roundToPx().toFloat()
+        fun railStart(depth: Int): Float = min(
+            16.dp.roundToPx() + 12.dp.roundToPx() * depth,
+            (size.width * 0.6f).roundToInt(),
+        ).toFloat()
+        val railSegments = railColors.mapIndexedNotNull { index, railColor ->
+            val depth = firstRailDepth + index
+            val x = railStart(depth)
+            // The current line belongs to CommentSurface; only extend it through its gap.
+            val isAncestor = depth < effectiveDepth
+            if (!isAncestor && (nextCommentDepth == null || nextCommentDepth <= depth)) {
+                return@mapIndexedNotNull null
+            }
+            val y = if (isAncestor) 0f else size.height - inset
+            val continuesBelow = nextCommentDepth != null && nextCommentDepth > depth
+            val bottomY = if (continuesBelow) size.height else size.height - inset
+            val radius = if (isAncestor && !continuesBelow) {
+                CornerRadius(railWidth / 2f * indicatorGeometry.rounding)
+            } else CornerRadius.Zero
+            // A single path avoids alpha accumulation where square joins used to cover
+            // rounded caps, which flashed darker while continuous lines faded in or out.
+            val path = Path().apply {
+                addRoundRect(RoundRect(
+                    rect = Rect(x, y, x + railWidth, bottomY.coerceAtLeast(y)),
+                    bottomLeft = radius,
+                    bottomRight = radius,
+                ))
+            }
+            path to railColor.copy(alpha = railColor.alpha * continuousProgress)
+        }
+        onDrawBehind {
+            railSegments.forEach { (path, color) -> drawPath(path, color) }
+            if (dividerAlpha > 0f) {
+                val x = railStart(effectiveDepth) + (railWidth + 8.dp.toPx()) * continuousProgress
+                drawRect(dividerColor, Offset(x, size.height - 0.5.dp.toPx()), Size((size.width - x - 16.dp.toPx()).coerceAtLeast(0f), 1.dp.toPx()))
+            }
+        }
+    }
+    val itemGeometry = remember { CommentRowGeometry() }
+    val hiddenSurfaceLayer = if (suppressActionSource) rememberGraphicsLayer() else null
+    var pendingActionSourceGesture by remember {
+        mutableStateOf<CommentActionSourceGesture?>(null)
+    }
+    fun publishActionSourceGeometry() {
+        itemGeometry.snapshot()?.let { onActionSourceGeometryChanged?.invoke(it) }
+    }
+    if (pendingActionSourceGesture != null) {
+        LaunchedEffect(pendingActionSourceGesture) {
+            val gesture = pendingActionSourceGesture ?: return@LaunchedEffect
+            // Frame callbacks run before drawing. Cross a complete frame so both the card and
+            // detached indicator have recorded contents before publishing the opening geometry.
+            withFrameNanos { }
+            withFrameNanos { }
+            publishActionSourceGeometry()
+            val bounds = itemGeometry.boundsInWindowOrNull()
+            when (gesture) {
+                CommentActionSourceGesture.Click -> onToggleExpanded(bounds)
+                CommentActionSourceGesture.LongClick -> onShowActions(bounds)
+            }
+            pendingActionSourceGesture = null
+        }
+    }
+    CommentRowLayout(
+        modifier = modifier.then(decorations),
+        effectiveDepth = effectiveDepth,
+        cardStyle = style.hasBackground,
+        topPadding = top,
+        bottomPadding = bottom,
+    ) {
+        CommentSurface(
+            modifier = Modifier.fillMaxWidth().drawWithContent {
+                if (hiddenSurfaceLayer != null) {
+                    // Keep captures current without hiding the surrounding thread rails.
+                    hiddenSurfaceLayer.record { this@drawWithContent.drawContent() }
+                } else {
+                    drawContent()
+                }
+            },
+            style = style,
+            showIndicator = showIndicator,
+            indicatorGeometry = indicatorGeometry,
+            continuationBelow = if (nextCommentDepth != null && nextCommentDepth > effectiveDepth) {
+                continuousProgress
+            } else 0f,
+            indicatorColor = indicatorColor,
+            highlighted = highlighted,
+            itemGeometry = itemGeometry,
+            captureSource = captureActionSource || pendingActionSourceGesture != null,
+            onClick = {
+                if (showActionsOnClick) {
+                    pendingActionSourceGesture = CommentActionSourceGesture.Click
+                } else {
+                    onToggleExpanded(itemGeometry.boundsInWindowOrNull())
+                }
+            },
+            onLongClick = if (enableLongClick) {
+                {
+                    if (showActionsOnClick) {
+                        onShowActions(itemGeometry.boundsInWindowOrNull())
+                    } else {
+                        pendingActionSourceGesture = CommentActionSourceGesture.LongClick
+                    }
+                }
+            } else {
+                // Keep a no-op long-click handler so a held search result is consumed as a
+                // long press instead of being reinterpreted as its normal click on release.
+                {}
+            },
+        ) {
+            CommentMeta(
+                author = comment.by.orEmpty(),
+                avatarsEnabled = style.userAvatarsEnabled,
+                avatarOptions = style.userAvatarOptions,
+                age = age,
+                byOp = comment.by == storyAuthor,
+                byUser = !accountUser.isNullOrBlank() && comment.by == accountUser,
+                userTag = userTag,
+                tagColor = userTagColor,
+                isNew = style.markNewComments && comment.isNew,
+                hiddenPreview = hiddenPreview,
+                subtreeReplyCount = subtreeReplyCount.takeIf {
+                    it > 0
+                },
+                showHiddenReplyCount = subtreeReplyCount > 0 &&
+                    !forceExpanded && !comment.expanded,
+                emphasized = style.emphasizeMeta,
+                fontFamily = typography.family,
+                animateChanges = style.animateChanges,
+            )
+            AnimatedVisibility(
+                visible = !textCollapsed,
+                enter = if (style.animateChanges) {
+                    fadeIn(contentTween()) + expandVertically(contentTween())
+                } else androidx.compose.animation.EnterTransition.None,
+                exit = if (style.animateChanges) {
+                    fadeOut(contentTween()) + shrinkVertically(contentTween())
+                } else androidx.compose.animation.ExitTransition.None,
+            ) {
+                Column {
+                    contentBlocks.forEachIndexed { index, block ->
+                        val link = block.getLink()
+                        if (link == null) {
+                            CommentBodyText(
+                                highlightQuotes = style.highlightQuotes,
+                                quoteSpacing = style.quoteSpacing,
+                                quoteHighlightColor = style.quoteHighlightColor,
+                                quoteHighlightStyle = style.quoteHighlightStyle,
+                                quotePadding = style.quotePadding,
+                                html = block.bodyHtml.orEmpty(),
+                                modifier = if (hasInterleavedReferences && index > 0) {
+                                    Modifier.padding(top = referenceBlockTopPadding(contentBlocks, index))
+                                } else {
+                                    Modifier
+                                },
+                                searchTerm = searchTerm,
+                                markedColor = markedColor,
+                                fontFamily = typography.family,
+                                fontSize = bodySize,
+                                animateSearchMatches = animateSearchMatches,
+                                onLinkClick = onLinkClick,
+                                onLinkLongClick = onLinkLongClick,
+                            )
+                        } else {
+                            ReferenceLinkRow(
+                                topPadding = if (hasInterleavedReferences) 0.dp else 4.dp,
+                                marker = link.markerLabel.orEmpty(),
+                                label = rememberReferenceLinkLabel(link, style.expandedReferenceLinks),
+                                expandedUrl = link.url.takeIf { style.expandedReferenceLinks },
+                                typography = typography,
+                                faviconUrl = rememberReferenceLinkFaviconUrl(link),
+                                modifier = when {
+                                    hasInterleavedReferences -> Modifier.padding(top = referenceBlockTopPadding(contentBlocks, index))
+                                    index == firstReferenceIndex -> Modifier.padding(top = 5.dp)
+                                    else -> Modifier
+                                },
+                                suppressed = link.url == suppressedReferenceUrl,
+                                onClick = { link.url?.let(onLinkClick) },
+                                onLongClick = { bounds, sourceContentLayer ->
+                                    if (bounds.width > 0f && bounds.height > 0f) {
+                                        onReferenceLongClick(link, bounds, sourceContentLayer)
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Applies depth indentation from incoming constraints without a BoxWithConstraints subcompose. */
+@Composable
+private fun CommentRowLayout(
+    modifier: Modifier,
+    effectiveDepth: Int,
+    cardStyle: Boolean,
+    topPadding: Dp,
+    bottomPadding: Dp,
+    content: @Composable () -> Unit,
+) {
+    Layout(
+        modifier = modifier.fillMaxWidth(),
+        content = content,
+    ) { measurables, constraints ->
+        val desiredStart = 16.dp.roundToPx() + 12.dp.roundToPx() * effectiveDepth
+        val cappedStart = min(desiredStart, (constraints.maxWidth * 0.6f).roundToInt())
+        val shadowPadding = if (cardStyle) 4.dp.roundToPx() else 0
+        val startPadding = (cappedStart - shadowPadding).coerceAtLeast(0)
+        val endPadding = 16.dp.roundToPx() - shadowPadding
+        val topPaddingPx = topPadding.roundToPx()
+        val bottomPaddingPx = bottomPadding.roundToPx()
+        val contentWidth = (constraints.maxWidth - startPadding - endPadding).coerceAtLeast(0)
+        val contentHeight = if (constraints.hasBoundedHeight) {
+            (constraints.maxHeight - topPaddingPx - bottomPaddingPx).coerceAtLeast(0)
+        } else {
+            constraints.maxHeight
+        }
+        val placeable = measurables.single().measure(
+            constraints.copy(
+                minWidth = contentWidth,
+                maxWidth = contentWidth,
+                minHeight = 0,
+                maxHeight = contentHeight,
+            ),
+        )
+
+        layout(
+            width = constraints.maxWidth,
+            height = topPaddingPx + placeable.height + bottomPaddingPx,
+        ) {
+            placeable.placeRelative(startPadding, topPaddingPx)
+        }
+    }
+}
+
+@Composable
+internal fun CommentBodyText(
+    highlightQuotes: Boolean,
+    quoteSpacing: QuoteSpacing,
+    quoteHighlightColor: QuoteHighlightColor,
+    quoteHighlightStyle: QuoteHighlightStyle,
+    quotePadding: Boolean = true,
+    html: String,
+    modifier: Modifier = Modifier,
+    searchTerm: String,
+    markedColor: Color,
+    fontFamily: androidx.compose.ui.text.font.FontFamily,
+    fontSize: Float,
+    animateSearchMatches: Boolean,
+    onLinkClick: (String) -> Unit,
+    onLinkLongClick: (String, String, Rect) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val content = remember(html) { preparedCommentContent(html) }
+    val quotePresentation = rememberCommentQuotePresentation(
+        hasQuotes = content.hasQuotes,
+        enabled = highlightQuotes,
+        spacing = quoteSpacing,
+        padding = quotePadding,
+        color = quoteHighlightColor,
+        style = quoteHighlightStyle,
+        primary = colors.primary,
+        onSurface = colors.onSurface,
+    )
+    val decorateQuotes = quotePresentation.decorate
+    val prepared = content.text(highlightQuotes, decorateQuotes)
+    val hasLinks = remember(prepared) { prepared.hasCommentLinks() }
+    val linkGestureState = if (hasLinks) remember(html) { AnnotatedLinkGestureState() } else null
+    val body = if (linkGestureState != null) {
+        val linkListener = remember(linkGestureState, onLinkClick) {
+            LinkInteractionListener { annotation ->
+                if (annotation is LinkAnnotation.Url &&
+                    !linkGestureState.consumeSuppressedLinkClick()
+                ) {
+                    onLinkClick(annotation.url)
+                }
+            }
+        }
+        remember(prepared, colors.primary, linkListener) {
+            bindCommentLinks(prepared, colors.primary, linkListener)
+        }
+    } else prepared
+    val displayedBody = if (animateSearchMatches) {
+        animatedSearchMatches(
+            body = body,
+            searchTerm = searchTerm,
+            baseColor = colors.onSurface,
+            markedColor = markedColor,
+        )
+    } else {
+        remember(body, searchTerm, markedColor) {
+            highlightSearchMatches(body, searchTerm, markedColor)
+        }
+    }
+    val density = LocalDensity.current
+    val segments = remember(displayedBody, decorateQuotes) {
+        if (decorateQuotes) displayedBody.quoteSpacedSegments() else listOf(displayedBody)
+    }
+    val paragraphGap = if (segments.size > 1) {
+        val textMeasurer = rememberTextMeasurer(cacheSize = 2)
+        remember(fontFamily, fontSize, density, textMeasurer) {
+            val textStyle = animatedCommentTextStyle.copy(fontFamily = fontFamily, fontSize = fontSize.sp)
+            // A standalone glyph's height can include font leading that a blank line does not.
+            // Measure the full gap between paragraphs in a single Text so disabling
+            // highlighting restores the original spacing after the animation.
+            val singleLine = textMeasurer.measure("M", style = textStyle).size.height
+            val paragraphs = textMeasurer.measure("M\n\nM", style = textStyle).size.height
+            (paragraphs - 2 * singleLine).coerceAtLeast(0)
+        }
+    } else 0
+    val gap = {
+        with(density) { (paragraphGap * quotePresentation.gapFraction.value).toDp() }
+    }
+    QuoteSpacedContent(segments, gap, modifier) { paragraph, paragraphModifier ->
+        // Keep the same text nodes while padding animates in either direction.
+        val paddedSegments = remember(paragraph, decorateQuotes) {
+            if (decorateQuotes) paragraph.quotePaddingSegments() else listOf(paragraph)
+        }
+        QuoteSpacedContent(paddedSegments, { 0.dp }, paragraphModifier) { segment, textModifier ->
+            // Most comments contain no links. Keep their text free of gesture nodes and geometry
+            // callbacks; quoted text still receives the layout callback needed for its decoration.
+            val segmentHasLinks = hasLinks && remember(segment) { segment.hasCommentLinks() }
+            val geometry = if (segmentHasLinks) remember(segment) { CommentTextGeometry() } else null
+            val linkModifier = if (geometry != null && linkGestureState != null) {
+                Modifier.onPlaced { geometry.coordinates = it }
+                    .detectAnnotatedLinkLongPress(
+                        text = segment,
+                        layoutResult = { geometry.layout },
+                        coordinates = { geometry.coordinates },
+                        linkGestureState = linkGestureState,
+                        hapticFeedback = LocalHapticFeedback.current,
+                        onLongPress = onLinkLongClick,
+                    )
+            } else Modifier
+            val quoteLayout = remember(segment, decorateQuotes) {
+                if (decorateQuotes) {
+                    segment.getStringAnnotations(COMMENT_QUOTE_TAG, 0, segment.length)
+                        .takeIf { it.isNotEmpty() }?.let(::CommentQuoteLayout)
+                } else null
+            }
+            val paddingFraction = quotePresentation.paddingFraction
+            val paddingModifier = if (quoteLayout == null) Modifier else remember(paddingFraction) {
+                Modifier.layout { measurable, constraints ->
+                    val start = (4.dp * paddingFraction.value).roundToPx()
+                    val vertical = (2.dp * paddingFraction.value).roundToPx()
+                    val placeable = measurable.measure(constraints.offset(-start, -2 * vertical))
+                    layout(
+                        constraints.constrainWidth(placeable.width + start),
+                        constraints.constrainHeight(placeable.height + 2 * vertical),
+                    ) { placeable.placeRelative(start, vertical) }
+                }
+            }
+            val decoration = if (quoteLayout == null) Modifier else remember(
+                quoteLayout, quotePresentation.background, quotePresentation.accent,
+                paddingFraction,
+            ) {
+                Modifier.drawBehind {
+                    val inset = 5.dp.toPx() + (4.dp * paddingFraction.value).roundToPx()
+                    val extraHeight = (2.dp * paddingFraction.value).roundToPx().toFloat()
+                    val railWidth = 3.dp.toPx()
+                    val radius = CornerRadius(7.dp.toPx())
+                    // Bounds are updated by text layout, never recalculated during color animation.
+                    val background = quotePresentation.background.value
+                    val accent = quotePresentation.accent.value
+                    quoteLayout.bounds.forEach { bounds ->
+                        val topLeft = Offset(-inset, bounds.top - extraHeight)
+                        val height = bounds.height + extraHeight * 2
+                        if (background.alpha > 0f) {
+                            drawRoundRect(background, topLeft, Size(size.width + inset, height), radius)
+                        }
+                        if (accent.alpha > 0f) {
+                            drawRect(accent, topLeft, Size(railWidth, height))
+                        }
+                    }
+                }
+            }
+            Text(
+                text = segment,
+                modifier = textModifier
+                    .fillMaxWidth()
+                    .then(paddingModifier)
+                    .then(decoration)
+                    .then(linkModifier),
+                onTextLayout = if (geometry != null || quoteLayout != null) {
+                    { result ->
+                        geometry?.layout = result
+                        quoteLayout?.update(result)
+                    }
+                } else { _ -> },
+                color = colors.onSurface,
+                fontFamily = fontFamily,
+                fontSize = fontSize.sp,
+                style = animatedCommentTextStyle,
+            )
+        }
+    }
+}
+
+private class CommentTextGeometry {
+    var layout: TextLayoutResult? = null
+    var coordinates: LayoutCoordinates? = null
+}
+
+/** Only quoted text needs this small geometry cache; ordinary text has no decoration modifier. */
+private class CommentQuoteLayout(private val quotes: List<AnnotatedString.Range<String>>) {
+    var bounds by mutableStateOf<List<Rect>>(emptyList())
+        private set
+
+    fun update(layout: TextLayoutResult) {
+        bounds = quotes.mapNotNull { quote ->
+            if (quote.start >= quote.end) null else Rect(
+                left = 0f,
+                top = layout.getLineTop(layout.getLineForOffset(quote.start)),
+                right = layout.size.width.toFloat(),
+                bottom = layout.getLineBottom(layout.getLineForOffset(quote.end - 1)),
+            )
+        }
+    }
+}
+
+/** Only the empty gaps change height; paragraph text stays fully opaque. */
+@Composable
+internal fun QuoteSpacedContent(
+    segments: List<AnnotatedString>,
+    gap: () -> Dp,
+    modifier: Modifier = Modifier,
+    content: @Composable (AnnotatedString, Modifier) -> Unit,
+) {
+    if (segments.size == 1) {
+        if (segments[0].isNotEmpty()) content(segments[0], modifier)
+        return
+    }
+    Column(modifier) {
+        segments.forEachIndexed { index, segment ->
+            if (index > 0) Spacer(Modifier.layout { measurable, constraints ->
+                // Spacing changes only the gap. Keep paragraph composition and text measurement
+                // out of the animation's invalidation scope.
+                val height = gap().roundToPx().coerceIn(constraints.minHeight, constraints.maxHeight)
+                val placeable = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
+                layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
+            })
+            if (segment.isNotEmpty()) content(segment, Modifier)
+        }
+    }
+}
+
+/** Disabled row animation needs no per-property coroutine, channel, or animation state. */
+@Composable
+private fun animatedCommentValue(target: Float, animateChanges: Boolean, label: String): Float =
+    if (animateChanges) animateFloatAsState(target, contentTween(), label = label).value else target
+
+@Composable
+private fun animatedCommentValue(target: Dp, animateChanges: Boolean, label: String): Dp =
+    if (animateChanges) animateDpAsState(target, contentTween(), label = label).value else target
+
+@Composable
+private fun animatedCommentValue(target: Color, animateChanges: Boolean, label: String): Color =
+    if (animateChanges) animateColorAsState(target, contentTween(), label = label).value else target
+
+@Composable
+private fun animatedCommentIndicatorGeometry(
+    style: CommentRowStyle,
+    showIndicator: Boolean,
+): CommentIndicatorGeometry {
+    val width = animatedCommentValue(
+        if (showIndicator || style.hasBackground) style.indicatorThickness.widthDp.dp else 0.dp,
+        animateChanges = style.animateChanges,
+        label = "comment indicator width",
+    )
+    val rounding = animatedCommentValue(
+        if (style.roundedDepthIndicators) 1f else 0f,
+        animateChanges = style.animateChanges,
+        label = "comment indicator rounding",
+    )
+    val detached = animatedCommentValue(
+        if (showIndicator && style.hasBackground && style.roundedDepthIndicators) 1f else 0f,
+        animateChanges = style.animateChanges,
+        label = "comment indicator outside card",
+    )
+    val continuous = animatedCommentValue(
+        if (showIndicator && style.continuousDepthIndicators &&
+            style.depthIndicatorMode != CommentDepthPreferences.AUTHOR
+        ) 1f else 0f,
+        animateChanges = style.animateChanges,
+        label = "continuous comment indicators",
+    )
+    return CommentIndicatorGeometry(width, rounding, detached, continuous)
+}
+
+private data class CommentIndicatorGeometry(
+    val width: Dp,
+    val rounding: Float,
+    val detached: Float,
+    val continuous: Float,
+)
+
+@Composable
+private fun CommentSurface(
+    modifier: Modifier,
+    style: CommentRowStyle,
+    showIndicator: Boolean,
+    indicatorGeometry: CommentIndicatorGeometry = animatedCommentIndicatorGeometry(style, showIndicator),
+    continuationBelow: Float = 0f,
+    indicatorColor: Color,
+    highlighted: Boolean,
+    itemGeometry: CommentRowGeometry? = null,
+    captureSource: Boolean = false,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    content: @Composable () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val shapeRadius = animatedCommentValue(
+        if (style.hasBackground) 8.dp else 0.dp,
+        animateChanges = style.animateChanges,
+        label = "comment corner radius",
+    )
+    val shape = RoundedCornerShape(
+        topStart = if (showIndicator) shapeRadius * indicatorGeometry.rounding else shapeRadius,
+        topEnd = shapeRadius,
+        bottomEnd = shapeRadius,
+        bottomStart = if (showIndicator) shapeRadius * indicatorGeometry.rounding else shapeRadius,
+    )
+    val baseBackground = when {
+        style.hasBackground -> colors.cardBackground
+        style.transparentNonCardBackground -> colors.cardBackground.copy(alpha = 0f)
+        else -> colors.pageBackground
+    }
+    val targetBackground = commentSurfaceColor(baseBackground, colors.onSurface, highlighted)
+    val background = animatedCommentValue(
+        targetBackground,
+        animateChanges = style.animateChanges,
+        label = "comment background",
+    )
+    val shadowPadding = animatedCommentValue(
+        if (style.hasBackground) 4.dp else 0.dp,
+        animateChanges = style.animateChanges,
+        label = "comment card padding",
+    )
+    val verticalShadowPadding = animatedCommentValue(
+        if (style.hasBackground) 4.dp * style.spacingScale else 0.dp,
+        animateChanges = style.animateChanges,
+        label = "comment vertical card padding",
+    )
+    val cardProgress = animatedCommentValue(
+        if (style.cardStyle) 1f else 0f,
+        animateChanges = style.animateChanges,
+        label = "comment card progress",
+    )
+    val outlineAlpha = animatedCommentValue(
+        if (style.showOutline) 1f else 0f,
+        animateChanges = style.animateChanges,
+        label = "comment outline",
+    )
+    val indicatorAlpha = animatedCommentValue(
+        if (showIndicator) 1f else 0f,
+        animateChanges = style.animateChanges,
+        label = "comment indicator",
+    )
+    val indicatorWidth = indicatorGeometry.width
+    val indicatorRadius = if (style.hasBackground) 0.dp else indicatorWidth / 2 * indicatorGeometry.rounding
+    val detachedProgress = indicatorGeometry.detached
+    // Keep the rail aligned with ancestor lines while the card separates from it.
+    val externalInset = (indicatorWidth + 4.dp) * detachedProgress
+    val internalIndicatorWidth = indicatorWidth * (1f - detachedProgress)
+    val indicatorMargin = animatedCommentValue(
+        if (showIndicator || style.hasBackground) {
+            if (style.hasBackground) 4.dp else 8.dp
+        } else 0.dp,
+        animateChanges = style.animateChanges,
+        label = "comment indicator margin",
+    )
+    val contentStartPadding = animatedCommentValue(
+        if (style.hasBackground) 4.5.dp else 5.dp,
+        animateChanges = style.animateChanges,
+        label = "comment content start padding",
+    )
+    val contentEndPadding = animatedCommentValue(
+        if (style.hasBackground) 8.dp else 4.dp,
+        animateChanges = style.animateChanges,
+        label = "comment content end padding",
+    )
+    val contentVerticalPadding = animatedCommentValue(
+        (if (style.hasBackground) 7.dp else 5.dp) * style.spacingScale,
+        animateChanges = style.animateChanges,
+        label = "comment content vertical padding",
+    )
+    SideEffect {
+        itemGeometry?.containerColor = background
+        itemGeometry?.containerCornerRadiusDp = if (style.hasBackground) 8f else 0f
+        itemGeometry?.containerElevationDp = if (style.cardStyle) 1f else 0f
+        itemGeometry?.containerBorderColor = colors.outlineVariant
+        itemGeometry?.containerBorderWidthDp =
+            if (style.showOutline) 1f else 0f
+        if (detachedProgress == 0f) itemGeometry?.indicatorLayer = null
+    }
+    val contentCaptureModifier = if (itemGeometry != null && captureSource) {
+        Modifier.captureCommentActionSourceContent { itemGeometry.contentLayer = it }
+    } else {
+        Modifier
+    }
+    val sourceCaptureModifier = if (itemGeometry == null) {
+        Modifier
+    } else {
+        Modifier
+            // Coordinates stay live as ancestors scroll; resolve window bounds on interaction.
+            .onPlaced { itemGeometry.coordinates = it }
+            .then(contentCaptureModifier)
+    }
+    Column(modifier) {
+        Box(
+            Modifier.fillMaxWidth().padding(horizontal = shadowPadding, vertical = verticalShadowPadding),
+        ) {
+            val indicatorCaptureModifier = if (itemGeometry != null && captureSource && detachedProgress > 0f) {
+                Modifier.captureCommentActionSourceContent { itemGeometry.indicatorLayer = it }
+            } else {
+                Modifier
+            }
+            if (detachedProgress > 0f) Box(
+                Modifier.matchParentSize()
+                    .wrapContentWidth(Alignment.Start)
+                    .width(indicatorWidth)
+                    .onPlaced { itemGeometry?.indicatorCoordinates = it }
+                    .then(indicatorCaptureModifier)
+                    .drawWithCache {
+                        val width = indicatorWidth.roundToPx().toFloat()
+                        val radius = indicatorWidth / 2 * indicatorGeometry.rounding
+                        val outline = RoundedCornerShape(
+                            topStart = radius,
+                            topEnd = radius,
+                            bottomStart = radius * (1f - continuationBelow),
+                            bottomEnd = radius * (1f - continuationBelow),
+                        ).createOutline(Size(width, size.height), layoutDirection, this)
+                        onDrawBehind {
+                            drawOutline(
+                                outline,
+                                indicatorColor.copy(alpha = indicatorColor.alpha * indicatorAlpha * detachedProgress),
+                            )
+                        }
+                    },
+            )
+            Layout(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = externalInset)
+                    .shadow((cardProgress * 1f).dp, shape, clip = false)
+                    .clip(shape)
+                    .background(background)
+                    .drawWithCache {
+                        val outline = shape.createOutline(size, layoutDirection, this)
+                        // The outer half is clipped by the surface shape. Draw before the
+                        // children so an attached depth indicator owns the full start edge,
+                        // including its top and bottom pixels in the shared action transition.
+                        val stroke = Stroke(2.dp.toPx())
+                        onDrawBehind {
+                            drawOutline(
+                                outline,
+                                colors.outlineVariant.copy(alpha = outlineAlpha),
+                                style = stroke,
+                            )
+                        }
+                    }
+                    .combinedClickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = ripple(color = colors.onSurfaceVariant.copy(alpha = 0.35f)),
+                        onClick = onClick,
+                        onLongClick = onLongClick,
+                    )
+                    .then(
+                        onLongClick?.let { callback ->
+                            Modifier.onSecondaryClick { callback() }
+                        } ?: Modifier,
+                    )
+                    .then(sourceCaptureModifier),
+                content = {
+                    Box(
+                        Modifier
+                            .width(internalIndicatorWidth)
+                            .graphicsLayer(alpha = indicatorAlpha * (1f - detachedProgress))
+                            .background(
+                                indicatorColor,
+                                RoundedCornerShape(
+                                    topStart = indicatorRadius,
+                                    topEnd = indicatorRadius,
+                                    bottomStart = indicatorRadius * (1f - continuationBelow),
+                                    bottomEnd = indicatorRadius * (1f - continuationBelow),
+                                ),
+                            ),
+                    )
+                    Column(
+                        Modifier.padding(
+                            start = contentStartPadding + 4.dp * detachedProgress,
+                            top = contentVerticalPadding,
+                            end = contentEndPadding,
+                            bottom = contentVerticalPadding,
+                        ),
+                    ) { content() }
+                },
+            ) { measurables, constraints ->
+                val indicatorWidthPx = internalIndicatorWidth.roundToPx()
+                    .coerceAtMost(constraints.maxWidth)
+                val indicatorMarginPx = (indicatorMargin * (1f - detachedProgress)).roundToPx()
+                    .coerceAtMost((constraints.maxWidth - indicatorWidthPx).coerceAtLeast(0))
+                val contentWidth = (
+                    constraints.maxWidth - indicatorWidthPx - indicatorMarginPx
+                ).coerceAtLeast(0)
+                val contentPlaceable = measurables[1].measure(
+                    constraints.copy(
+                        minWidth = contentWidth,
+                        maxWidth = contentWidth,
+                        minHeight = 0,
+                    ),
+                )
+                val rowHeight = contentPlaceable.height
+                val indicatorPlaceable = measurables[0].measure(
+                    constraints.copy(
+                        minWidth = indicatorWidthPx,
+                        maxWidth = indicatorWidthPx,
+                        minHeight = rowHeight,
+                        maxHeight = rowHeight,
+                    ),
+                )
+
+                layout(constraints.maxWidth, rowHeight) {
+                    indicatorPlaceable.placeRelative(0, 0)
+                    contentPlaceable.placeRelative(
+                        indicatorWidthPx + indicatorMarginPx,
+                        0,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun commentDepthColor(mode: String, depth: Int, author: String): Color {
+    val selection = LocalHarmonicUiDependencies.current.appearance.selection()
+    val scheme = MaterialTheme.colorScheme
+    return remember(mode, selection.colorScheme, selection.dark, depth, author, scheme) {
+        CommentDepthPaletteCatalog.color(mode, selection.colorScheme, selection.dark, depth, author, scheme)
+    }
+}
+
+private val animatedCommentTextStyle = TextStyle(
+    textMotion = TextMotion.Animated,
+)
+
+internal val compactCommentTextStyle = TextStyle(
+    textMotion = TextMotion.Static,
+)

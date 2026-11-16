@@ -1,0 +1,377 @@
+package com.simon.harmonichackernews.network
+
+import com.fleeksoft.ksoup.Ksoup
+import com.simon.harmonichackernews.platform.CloudEndpointAccess
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
+import kotlinx.io.IOException
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlin.math.roundToLong
+
+data class CloudSummaryConfig(
+    val baseUrl: String,
+    val apiKey: String,
+    val model: String,
+    val systemPrompt: String = CloudSummaryDefaults.SYSTEM_PROMPT,
+    val streamResponses: Boolean = true,
+    val inputCharacterLimit: Int = 15_000,
+)
+
+sealed interface CloudSummaryEvent {
+    data class DebugInfo(val value: String) : CloudSummaryEvent
+    data class Progress(val summary: String) : CloudSummaryEvent
+    data class Success(val summary: String) : CloudSummaryEvent
+}
+
+interface CloudSummaryRepository {
+    suspend fun fetchModelIds(baseUrl: String, apiKey: String): List<String>
+    suspend fun extractMainContent(url: String): String
+    fun summarize(config: CloudSummaryConfig, text: String?): Flow<CloudSummaryEvent>
+}
+
+class KtorCloudSummaryRepository(
+    private val client: KtorHttpClient,
+    private val articleUserAgent: String,
+    private val requestDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val endpointAccess: CloudEndpointAccess = CloudEndpointAccess.Unrestricted,
+) : CloudSummaryRepository {
+    override suspend fun fetchModelIds(baseUrl: String, apiKey: String): List<String> = withContext(requestDispatcher) {
+        endpointAccess.ensureAccess(baseUrl)
+        val requestBuilder = HttpRequest.Builder().url(joinUrl(baseUrl, "models"))
+        if (apiKey.isNotBlank()) requestBuilder.header("Authorization", "Bearer $apiKey")
+        val response = client.execute(requestBuilder.get().build(), maxBytes = MAX_MODEL_CATALOG_BYTES)
+        try {
+            val body = response.body.readText(MAX_MODEL_CATALOG_BYTES)
+            if (!response.isSuccessful) throw CloudSummaryException(
+                "Could not load models (HTTP ${response.code})",
+            )
+            runCatching {
+                jsonParser.parseToJsonElement(body).jsonObject["data"]
+                    ?.jsonArray
+                    .orEmpty()
+                    .mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull }
+            }.getOrElse { throw CloudSummaryException("Failed to parse models", it) }
+        } finally {
+            response.close()
+        }
+    }
+
+    override suspend fun extractMainContent(url: String): String = withContext(requestDispatcher) {
+        val request = HttpRequest.Builder()
+            .url(url)
+            .header("User-Agent", articleUserAgent)
+            .get()
+            .build()
+        val response = client.newBuilder().readTimeoutMillis(10_000).build().execute(request, maxBytes = MAX_ARTICLE_BYTES)
+        try {
+            if (!response.isSuccessful) {
+                throw CloudSummaryException(if (response.header("x-vercel-mitigated") == "challenge")
+                    "Article requires browser verification (HTTP ${response.code})" else "Article returned HTTP ${response.code}")
+            }
+            val document = Ksoup.parse(response.body.readText(MAX_ARTICLE_BYTES), baseUri = url)
+            val text = document.body().text()
+            if (!com.simon.harmonichackernews.presentation.WebContentPageText.isReady(text) ||
+                document.title().contains("Vercel Security Checkpoint", ignoreCase = true)) {
+                throw CloudSummaryException(if (text.isBlank()) "Article page contained no readable text"
+                    else "Article requires browser verification")
+            }
+            text
+        } finally {
+            response.close()
+        }
+    }
+
+    override fun summarize(
+        config: CloudSummaryConfig,
+        text: String?,
+    ): Flow<CloudSummaryEvent> = channelFlow {
+        if (config.apiKey.isBlank()) throw CloudSummaryException("API Key missing")
+        val model = AiSummaryProviders.getModelForRequest(config.baseUrl, config.model)
+        if (model.isBlank()) {
+            throw CloudSummaryException(
+                "Model missing. Open AI features settings and choose a model.",
+            )
+        }
+        endpointAccess.ensureAccess(config.baseUrl)
+        send(CloudSummaryEvent.DebugInfo("$model · load —"))
+
+        val anthropic = AiSummaryProviders.isAnthropicBaseUrl(config.baseUrl)
+        val payload = buildPayload(
+            anthropic = anthropic,
+            model = model,
+            prompt = config.systemPrompt,
+            text = text.orEmpty().trim().take(config.inputCharacterLimit),
+            stream = config.streamResponses,
+        )
+        val requestBuilder = HttpRequest.Builder()
+            .url(joinUrl(config.baseUrl, if (anthropic) "messages" else "chat/completions"))
+            .header(
+                "Accept",
+                if (config.streamResponses) "text/event-stream" else "application/json",
+            )
+        if (anthropic) {
+            requestBuilder
+                .header("x-api-key", config.apiKey)
+                .header("anthropic-version", "2023-06-01")
+        } else {
+            requestBuilder.header("Authorization", "Bearer ${config.apiKey}")
+        }
+        val request = requestBuilder.post(
+            payload.toString().toHttpRequestBody(
+                "application/json; charset=utf-8".toHttpMediaType(),
+            ),
+        ).build()
+        try {
+            // Keep the response open while consuming events. Buffered execute() waits for EOF
+            // before exposing the first token. A finite deadline still bounds provider requests.
+            client.newBuilder().readTimeoutMillis(120_000).build().executeStreaming(
+                request,
+                requestTimeoutMillis = 120_000,
+            ) { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body.readText(MAX_ERROR_BODY_BYTES)
+                    throw CloudSummaryException(
+                        "API error: ${apiErrorMessage(errorBody, response.message)}",
+                    )
+                }
+                if (config.streamResponses) {
+                    readStream(response.body, anthropic) { summary ->
+                        send(CloudSummaryEvent.Progress(summary))
+                    }.also { send(CloudSummaryEvent.Success(it)) }
+                } else {
+                    val summary = parseNonStreamingResponse(
+                        response.body.readText(MAX_SUMMARY_RESPONSE_BYTES),
+                        anthropic,
+                    )
+                    if (summary.isBlank()) throw CloudSummaryException("API response error")
+                    send(CloudSummaryEvent.Success(summary))
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: CloudSummaryException) {
+            throw error
+        } catch (error: Throwable) {
+            throw CloudSummaryException("API error: ${error.readableMessage()}", error)
+        }
+    }.flowOn(requestDispatcher)
+
+    private suspend fun readStream(
+        body: HttpResponseBody,
+        anthropic: Boolean,
+        onProgress: suspend (String) -> Unit,
+    ): String = coroutineScope {
+        val summary = StreamingSummaryText(this, MAX_SUMMARY_RESPONSE_BYTES, onProgress)
+        val eventData = StringBuilder()
+        val plainResponse = StringBuilder()
+        var sawSseData = false
+        var complete = false
+        while (!complete) {
+            val line = body.readUtf8Line() ?: break
+            when {
+                line.isEmpty() -> if (eventData.isNotEmpty()) {
+                    sawSseData = true
+                    complete = appendStreamEvent(
+                        eventData.toString(),
+                        anthropic,
+                        summary,
+                    )
+                    eventData.clear()
+                }
+
+                line.startsWith("data:") -> {
+                    if (eventData.isNotEmpty()) eventData.append('\n')
+                    eventData.append(line.substring(5).trim())
+                    if (eventData.length > MAX_STREAM_EVENT_CHARS) {
+                        throw CloudSummaryException("Streaming event exceeded the response limit")
+                    }
+                }
+
+                !line.startsWith(":") -> {
+                    if (plainResponse.isNotEmpty()) plainResponse.append('\n')
+                    plainResponse.append(line)
+                    if (plainResponse.length > MAX_SUMMARY_RESPONSE_BYTES) {
+                        throw CloudSummaryException("API response exceeded the response limit")
+                    }
+                }
+            }
+        }
+        if (!complete && eventData.isNotEmpty()) {
+            sawSseData = true
+            complete = appendStreamEvent(eventData.toString(), anthropic, summary)
+        }
+        if (sawSseData && !complete) {
+            throw CloudSummaryException("Response ended before completion. Please try again.")
+        }
+        if (!sawSseData && plainResponse.isNotEmpty()) {
+            summary.append(parseNonStreamingResponse(plainResponse.toString(), anthropic))
+        }
+        summary.finish().also {
+            if (it.isEmpty()) throw CloudSummaryException("API response error")
+        }
+    }
+
+    private suspend fun appendStreamEvent(
+        data: String,
+        anthropic: Boolean,
+        summary: StreamingSummaryText,
+    ): Boolean {
+        if (!anthropic && data == "[DONE]") return true
+        val event = parseCloudSummaryObject(data, "Invalid streaming response")
+        if (event.string("type") == "error" || "error" in event) {
+            throw CloudSummaryException(apiErrorMessage(data, "Streaming request failed"))
+        }
+        val chunk = parseCloudSummaryStreamChunk(event, anthropic)
+        summary.append(chunk)
+        return if (anthropic) {
+            event.string("type") == "message_stop"
+        } else {
+            !event.arrayValue("choices")?.firstOrNull()?.asObject()
+                ?.string("finish_reason").isNullOrBlank()
+        }
+    }
+
+    private fun parseNonStreamingResponse(responseBody: String, anthropic: Boolean): String =
+        parseCloudSummaryResponseText(
+            parseCloudSummaryObject(responseBody, "Invalid API response"),
+            anthropic,
+        )
+
+    private fun buildPayload(
+        anthropic: Boolean,
+        model: String,
+        prompt: String,
+        text: String,
+        stream: Boolean,
+    ): JsonObject = buildJsonObject {
+        put("model", model)
+        put("stream", stream)
+        if (anthropic) {
+            put("max_tokens", CLOUD_SUMMARY_MAX_OUTPUT_TOKENS)
+            put("system", prompt)
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", text)
+                })
+            })
+        } else {
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "system")
+                    put("content", prompt)
+                })
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", text)
+                })
+            })
+        }
+    }
+
+    private fun apiErrorMessage(body: String?, fallback: String): String {
+        if (body.isNullOrBlank()) return fallback
+        return runCatching {
+            val responseJson = jsonParser.parseToJsonElement(body).jsonObject
+            when (val error = responseJson["error"]) {
+                is JsonObject -> error.string("message") ?: fallback
+                is JsonPrimitive -> error.contentOrNull ?: fallback
+                else -> responseJson.string("message") ?: fallback
+            }
+        }.getOrDefault(fallback)
+    }
+
+    private companion object {
+        const val CLOUD_SUMMARY_MAX_OUTPUT_TOKENS = 1000
+        const val MAX_MODEL_CATALOG_BYTES = 2 * 1024 * 1024
+        const val MAX_ARTICLE_BYTES = 4 * 1024 * 1024
+        const val MAX_ERROR_BODY_BYTES = 128 * 1024
+        const val MAX_SUMMARY_RESPONSE_BYTES = 2 * 1024 * 1024
+        const val MAX_STREAM_EVENT_CHARS = 256 * 1024
+    }
+}
+
+/** Extracts a provider response chunk, treating an explicit JSON null as no content. */
+internal fun parseCloudSummaryStreamChunk(event: JsonObject, anthropic: Boolean): String =
+    if (anthropic) {
+        event.objectValue("delta")?.string("text").orEmpty()
+    } else {
+        event.arrayValue("choices")
+            ?.firstOrNull()
+            ?.asObject()
+            ?.objectValue("delta")
+            ?.string("content")
+            .orEmpty()
+    }
+
+/** Extracts a complete provider response, treating an explicit JSON null as no content. */
+internal fun parseCloudSummaryResponseText(response: JsonObject, anthropic: Boolean): String =
+    if (anthropic) {
+        response.arrayValue("content")
+            .orEmpty()
+            .mapNotNull { it.asObject()?.string("text")?.takeIf(String::isNotEmpty) }
+            .joinToString("\n")
+    } else {
+        response.arrayValue("choices")
+            ?.firstOrNull()
+            ?.asObject()
+            ?.objectValue("message")
+            ?.string("content")
+            .orEmpty()
+    }
+
+private fun parseCloudSummaryObject(value: String, errorMessage: String): JsonObject = runCatching {
+    jsonParser.parseToJsonElement(value).jsonObject
+}.getOrElse { throw CloudSummaryException(errorMessage, it) }
+
+private val jsonParser = Json { ignoreUnknownKeys = true }
+
+object CloudSummaryDefaults {
+    const val SYSTEM_PROMPT =
+        "You are a helpful assistant that is an expert on summarizing articles into an information-dense, concise and brief bullet-point list. Focus on key takeaways and most important/note-worthy points in the article. Keep the summary under 500 characters where possible. Respond in markdown format. Respond with only the summarized content - nothing else before or after."
+}
+
+class CloudSummaryException(message: String, cause: Throwable? = null) :
+    IOException(message, cause)
+
+object SummaryFormatting {
+    fun formatLoadInfo(modelName: String?, loadMillis: Long): String = if (loadMillis < 1_000L) {
+        "$modelName · $loadMillis ms load"
+    } else {
+        "$modelName · ${formatOneDecimal(loadMillis / 1_000.0)} s load"
+    }
+
+    private fun formatOneDecimal(value: Double): String =
+        ((value * 10.0).roundToLong() / 10.0).toString()
+}
+
+private fun joinUrl(baseUrl: String?, path: String): String =
+    AiSummaryProviders.normalizeUrl(baseUrl) + "/" + path
+
+private fun Throwable.readableMessage(): String = message?.takeIf(String::isNotEmpty) ?: "Unknown error"
+
+private fun JsonObject.string(key: String): String? =
+    this[key]?.let { it as? JsonPrimitive }?.contentOrNull
+
+private fun JsonObject.objectValue(key: String): JsonObject? = this[key] as? JsonObject
+
+private fun JsonObject.arrayValue(key: String): JsonArray? = this[key] as? JsonArray
+
+private fun JsonElement.asObject(): JsonObject? = this as? JsonObject

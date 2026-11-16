@@ -1,0 +1,515 @@
+package com.simon.harmonichackernews.summary
+
+import com.simon.harmonichackernews.settings.TestKeyValueStore
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+class LocalModelServiceTest {
+    @Test
+    fun thirtyTwoBitModelsAreBlockedBeforeRuntimeDeliveryEvenOnOlderAndroid() = runTest {
+        for (supportsPlatform in listOf(false, true)) {
+            val service = LocalModelService(
+                TestKeyValueStore(), EmptyStorage, RecordingTransfers(),
+                object : LocalModelRuntimeDelivery by RecordingRuntimeDelivery() {
+                    override suspend fun request(model: LocalModelDefinition): String? =
+                        error("Unsupported models must not request runtime delivery")
+                },
+                LocalModelDeviceCapabilities(supportsPlatform, false),
+                listOf(BuiltInModel, DownloadableModel, LocalModelCatalog.embeddingModel),
+                scope = backgroundScope,
+                storageDispatcher = StandardTestDispatcher(testScheduler),
+            )
+            service.preload()
+            for (model in listOf(DownloadableModel, LocalModelCatalog.embeddingModel)) {
+                assertFalse(service.isSupported(model))
+                assertEquals("On-device AI is unavailable on 32-bit devices", service.unsupportedReason(model))
+                assertEquals("On-device AI is unavailable on 32-bit devices.", service.requestRuntimeAndModelDownload(model.id))
+                assertEquals("On-device AI is unavailable on 32-bit devices.", service.requestModelDownload(model.id))
+                assertFalse(service.presentation(model, true, false).selectable)
+            }
+            service.close()
+        }
+    }
+
+    @Test
+    fun failedRefreshRetainsCompleteSnapshotAndWorkerRecoversFromStorageOrRuntimeFailure() = runTest {
+        for (failStorage in listOf(true, false)) {
+            var fail = false
+            var downloaded = false
+            val storage = object : LocalModelStorage by EmptyStorage {
+                override fun snapshot(model: LocalModelDefinition): LocalModelStorageSnapshot {
+                    if (fail && failStorage) throw IllegalStateException("Storage unavailable")
+                    return LocalModelStorageSnapshot(
+                        finalFileBytes = model.sizeBytes.takeIf { model.downloadable && downloaded },
+                    )
+                }
+            }
+            val delivery = object : LocalModelRuntimeDelivery by RecordingRuntimeDelivery() {
+                override fun status(runtime: LocalModelRuntime): LocalRuntimeInstallStatus {
+                    if (fail && !failStorage) throw IllegalStateException("Runtime unavailable")
+                    return LocalRuntimeInstallStatus(LocalRuntimeInstallState.INSTALLED, runtime = runtime)
+                }
+            }
+            val service = LocalModelService(
+                TestKeyValueStore(), storage, RecordingTransfers(), delivery,
+                LocalModelDeviceCapabilities(true, true), listOf(BuiltInModel, DownloadableModel),
+                scope = backgroundScope,
+                storageDispatcher = StandardTestDispatcher(testScheduler),
+            )
+            service.preload()
+            val previous = service.cachedState.value
+            assertFalse(service.isDownloaded(DownloadableModel))
+
+            downloaded = true
+            fail = true
+            service.refresh()
+            runCurrent()
+            assertEquals(previous, service.cachedState.value)
+
+            fail = false
+            service.refresh()
+            runCurrent()
+            assertTrue(service.isDownloaded(DownloadableModel))
+            service.close()
+        }
+    }
+
+    @Test
+    fun failedInitialPreloadCanRecoverOnNextRefresh() = runTest {
+        var fail = true
+        val service = LocalModelService(
+            TestKeyValueStore(),
+            object : LocalModelStorage by EmptyStorage {
+                override fun snapshot(model: LocalModelDefinition): LocalModelStorageSnapshot {
+                    if (fail) throw IllegalStateException("Storage unavailable")
+                    return LocalModelStorageSnapshot()
+                }
+            },
+            RecordingTransfers(), RecordingRuntimeDelivery(),
+            LocalModelDeviceCapabilities(true, true), listOf(BuiltInModel, DownloadableModel),
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        service.preload()
+        assertTrue(service.cachedState.value.statuses.isEmpty())
+
+        fail = false
+        service.refresh()
+        runCurrent()
+        assertEquals(2, service.cachedState.value.statuses.size)
+        assertEquals(2, service.cachedState.value.runtimeStatuses.size)
+    }
+
+    @Test
+    fun preloadPropagatesCancellation() = runTest {
+        val service = LocalModelService(
+            TestKeyValueStore(),
+            object : LocalModelStorage by EmptyStorage {
+                override fun snapshot(model: LocalModelDefinition): LocalModelStorageSnapshot =
+                    throw CancellationException("Storage inspection cancelled")
+            },
+            RecordingTransfers(), RecordingRuntimeDelivery(),
+            LocalModelDeviceCapabilities(true, true), listOf(BuiltInModel, DownloadableModel),
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertFailsWith<CancellationException> { service.preload() }
+        assertTrue(service.cachedState.value.statuses.isEmpty())
+    }
+
+    @Test
+    fun successfulDirectRetryClearsHandoffErrorAndMakesDownloadedModelSelectable() = runTest {
+        var runtimeStatus = LocalRuntimeInstallStatus(
+            state = LocalRuntimeInstallState.INSTALLED,
+            runtime = DownloadableModel.runtime,
+            pendingModelId = DownloadableModel.id,
+            modelDownloadError = "Not enough storage",
+        )
+        var freeSpace = 0L
+        var downloaded = false
+        var runtimeRequests = 0
+        val transfers = RecordingTransfers()
+        val delivery = object : LocalModelRuntimeDelivery by RecordingRuntimeDelivery() {
+            override fun isInstalled(runtime: LocalModelRuntime) = true
+            override fun status(runtime: LocalModelRuntime) = runtimeStatus.copy(runtime = runtime)
+            override suspend fun request(model: LocalModelDefinition): String? {
+                runtimeRequests++
+                return null
+            }
+            override fun clearModelDownloadError(modelId: String) {
+                if (runtimeStatus.pendingModelId == modelId) {
+                    runtimeStatus = runtimeStatus.copy(pendingModelId = "", modelDownloadError = "")
+                }
+            }
+        }
+        val storage = object : LocalModelStorage by EmptyStorage {
+            override fun snapshot(model: LocalModelDefinition) = LocalModelStorageSnapshot(
+                finalFileBytes = model.sizeBytes.takeIf { model.downloadable && downloaded },
+                usableSpaceBytes = freeSpace,
+            )
+            override fun prepareDownload(model: LocalModelDefinition) = LocalModelStoragePreparation.Ready(snapshot(model))
+        }
+        val service = LocalModelService(
+            TestKeyValueStore(), storage, transfers, delivery,
+            LocalModelDeviceCapabilities(true, true), listOf(BuiltInModel, DownloadableModel),
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        service.preload()
+        val failed = service.presentation(DownloadableModel, true, false)
+        assertTrue(failed.summary.endsWith("Not enough storage"))
+        assertFalse(failed.selectable)
+        assertEquals(LocalModelPresentationAction.DOWNLOAD_MODEL, failed.action)
+        assertNotNull(service.requestRuntimeAndModelDownload(DownloadableModel.id))
+        assertEquals("Not enough storage", runtimeStatus.modelDownloadError)
+
+        freeSpace = Long.MAX_VALUE
+        assertNull(service.requestRuntimeAndModelDownload(DownloadableModel.id))
+        assertEquals(0, runtimeRequests, "An installed runtime retries the model directly")
+        assertEquals(listOf(DownloadableModel.id), transfers.enqueued)
+        assertEquals("", runtimeStatus.modelDownloadError)
+        downloaded = true
+        service.refresh()
+        assertTrue(service.select(DownloadableModel.id))
+        service.preload()
+        val complete = service.presentation(DownloadableModel, true, false)
+        assertTrue(complete.selectable)
+        assertTrue(complete.selected)
+        assertTrue(complete.summary.endsWith("Downloaded"))
+    }
+
+    @Test
+    fun transferMonitoringStartsWhenTransferStateIsRequested() = runTest {
+        val transfers = RecordingTransfers()
+        val runtimeDelivery = RecordingRuntimeDelivery()
+        val service = LocalModelService(
+            preferences = TestKeyValueStore(),
+            storage = EmptyStorage,
+            transfers = transfers,
+            runtimeDelivery = runtimeDelivery,
+            capabilities = LocalModelDeviceCapabilities(
+                supportsDownloadableModels = true,
+                supportsLiteRtModels = true,
+            ),
+            models = listOf(BuiltInModel, DownloadableModel),
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertEquals(BuiltInModel, service.selectedModel)
+        assertEquals(0, transfers.observerRegistrations)
+        assertEquals(0, transfers.workReads)
+        assertEquals(0, runtimeDelivery.observerRegistrations)
+
+        service.state.value
+        service.state.value
+        runCurrent()
+
+        assertEquals(1, transfers.observerRegistrations)
+        assertEquals(2, transfers.workReads)
+        assertEquals(1, runtimeDelivery.observerRegistrations)
+    }
+
+    @Test
+    fun preloadFillsCacheWithoutRegisteringPlatformObservers() = runTest {
+        val transfers = RecordingTransfers()
+        val runtimeDelivery = RecordingRuntimeDelivery()
+        val service = LocalModelService(
+            preferences = TestKeyValueStore(),
+            storage = EmptyStorage,
+            transfers = transfers,
+            runtimeDelivery = runtimeDelivery,
+            capabilities = LocalModelDeviceCapabilities(
+                supportsDownloadableModels = true,
+                supportsLiteRtModels = true,
+            ),
+            models = listOf(BuiltInModel, DownloadableModel),
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertTrue(service.cachedState.value.statuses.isEmpty())
+        assertEquals(0, transfers.workReads)
+
+        service.preload()
+
+        assertEquals(2, service.cachedState.value.statuses.size)
+        assertEquals(2, service.cachedState.value.runtimeStatuses.size)
+        assertEquals(2, transfers.workReads)
+        assertEquals(2, runtimeDelivery.statusReads)
+        assertEquals(0, transfers.observerRegistrations)
+        assertEquals(0, runtimeDelivery.observerRegistrations)
+
+        service.catalog.forEach { model ->
+            service.presentation(
+                model = model,
+                nanoAvailabilityResolved = true,
+                nanoAvailable = false,
+                managerState = service.cachedState.value,
+            )
+        }
+        assertEquals(2, transfers.workReads)
+        assertEquals(2, runtimeDelivery.statusReads)
+
+        transfers.invokeObserverOnRegistration = true
+        runtimeDelivery.invokeObserverOnRegistration = true
+        service.startMonitoring()
+
+        assertEquals(2, transfers.workReads)
+        assertEquals(1, transfers.observerRegistrations)
+        assertEquals(1, runtimeDelivery.observerRegistrations)
+    }
+
+    @Test
+    fun changingStorageDirectoryRefreshesStorageAndClearsUnavailableSelection() = runTest {
+        val transfers = RecordingTransfers()
+        val location = RecordingStorageLocation("old")
+        val service = LocalModelService(
+            preferences = TestKeyValueStore(),
+            storage = LocationAwareStorage(location),
+            transfers = transfers,
+            runtimeDelivery = RecordingRuntimeDelivery(),
+            capabilities = LocalModelDeviceCapabilities(
+                supportsDownloadableModels = true,
+                supportsLiteRtModels = true,
+            ),
+            models = listOf(BuiltInModel, DownloadableModel),
+            storageLocation = location,
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertTrue(service.select(DownloadableModel.id))
+        assertEquals(DownloadableModel, service.selectedModel)
+
+        assertNull(service.changeStorageDirectory("new"))
+
+        assertEquals("new", service.storageDirectoryPath)
+        assertEquals(BuiltInModel, service.selectedModel)
+        assertEquals(1, transfers.resets)
+    }
+
+    @Test
+    fun reportsAndClearsAllStoredModelBytesThroughTheOwningService() = runTest {
+        val storage = RecordingClearStorage()
+        val transfers = RecordingTransfers()
+        val service = LocalModelService(
+            preferences = TestKeyValueStore(),
+            storage = storage,
+            transfers = transfers,
+            runtimeDelivery = RecordingRuntimeDelivery(),
+            capabilities = LocalModelDeviceCapabilities(
+                supportsDownloadableModels = true,
+                supportsLiteRtModels = true,
+            ),
+            models = listOf(BuiltInModel, DownloadableModel),
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertTrue(service.select(DownloadableModel.id))
+        assertEquals(1_500L, service.storedModelBytes())
+        assertEquals(listOf(DownloadableModel.displayName), service.storedModelNames())
+
+        assertTrue(service.clearStoredModels())
+
+        assertEquals(0L, service.storedModelBytes())
+        assertTrue(storage.cleared)
+        assertEquals(listOf(DownloadableModel.id), transfers.cancelled)
+        assertEquals(BuiltInModel, service.selectedModel)
+    }
+
+    @Test
+    fun storedModelNamesIncludesPartialDownloads() = runTest {
+        val service = LocalModelService(
+            preferences = TestKeyValueStore(),
+            storage = object : LocalModelStorage by EmptyStorage {
+                override fun snapshot(model: LocalModelDefinition) = LocalModelStorageSnapshot(
+                    partialFileBytes = 400L.takeIf { model.downloadable } ?: 0L,
+                )
+            },
+            transfers = RecordingTransfers(),
+            runtimeDelivery = RecordingRuntimeDelivery(),
+            capabilities = LocalModelDeviceCapabilities(
+                supportsDownloadableModels = true,
+                supportsLiteRtModels = true,
+            ),
+            models = listOf(BuiltInModel, DownloadableModel),
+            scope = backgroundScope,
+            storageDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        assertEquals(listOf(DownloadableModel.displayName), service.storedModelNames())
+    }
+
+    private class RecordingTransfers : LocalModelTransferScheduler {
+        var observerRegistrations = 0
+        var workReads = 0
+        var resets = 0
+        var invokeObserverOnRegistration = false
+        val cancelled = mutableListOf<String>()
+        val enqueued = mutableListOf<String>()
+
+        override fun work(modelId: String): LocalModelWorkSnapshot? {
+            workReads += 1
+            return null
+        }
+
+        override fun isActive(modelId: String): Boolean = false
+
+        override fun enqueue(model: LocalModelDefinition) { enqueued += model.id }
+
+        override fun cancel(modelId: String, onCancelled: () -> Unit) {
+            cancelled += modelId
+            onCancelled()
+        }
+
+        override fun setObserver(observer: () -> Unit) {
+            observerRegistrations += 1
+            if (invokeObserverOnRegistration) observer()
+        }
+
+        override fun reset() {
+            resets += 1
+        }
+    }
+
+    private class RecordingRuntimeDelivery : LocalModelRuntimeDelivery {
+        var observerRegistrations = 0
+        var statusReads = 0
+        var invokeObserverOnRegistration = false
+        override val included = false
+
+        override fun status(runtime: LocalModelRuntime): LocalRuntimeInstallStatus {
+            statusReads += 1
+            return LocalRuntimeInstallStatus(
+                LocalRuntimeInstallState.NOT_INSTALLED,
+                runtime = runtime,
+            )
+        }
+
+        override fun isInstalled(runtime: LocalModelRuntime) = false
+
+        override suspend fun request(model: LocalModelDefinition): String? = null
+
+        override fun cancel(runtime: LocalModelRuntime) = Unit
+
+        override fun setObserver(observer: () -> Unit) {
+            observerRegistrations += 1
+            if (invokeObserverOnRegistration) observer()
+        }
+
+        override fun setModelDownloadStarter(starter: suspend (String) -> String?) = Unit
+
+        override fun engineClassName(runtime: LocalModelRuntime): String? = null
+
+        override fun runtimeLabel(runtime: LocalModelRuntime) = runtime.name
+    }
+
+    private data object EmptyStorage : LocalModelStorage {
+        override fun snapshot(model: LocalModelDefinition) = LocalModelStorageSnapshot()
+
+        override fun prepareDownload(model: LocalModelDefinition) =
+            LocalModelStoragePreparation.Ready(LocalModelStorageSnapshot())
+
+        override fun remove(model: LocalModelDefinition, includeFinalFile: Boolean) = Unit
+
+        override fun installedPath(model: LocalModelDefinition) = ""
+
+        override fun storedBytes() = 0L
+
+        override fun clearStoredModels() = true
+    }
+
+    private class RecordingStorageLocation(
+        override var directoryPath: String,
+    ) : LocalModelStorageLocation {
+        override fun changeDirectory(path: String): String? {
+            directoryPath = path
+            return null
+        }
+    }
+
+    private class LocationAwareStorage(
+        private val location: RecordingStorageLocation,
+    ) : LocalModelStorage {
+        override fun snapshot(model: LocalModelDefinition) = LocalModelStorageSnapshot(
+            finalFileBytes = model.sizeBytes.takeIf {
+                model.downloadable && location.directoryPath == "old"
+            },
+        )
+
+        override fun prepareDownload(model: LocalModelDefinition) =
+            LocalModelStoragePreparation.Ready(snapshot(model))
+
+        override fun remove(model: LocalModelDefinition, includeFinalFile: Boolean) = Unit
+
+        override fun installedPath(model: LocalModelDefinition) = location.directoryPath
+
+        override fun storedBytes() = 0L
+
+        override fun clearStoredModels() = true
+    }
+
+    private class RecordingClearStorage : LocalModelStorage {
+        var bytes = 1_500L
+        var cleared = false
+
+        override fun snapshot(model: LocalModelDefinition) = LocalModelStorageSnapshot(
+            finalFileBytes = model.sizeBytes.takeIf { model.downloadable },
+        )
+
+        override fun prepareDownload(model: LocalModelDefinition) =
+            LocalModelStoragePreparation.Ready(snapshot(model))
+
+        override fun remove(model: LocalModelDefinition, includeFinalFile: Boolean) = Unit
+
+        override fun installedPath(model: LocalModelDefinition) = "model.litertlm"
+
+        override fun storedBytes() = bytes
+
+        override fun clearStoredModels(): Boolean {
+            cleared = true
+            bytes = 0L
+            return true
+        }
+    }
+
+    private companion object {
+        val BuiltInModel = LocalModelDefinition(
+            id = LocalModelCatalog.MODEL_GEMINI_NANO,
+            displayName = "Built in",
+            parameterSize = "",
+            quantization = "",
+            brand = LocalModelBrand.GOOGLE,
+            fileName = "",
+            url = "",
+            sizeBytes = 0,
+            downloadable = false,
+            runtime = LocalModelRuntime.GEMINI_NANO,
+            contextTokens = 0,
+        )
+        val DownloadableModel = BuiltInModel.copy(
+            id = "downloadable",
+            displayName = "Downloadable",
+            fileName = "model.litertlm",
+            url = "https://example.com/model.litertlm",
+            sizeBytes = 1_000,
+            downloadable = true,
+            runtime = LocalModelRuntime.LITERT_LM,
+            contextTokens = 2_048,
+        )
+    }
+}

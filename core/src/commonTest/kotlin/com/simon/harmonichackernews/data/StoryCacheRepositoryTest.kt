@@ -1,0 +1,360 @@
+package com.simon.harmonichackernews.data
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.assertNotNull
+import kotlinx.coroutines.test.runTest
+import com.simon.harmonichackernews.network.AlgoliaCommentsParser
+
+class StoryCacheRepositoryTest {
+    @Test
+    fun downloadedCommentsAreUnviewedUntilDisplayedAndVisitMetadataFollowsCacheLifetime() {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val cache = StoryCacheRepository(files, metadata, maximumStories = 1)
+        cache.storeStory(42, storyJson(42, "Downloaded"), 1_000)
+        assertFalse(cache.hasViewedComments(42))
+        cache.markCommentsViewed(42)
+        assertTrue(StoryCacheRepository(files, metadata).hasViewedComments(42))
+        cache.storeStory(42, storyJson(42, "Recached"), 2_000)
+        assertTrue(cache.hasViewedComments(42))
+        cache.storeStory(43, storyJson(43, "Other"), 3_000)
+        assertFalse(cache.hasViewedComments(42), "Eviction clears the visit record")
+        cache.markCommentsViewed(43)
+        cache.remove(43)
+        assertFalse(cache.hasViewedComments(43))
+        cache.storeStory(44, storyJson(44, "Last"), 4_000)
+        cache.markCommentsViewed(44)
+        cache.clear()
+        assertFalse(cache.hasViewedComments(44))
+    }
+
+    @Test
+    fun readerCannotDeleteAFileAwaitingCommitMetadata() {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val repository = StoryCacheRepository(files, metadata)
+        // FileDownloadStore has moved the new bytes but onCommit has not run yet.
+        files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "42.html", "new article".encodeToByteArray())
+        assertNull(repository.loadArticle(42, 1_000))
+        assertTrue(files.contains(StoryCacheKeys.ARTICLE_NAMESPACE, "42.html"))
+        repository.recordArticleMetadata(42, "https://final.test/article", "text/html")
+        assertEquals("new article", repository.loadArticle(42, 2_000))
+        assertEquals("https://final.test/article", repository.articleUrl(42))
+    }
+
+    @Test
+    fun legacyArticleOriginIsRejectedUntilRedownloaded() {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val repository = StoryCacheRepository(files, metadata)
+        files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "42.html", "legacy active HTML".encodeToByteArray())
+        metadata.putString(StoryCacheKeys.articleUrlKey(42), "https://original.test/redirect")
+        assertNull(repository.loadArticle(42, 1_000))
+        assertTrue(files.contains(StoryCacheKeys.ARTICLE_NAMESPACE, "42.html"))
+        assertNull(repository.articleUrl(42))
+        assertEquals(0, files.readTextCount)
+        files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "42.html", "new HTML".encodeToByteArray())
+        repository.recordArticleMetadata(42, "https://final.test/article", "text/html")
+        val reopened = StoryCacheRepository(files, metadata)
+        assertEquals("new HTML", reopened.loadArticle(42, 2_000))
+        assertEquals("https://final.test/article", reopened.articleUrl(42))
+    }
+
+    @Test
+    fun preparedHeaderHitsMissesAndLegacyRebuildsRetainOfflineInformation() {
+        val files = FakeFiles()
+        val repository = StoryCacheRepository(files, FakeMetadata())
+        assertNull(repository.loadStoryHeader(42))
+        assertEquals(0, files.readTextCount)
+        repository.storeStory(42, storyJson(42, "Offline title"), 1_000)
+        val hit = assertNotNull(repository.loadStoryHeader(42, rebuildIfMissing = false))
+        val target = Story().apply { id = 42 }
+        val reads = files.readTextCount
+        assertTrue(hit.applyTo(target))
+        assertEquals(reads, files.readTextCount) // Applying prepared data never returns to disk.
+        assertEquals("Offline title", target.title)
+        assertEquals("https://example.com/42", target.url)
+        assertTrue(target.isLink)
+        assertEquals("alice", target.by)
+        assertEquals(12, target.score)
+        files.remove(StoryCacheKeys.SUMMARY_NAMESPACE, "42.json")
+        val beforeSummaryMiss = files.readTextCount
+        assertNull(repository.loadStoryHeader(42, rebuildIfMissing = false))
+        assertEquals(beforeSummaryMiss + 1, files.readTextCount) // Only the summary, never full JSON.
+        assertFalse(files.contains(StoryCacheKeys.SUMMARY_NAMESPACE, "42.json"))
+        val rebuilt = assertNotNull(repository.loadStoryHeader(42))
+        assertEquals(42, rebuilt.storyId)
+        assertTrue(files.contains(StoryCacheKeys.SUMMARY_NAMESPACE, "42.json"))
+        val offline = Story().apply { id = 42 }
+        assertTrue(rebuilt.applyTo(offline))
+        assertEquals(target.title, offline.title)
+        assertEquals(target.url, offline.url)
+        // A wrong-ID/corrupt summary is never offered to a comments opening.
+        files.write(StoryCacheKeys.SUMMARY_NAMESPACE, "42.json", """{"id":99,"title":"Wrong"}""".encodeToByteArray())
+        assertNull(repository.loadStoryHeader(42))
+        files.write(StoryCacheKeys.SUMMARY_NAMESPACE, "42.json", "broken".encodeToByteArray())
+        assertNull(repository.loadStoryHeader(42))
+    }
+
+    @Test
+    fun parsedSummaryRetainsRankedIdsWithoutOverwritingLiveOrdering() = runTest {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val repository = StoryCacheRepository(files, metadata)
+        val payload = """{"id":42,"title":"Cached","children":[
+            {"id":7,"text":"one"},{"id":8,"text":"two"}
+        ]}"""
+        val ids = mutableListOf(8, 7)
+        val parsed = AlgoliaCommentsParser().parse(payload, topLevelCommentIds = ids)
+        ids.reverse() // The parsed summary owns its ordering snapshot.
+        repository.storeStory(42, payload, 1_000, parsed.cacheSummary)
+        val reopened = Story().apply { id = 42 }
+        // Recreate the repository to exercise persistence rather than an in-memory ordering cache.
+        assertTrue(StoryCacheRepository(files, metadata).hydrateStory(reopened))
+        assertEquals(listOf(8, 7), reopened.kids?.toList())
+        val live = Story().apply { id = 42; kids = intArrayOf(7, 8, 9) }
+        assertTrue(repository.hydrateStory(live))
+        assertEquals(listOf(7, 8, 9), live.kids?.toList())
+    }
+
+    @Test
+    fun parsedSummaryHydratesTheUnfilteredCommentCount() = runTest {
+        val files = FakeFiles()
+        val repository = StoryCacheRepository(files, FakeMetadata())
+        val payload = """{"id":42,"title":"Cached","children":[
+            {"text":"hidden","author":"blocked","children":[{"text":"child"}]},
+            {"text":"visible"}
+        ]}"""
+        val parsed = AlgoliaCommentsParser().parse(payload, filteredUsers = setOf("blocked"))
+        assertEquals(1, parsed.comments.size)
+        assertTrue(repository.storeStory(42, payload, 1_000, assertNotNull(parsed.cacheSummary)))
+        val story = Story().apply { id = 42 }
+        assertTrue(repository.hydrateStory(story))
+        assertEquals(3, story.descendants)
+        assertEquals("Cached", story.title)
+    }
+
+    @Test
+    fun storeCompactsIndexesAndHydratesAStory() {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val repository = StoryCacheRepository(files, metadata)
+
+        assertFalse(repository.hasStoryPayload(42))
+        assertTrue(repository.storeStory(42, storyJson(42, "Portable cache"), 1_000))
+        assertTrue(repository.hasStoryPayload(42))
+        assertTrue(files.contains(StoryCacheKeys.FULL_NAMESPACE, "42.json"))
+        assertTrue(files.contains(StoryCacheKeys.SUMMARY_NAMESPACE, "42.json"))
+        assertEquals(setOf(42), StoryCacheIndex.storyIds(metadata.getStringSet(StoryCacheKeys.INDEX)))
+
+        val story = Story().apply { id = 42 }
+        assertTrue(repository.hydrateStory(story))
+        assertEquals("Portable cache", story.title)
+        assertEquals("alice", story.by)
+        assertEquals(12, story.score)
+        assertTrue(story.loaded)
+    }
+
+    @Test
+    fun hydrateRebuildsADeletedSummaryFromTheFullPayload() {
+        val files = FakeFiles()
+        val repository = StoryCacheRepository(files, FakeMetadata())
+        repository.storeStory(7, storyJson(7, "Rebuilt"), 2_000)
+        files.remove(StoryCacheKeys.SUMMARY_NAMESPACE, "7.json")
+
+        val story = Story().apply { id = 7 }
+        assertTrue(repository.hydrateStory(story))
+        assertEquals("Rebuilt", story.title)
+        assertTrue(files.contains(StoryCacheKeys.SUMMARY_NAMESPACE, "7.json"))
+    }
+
+    @Test
+    fun hydrateSkipsFilesystemReadsForFeedIdsMissingFromTheIndex() {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val repository = StoryCacheRepository(files, metadata)
+
+        repeat(500) { index ->
+            assertFalse(repository.hydrateStory(Story().apply { id = index + 1 }))
+        }
+
+        assertEquals(0, files.readTextCount)
+        assertEquals(1, metadata.getStringSetCount)
+    }
+
+    @Test
+    fun evictionRemovesStoryArticleAndMetadataTogether() {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val repository = StoryCacheRepository(files, metadata, maximumStories = 1)
+        repository.storeStory(1, storyJson(1, "First"), 100)
+        files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "1.html", "article".encodeToByteArray())
+        repository.recordArticleMetadata(1, "https://example.com/first", "text/html; charset=utf-16")
+
+        repository.storeStory(2, storyJson(2, "Second"), 200)
+
+        assertFalse(repository.hasStoryPayload(1))
+        assertTrue(repository.hasStoryPayload(2))
+        assertNull(repository.loadStoryPayload(1))
+        assertFalse(files.contains(StoryCacheKeys.SUMMARY_NAMESPACE, "1.json"))
+        assertFalse(files.contains(StoryCacheKeys.ARTICLE_NAMESPACE, "1.html"))
+        assertNull(repository.articleUrl(1))
+        assertEquals(setOf(2), repository.cachedItemIds())
+    }
+
+    @Test
+    fun articleLookupDoesNotScanTheCacheForHitsOrMisses() {
+        val files = FakeFiles()
+        val repository = StoryCacheRepository(files, FakeMetadata())
+        repeat(200) { index ->
+            files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "$index.html", "cached $index".encodeToByteArray())
+            repository.recordArticleMetadata(index, "https://example.com/$index", null)
+        }
+
+        assertEquals("cached 42", repository.loadArticle(42, 1_000))
+        assertNull(repository.loadArticle(999, 1_000))
+        assertEquals(2, files.infoCount)
+        assertEquals(0, files.listCount)
+        assertEquals(1, files.readTextCount)
+    }
+
+    @Test
+    fun oversizedArticleIsRemovedWithoutReadingItsContents() {
+        val files = FakeFiles()
+        val repository = StoryCacheRepository(files, FakeMetadata())
+        files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "42.html", "oversized".encodeToByteArray())
+        files.reportedSizeBytes = ArticleSnapshotPolicy.MAX_BYTES + 1
+        repository.recordArticleMetadata(42, "https://example.com", null)
+
+        assertNull(repository.loadArticle(42, 1_000))
+        assertFalse(files.contains(StoryCacheKeys.ARTICLE_NAMESPACE, "42.html"))
+        assertNull(repository.articleUrl(42))
+        assertNull(files.lastTouch)
+        assertEquals(0, files.readTextCount)
+        assertEquals(0, files.listCount)
+    }
+
+    @Test
+    fun articleValidationCharsetAndClearAreSharedPolicies() {
+        val files = FakeFiles()
+        val metadata = FakeMetadata()
+        val repository = StoryCacheRepository(files, metadata)
+        files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "9.html", "cached".encodeToByteArray())
+        repository.recordArticleMetadata(9, "https://example.com", "text/html; charset=iso-8859-1")
+
+        assertEquals("cached", repository.loadArticle(9, nowMillis = 9_999))
+        assertEquals("iso-8859-1", files.lastCharset)
+        assertEquals(9_999L, files.lastTouch)
+        assertEquals(1, repository.clear())
+        assertTrue(repository.cachedItemIds().isEmpty())
+        assertTrue(metadata.keys().none { it.startsWith(StoryCacheKeys.ARTICLE_URL) })
+
+        files.write(StoryCacheKeys.ARTICLE_NAMESPACE, "10.html", byteArrayOf())
+        repository.recordArticleMetadata(10, "https://invalid.example", null)
+        assertNull(repository.loadArticle(10, nowMillis = 10_000))
+        assertFalse(files.contains(StoryCacheKeys.ARTICLE_NAMESPACE, "10.html"))
+        assertNull(repository.articleUrl(10))
+    }
+
+    @Test
+    fun articleCharsetFallsBackToUtf8() {
+        assertEquals("UTF-8", ArticleCacheMetadata.charsetName(null))
+        assertEquals("UTF-8", ArticleCacheMetadata.charsetName("text/html"))
+        assertEquals("windows-1252", ArticleCacheMetadata.charsetName("text/html; Charset=\"windows-1252\""))
+    }
+
+    @Test
+    fun recentStoryAvailabilityReusesItsValidatedCacheEntry() {
+        val files = FakeFiles()
+        val repository = StoryCacheRepository(files, FakeMetadata())
+        repository.storeStory(42, storyJson(42, "Cached"), cachedAtMillis = 1_000)
+
+        assertTrue(repository.hasRecentStories(nowMillis = 2_000))
+        val readsAfterValidation = files.readTextCount
+        assertTrue(repository.hasRecentStories(nowMillis = 3_000))
+
+        assertEquals(readsAfterValidation, files.readTextCount)
+    }
+
+    private fun storyJson(id: Int, title: String): String =
+        """{"id":$id,"type":"story","title":"$title","author":"alice","points":12,"created_at_i":123,"url":"https://example.com/$id","children":[]}"""
+
+    private class FakeFiles : StoryCacheFileStore {
+        private val values = mutableMapOf<Pair<String, String>, ByteArray>()
+        var lastCharset: String? = null
+        var lastTouch: Long? = null
+        var readTextCount: Int = 0
+        var infoCount: Int = 0
+        var listCount: Int = 0
+        var reportedSizeBytes: Long? = null
+
+        override fun read(namespace: String, key: String): ByteArray? = values[namespace to key]
+
+        override fun readText(namespace: String, key: String, charsetName: String): String? {
+            readTextCount++
+            lastCharset = charsetName
+            return read(namespace, key)?.decodeToString()
+        }
+
+        override fun write(namespace: String, key: String, value: ByteArray): Boolean {
+            values[namespace to key] = value
+            return true
+        }
+
+        override fun remove(namespace: String, key: String): Boolean =
+            values.remove(namespace to key) != null
+
+        override fun info(namespace: String, key: String): CacheFileInfo? {
+            infoCount++
+            return values[namespace to key]?.let { CacheFileInfo(key, reportedSizeBytes ?: it.size.toLong()) }
+        }
+
+        override fun list(namespace: String): List<CacheFileInfo> {
+            listCount++
+            return values.filterKeys { it.first == namespace }
+                .map { (path, value) -> CacheFileInfo(path.second, value.size.toLong()) }
+        }
+
+        override fun clear(namespace: String) {
+            values.keys.filter { it.first == namespace }.forEach { values.remove(it) }
+        }
+
+        override fun touch(namespace: String, key: String, modifiedAtMillis: Long) {
+            if (contains(namespace, key)) lastTouch = modifiedAtMillis
+        }
+
+        fun contains(namespace: String, key: String): Boolean = (namespace to key) in values
+    }
+
+    private class FakeMetadata : StoryCacheMetadataStore {
+        private val strings = mutableMapOf<String, String?>()
+        private val sets = mutableMapOf<String, Set<String>>()
+        var getStringSetCount: Int = 0
+
+        override fun getString(key: String): String? = strings[key]
+
+        override fun putString(key: String, value: String?) {
+            strings[key] = value
+        }
+
+        override fun remove(key: String) {
+            strings.remove(key)
+            sets.remove(key)
+        }
+
+        override fun getStringSet(key: String): Set<String> {
+            getStringSetCount++
+            return sets[key].orEmpty()
+        }
+
+        override fun putStringSet(key: String, value: Set<String>) {
+            sets[key] = value
+        }
+
+        override fun keys(): Set<String> = strings.keys + sets.keys
+    }
+}

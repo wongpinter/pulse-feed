@@ -1,0 +1,380 @@
+package com.simon.harmonichackernews.app
+
+import com.simon.harmonichackernews.data.CommentedStoriesStore
+import com.simon.harmonichackernews.feed.FeedSubscribeRequestBus
+import com.simon.harmonichackernews.feed.data.FeedSubscriptionStore
+import com.simon.harmonichackernews.feed.sync.FeedSyncCoordinator
+import com.simon.harmonichackernews.feed.sync.FeedArticleFetcher
+import com.simon.harmonichackernews.data.HiddenPostsStore
+import com.simon.harmonichackernews.StorySearchController
+import com.simon.harmonichackernews.network.StoryFeedRepository
+import com.simon.harmonichackernews.network.StoryFeedResult
+import com.simon.harmonichackernews.data.SavedItemsRepository
+import com.simon.harmonichackernews.data.StoryResourceTintRepository
+import com.simon.harmonichackernews.cache.ArticleSnapshotService
+import com.simon.harmonichackernews.cache.StoryCacheService
+import com.simon.harmonichackernews.cache.StoryCacheRuntime
+import com.simon.harmonichackernews.cache.StoryCacheUseCase
+import com.simon.harmonichackernews.network.HackerNewsUserService
+import com.simon.harmonichackernews.network.CommentsPreloadRepository
+import com.simon.harmonichackernews.network.NetworkGraph
+import com.simon.harmonichackernews.network.OfficialCommentThreadLoader
+import com.simon.harmonichackernews.network.PdfDownloadService
+import com.simon.harmonichackernews.network.WidgetConfigurationService
+import com.simon.harmonichackernews.network.WidgetRefreshRuntime
+import com.simon.harmonichackernews.network.ReferenceLinkPreviewRuntime
+import com.simon.harmonichackernews.network.StoryPreviewRepository
+import com.simon.harmonichackernews.network.ReplyNotificationRuntime
+import com.simon.harmonichackernews.network.ReplyNotificationUseCase
+import com.simon.harmonichackernews.platform.AppPlatformDependencies
+import com.simon.harmonichackernews.platform.CommentsPlatformDependencies
+import com.simon.harmonichackernews.platform.LocalCalendarDate
+import com.simon.harmonichackernews.platform.StoriesPlatformDependencies
+import com.simon.harmonichackernews.platform.ConfiguredExternalLinkOpener
+import com.simon.harmonichackernews.presentation.LoginWorkflow
+import com.simon.harmonichackernews.presentation.UserMessageStore
+import com.simon.harmonichackernews.presentation.UserProfileBlockPort
+import com.simon.harmonichackernews.presentation.UserProfileRuntime
+import com.simon.harmonichackernews.presentation.UserProfileSession
+import com.simon.harmonichackernews.presentation.WebContentService
+import com.simon.harmonichackernews.settings.AppSettingsRepository
+import com.simon.harmonichackernews.settings.AiModelDefaultsUseCase
+import com.simon.harmonichackernews.settings.AiSummarySettingsRepository
+import com.simon.harmonichackernews.settings.ContentFilterRepository
+import com.simon.harmonichackernews.settings.DataSettingsService
+import com.simon.harmonichackernews.settings.StoredSettingsMutator
+import com.simon.harmonichackernews.settings.StoredUserSettings
+import com.simon.harmonichackernews.settings.SettingsResetUseCase
+import com.simon.harmonichackernews.settings.AppLaunchStateStore
+import com.simon.harmonichackernews.settings.AppearanceRuntime
+import com.simon.harmonichackernews.settings.NighttimeScheduleStore
+import com.simon.harmonichackernews.settings.UserSettings
+import com.simon.harmonichackernews.settings.UserTagsRepository
+import com.simon.harmonichackernews.settings.DataSettingsRuntime
+import com.simon.harmonichackernews.summary.CloudStorySummaryBackend
+import com.simon.harmonichackernews.summary.ExtractingStorySummaryBackend
+import com.simon.harmonichackernews.summary.PlatformLocalStorySummaryBackend
+import com.simon.harmonichackernews.summary.StorySummaryRuntime
+import com.simon.harmonichackernews.summary.UnavailableStorySummaryBackend
+import com.simon.harmonichackernews.summary.LocalSummarySettingsRuntime
+import com.simon.harmonichackernews.summary.LocalSummaryBehavior
+import com.simon.harmonichackernews.settings.GeminiNanoSummaryMode
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.map
+
+/**
+ * Platform-neutral application composition shared by Android, iOS, and future hosts.
+ *
+ * A platform bootstrap owns this object's lifecycle and supplies transports and persistence. The
+ * composition deliberately exposes long-lived repositories rather than global singletons so a
+ * host can create, retain, and dispose one application graph explicitly.
+ */
+class HarmonicAppComposition(
+    val network: NetworkGraph,
+    val platform: AppPlatformDependencies,
+    val host: HarmonicHostConfiguration,
+) {
+    val metadata: AppMetadata = host.metadata
+    val localModels = host.localModels
+    val nowMillis = host.nowMillis
+    /**
+     * Cached articles are rows, not one JSON document, whenever the host supplies a storage path.
+     * A database that cannot be opened degrades to the old cache layout instead of losing the
+     * subscription list with it.
+     */
+    private val feedItemDatabase: com.simon.harmonichackernews.feed.data.FeedItemDatabase? =
+        host.feedDatabasePath?.let { path ->
+            // A database that cannot be opened must not take the subscription list down with it.
+            runCatching { com.simon.harmonichackernews.feed.data.FeedItemDatabase(path) }.getOrNull()
+        }
+    val feedSubscriptions = FeedSubscriptionStore(
+        store = host.appDataStore,
+        itemDatabase = feedItemDatabase,
+    )
+    val feedSync = FeedSyncCoordinator(network.feedClient, feedSubscriptions, nowEpochMs = nowMillis)
+    val feedArticleFetcher = FeedArticleFetcher(network.transportClient, feedSubscriptions, nowMillis)
+    val feedSubscribeRequests = FeedSubscribeRequestBus()
+    val feedOpenRequests = com.simon.harmonichackernews.feed.FeedOpenRequestBus()
+    private val feedAlertPreferences =
+        com.simon.harmonichackernews.feed.refresh.FeedAlertPreferencesStore(host.appDataStore)
+    val feedRefresh = com.simon.harmonichackernews.feed.refresh.FeedRefreshRuntime(
+        store = feedSubscriptions,
+        sync = feedSync,
+        alerts = feedAlertPreferences,
+        settings = host.settingsStore,
+        platform = platform.feedRefresh
+            ?: com.simon.harmonichackernews.feed.refresh.FeedRefreshPlatform.Unavailable,
+        nowEpochMs = nowMillis,
+        currentMinutesFromMidnight = host.currentMinutesFromMidnight,
+    )
+    val storyUpdates = StoryUpdateBus()
+    val webContent = WebContentService()
+    val launchState = AppLaunchStateStore(host.appDataStore)
+    /**
+     * Releases host-lifetime resources owned by this graph. The article database is a live file
+     * handle, so a host that tears its graph down must close it rather than rely on process exit.
+     */
+    fun close() {
+        feedItemDatabase?.close()
+    }
+
+    init {
+        com.simon.harmonichackernews.settings.ColorSchemePreferences.resolveDynamicAvailability(
+            host.settingsStore, host.dynamicColorAvailable,
+        )
+    }
+    val appearance = AppearanceRuntime(
+        settings = host.settingsStore,
+        scheduleStore = NighttimeScheduleStore(host.appDataStore),
+        launchState = launchState,
+        settingsChanges = host.settingsChanges,
+        appearanceChanges = host.appearanceChanges,
+        currentMinutesFromMidnight = host.currentMinutesFromMidnight,
+        systemDark = host.systemDark,
+    )
+    val userSettings: UserSettings = StoredUserSettings(
+        store = host.settingsStore,
+        changes = host.settingsChanges,
+        theme = { appearance.selection().colorScheme },
+        showCommentsUpButtonByDefault = host.showCommentsUpButtonByDefault,
+        preloadCommentsFromStoriesByDefault = host.preloadCommentsFromStoriesByDefault,
+        defaultSurfaceEffectMode = host.defaultSurfaceEffectMode,
+    )
+    val externalLinks = ConfiguredExternalLinkOpener(platform.externalLinks) {
+        userSettings.reading.externalBrowser
+    }
+    val settings = AppSettingsRepository(userSettings, StoredSettingsMutator(host.settingsStore), network.scope)
+    val articleCategoryTraining = com.simon.harmonichackernews.categorization.ArticleCategoryTraining(host.appDataStore)
+    val articleCategorySettings = com.simon.harmonichackernews.categorization.ArticleCategorySettings(
+        host.settingsStore, host.settingsChanges, { articleCategoryTraining.categories },
+        articleCategoryTraining.state.map { Unit },
+    )
+    val articleCategories = com.simon.harmonichackernews.categorization.ArticleCategoryRuntime(
+        articleCategorySettings, localModels, host.articleEmbeddingEngine, network.scope,
+        training = articleCategoryTraining,
+        isHistoryStory = { it in platform.history.historyState.value.ids },
+        memoryAvailable = host.localAiMemoryAvailable,
+        nativeEngine = host.nativeArticleEmbeddingEngine,
+        nativeCache = host.articleEmbeddingCache,
+    )
+    val contentFilters = ContentFilterRepository(host.settingsStore)
+    // User tags share the persistent content store with bookmarks, including Android 3.1 data.
+    val userTags = UserTagsRepository(host.appDataStore)
+    val savedItems = (host.savedItemsRepository ?: SavedItemsRepository(host.appDataStore)).also {
+        // Account-state identity also changes for A -> B -> A when a flow collector skips B.
+        it.bindAccountScope(accountSession = { platform.accounts.accountState.value }) {
+            platform.accounts.currentAccount?.username
+        }
+    }
+    val hiddenPosts = HiddenPostsStore(host.appDataStore)
+    val commentedStories = CommentedStoriesStore(
+        storage = host.appDataStore,
+        algolia = network.algoliaRepository,
+        currentUser = { platform.accounts.awaitAccount()?.username },
+        nowMillis = nowMillis,
+    )
+    val storyResourceTints = host.storyResourceTints ?: StoryResourceTintRepository(host.appDataStore)
+    val aiSummarySettings = AiSummarySettingsRepository(
+        store = host.settingsStore,
+        credentials = platform.credentials,
+        changes = host.settingsChanges,
+        credentialDispatcher = platform.credentialDispatcher,
+        cloudAiSupported = host.cloudAiSupported,
+    )
+    val aiModelDefaults = AiModelDefaultsUseCase(
+        settings = aiSummarySettings,
+        catalog = network.aiModelCatalogRepository,
+    )
+    val settingsReset = SettingsResetUseCase(
+        defaultSettings = host.settingsStore,
+        globalSettings = host.appDataStore,
+        aiSummarySettings = aiSummarySettings,
+    )
+    val previewResources = StoryPreviewRepository(
+        coordinator = network.previewContentCoordinator,
+        linkSummaries = network.linkSummaryRepository,
+        store = host.previewCacheStore,
+        connectivity = platform.connectivity,
+    )
+    val articleCategoryHistory = com.simon.harmonichackernews.categorization.ArticleCategoryHistory(
+        platform.history, network.hackerNewsRepository, host.storyCacheRepository, previewResources,
+    )
+    val supportsArticleSnapshots: Boolean = host.articleSnapshotStore != null
+    val storyCache = StoryCacheService(
+        repository = host.storyCacheRepository,
+        articleSnapshots = ArticleSnapshotService(network.httpClient, host.articleSnapshotStore),
+        nowMillis = nowMillis,
+    )
+    val commentsPreloads = CommentsPreloadRepository(
+        algolia = network.algoliaRepository,
+        official = OfficialCommentThreadLoader(network.hackerNewsRepository),
+        storeResponse = storyCache::cacheParsedStory,
+        nowMillis = nowMillis,
+    )
+    val pdfDownloads = PdfDownloadService(network.httpClient, host.pdfDownloadStore, nowMillis)
+    val widgets = WidgetConfigurationService(
+        configStore = host.widgetConfigurationStore,
+        runtimeStore = host.widgetRuntimeStore,
+        repository = network.hackerNewsRepository,
+        feedLoader = { type, count ->
+            if (type.isAlgolia) {
+                val search = StorySearchController()
+                StoryFeedResult.LinkDirectory(
+                    network.algoliaRepository.search(
+                        search.buildTopStoriesUrl(search.getCurrentTopStoriesStartTime(type), count),
+                    ).stories,
+                )
+            } else {
+                StoryFeedRepository(
+                    network.hackerNewsRepository,
+                    network.hackerNewsWebRepository,
+                    network.unslopRepository,
+                ).load(type)
+            }
+        },
+    )
+    val widgetRefresh = WidgetRefreshRuntime(widgets, nowMillis)
+    val hackerNewsUser = HackerNewsUserService(
+        session = network.hackerNewsSession,
+        accounts = platform.accounts,
+    )
+    val login = LoginWorkflow(platform.accounts, hackerNewsUser)
+    val debugAccountIdentity = com.simon.harmonichackernews.presentation.DebugAccountIdentity(host.appDataStore, metadata.debugSettingsEnabled)
+    val accountActivityUsername: String?
+        get() = debugAccountIdentity.state.value.username ?: platform.accounts.currentAccount?.username
+    val replyNotifications: ReplyNotificationRuntime? =
+        run {
+            ReplyNotificationRuntime(
+                useCase = ReplyNotificationUseCase(network.replyScanner, host.appDataStore, nowMillis),
+                platform = platform.replyNotifications ?: com.simon.harmonichackernews.network.ReplyNotificationPlatform.Unavailable,
+                currentMinutesFromMidnight = host.currentMinutesFromMidnight,
+            ).also { runtime ->
+                runtime.bindAccountScope({
+                    debugAccountIdentity.state.value.takeIf { it.username != null } ?: platform.accounts.accountState.value
+                }) { accountActivityUsername }
+            }
+        }
+    val dataSettings = DataSettingsService(
+        settings = settings,
+        settingsReset = settingsReset,
+        savedItems = savedItems,
+        accounts = platform.accounts,
+        history = platform.history,
+        hiddenPosts = hiddenPosts,
+        storyCache = storyCache,
+        previewResources = previewResources,
+        storyResourceTints = storyResourceTints,
+        localModels = localModels,
+        settingsTransfer = com.simon.harmonichackernews.settings.SettingsTransfer(host.settingsStore, host.appDataStore),
+    )
+
+    /** Creates navigation, retained screen state, and transient messages for one host scene. */
+    fun createScene(
+        userMessages: UserMessageStore = UserMessageStore(),
+    ): HarmonicSceneComposition = HarmonicSceneComposition(this, userMessages)
+
+    fun createUserProfileRuntime(
+        username: String,
+        monthNames: List<String>,
+    ): UserProfileRuntime = UserProfileRuntime(
+        username = username,
+        monthNames = monthNames,
+        loader = network.userProfiles,
+        accounts = platform.accounts,
+        blocks = object : UserProfileBlockPort {
+            override fun isBlocked(username: String): Boolean =
+                contentFilters.containsUser(username)
+
+            override fun setBlocked(username: String, blocked: Boolean): Boolean =
+                if (blocked) contentFilters.addUser(username) else contentFilters.removeUser(username)
+        },
+    )
+
+    fun createUserProfileSession(
+        scope: CoroutineScope,
+        username: String,
+        monthNames: List<String>,
+    ): UserProfileSession = UserProfileSession(
+        scope,
+        createUserProfileRuntime(username, monthNames),
+    )
+
+    fun createDataSettingsRuntime(
+        scope: CoroutineScope,
+        today: () -> LocalCalendarDate,
+    ): DataSettingsRuntime = DataSettingsRuntime(scope, dataSettings, today)
+
+    fun createStoryCacheRuntime(scope: CoroutineScope): StoryCacheRuntime {
+        val useCase = StoryCacheUseCase(
+            hackerNewsRepository = network.hackerNewsRepository,
+            algoliaRepository = network.algoliaRepository,
+            sink = storyCache,
+        )
+        return StoryCacheRuntime(scope, { request, onProgress ->
+            useCase.execute(
+                request.copy(cacheArticleSnapshots = request.cacheArticleSnapshots && supportsArticleSnapshots),
+                onProgress,
+            )
+        })
+    }
+
+    val localSummaryCanAttempt: Boolean
+        get() = platform.localSummary?.canAttempt() == true
+
+    val localSummaryEngine
+        get() = platform.localSummary
+
+    fun createStorySummaryRuntime(scope: CoroutineScope): StorySummaryRuntime {
+        val localBackend = platform.localSummary
+            ?.let { engine ->
+                PlatformLocalStorySummaryBackend(engine) {
+                    val settings = aiSummarySettings.snapshot()
+                    LocalSummaryBehavior(
+                        systemPrompt = settings.systemPrompt,
+                        streamResponses = settings.streamResponses,
+                        useGeminiNanoSummarizationLora =
+                            settings.geminiNanoSummaryMode == GeminiNanoSummaryMode.THREE_BULLETS,
+                    )
+                }
+            }
+            ?: UnavailableStorySummaryBackend("The platform has no local summary engine")
+        return StorySummaryRuntime(
+            scope = scope,
+            mockAnswers = { userSettings.debug.mockAiAnswers },
+            cloudBackend = CloudStorySummaryBackend(network.summaryUseCase) {
+                aiSummarySettings.cloudConfig()
+            },
+            localBackend = ExtractingStorySummaryBackend(
+                useCase = network.summaryUseCase,
+                textBackend = localBackend,
+            ),
+        )
+    }
+
+    fun createReferenceLinkPreviewRuntime(scope: CoroutineScope): ReferenceLinkPreviewRuntime =
+        ReferenceLinkPreviewRuntime(
+            scope = scope,
+            previews = previewResources,
+            connectivity = platform.connectivity,
+        )
+
+    fun createLocalSummarySettingsRuntime(scope: CoroutineScope): LocalSummarySettingsRuntime =
+        LocalSummarySettingsRuntime(scope, localSummaryEngine, localModels) {
+            aiSummarySettings.snapshot().geminiNanoSummaryMode == GeminiNanoSummaryMode.THREE_BULLETS
+        }
+
+    /** Feature-sized platform views derived from the one application-scoped platform graph. */
+    fun storiesPlatformDependencies(): StoriesPlatformDependencies = StoriesPlatformDependencies(
+        accounts = platform.accounts,
+        history = platform.history,
+        connectivity = platform.connectivity,
+    )
+
+    fun commentsPlatformDependencies(): CommentsPlatformDependencies =
+        CommentsPlatformDependencies(
+            accounts = platform.accounts,
+            externalLinks = externalLinks,
+            sharing = platform.sharing,
+            clipboard = platform.clipboard,
+        )
+}

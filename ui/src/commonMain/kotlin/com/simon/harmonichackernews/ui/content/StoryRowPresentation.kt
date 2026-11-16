@@ -1,0 +1,269 @@
+package com.simon.harmonichackernews.ui.content
+
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.toArgb
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.settings.StoryPreviewMode
+import com.simon.harmonichackernews.ui.theme.rememberStoryTintColor
+
+private const val ContentAnimationDuration = 220
+internal val ContentMotionEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+
+private const val ReadContentLightAlpha = 0.79f
+private const val ReadContentLightTintedAlpha = 0.825f
+private const val ReadContentDarkAlpha = 0.685f
+private const val ReadContentDarkTintedAlpha = 0.755f
+
+/** Shared read opacity for story content; surfaces retain their normal color. */
+internal fun storyContentAlpha(
+    dimmed: Boolean,
+    darkTheme: Boolean,
+    tintedBackground: Boolean,
+): Float = when {
+    !dimmed -> 1f
+    darkTheme && tintedBackground -> ReadContentDarkTintedAlpha
+    darkTheme -> ReadContentDarkAlpha
+    tintedBackground -> ReadContentLightTintedAlpha
+    else -> ReadContentLightAlpha
+}
+
+/** Category chips fade a little further, following the same animated read progress. */
+internal fun storyCategoryAlpha(contentAlpha: Float): Float =
+    (1f - (1f - contentAlpha) * 1.25f).coerceIn(0f, 1f)
+
+/** Local rendering state; resolved palettes are still published to the feature's owner. */
+internal class StoryRowPresentation(
+    val dimAlpha: Float,
+    val cardProgress: Float,
+    val outlineAlpha: Float,
+    val renderedStyle: StoryRowStyle,
+    val mediumAccessoryAlpha: State<Float>,
+    val hasPreview: Boolean,
+    val background: State<Color>,
+    val tintBaseColorArgb: Int,
+    val onPreviewLoadFailed: () -> Unit,
+    val onPreviewLoadSuccess: () -> Unit,
+    val onPreviewTintExtracted: (Int) -> Unit,
+    val onFaviconTintExtracted: (Int) -> Unit,
+)
+
+@Composable
+internal fun rememberStoryRowPresentation(
+    model: StoryRowModel,
+    style: StoryRowStyle,
+    listItem: Boolean,
+    animate: Boolean,
+    pageBackground: Color,
+    onPreviewLoadSuccess: (() -> Unit)?,
+    onPreviewLoadFailed: (() -> Unit)?,
+    onPreviewTintExtracted: ((Int) -> Unit)?,
+    onFaviconTintExtracted: ((Int) -> Unit)?,
+    animatePreviewPlacement: Boolean = animate,
+): StoryRowPresentation {
+    val colors = MaterialTheme.colorScheme
+    val targetDimAlpha = storyContentAlpha(style.dimmed, HarmonicTheme.isDark, style.tintCard)
+    val dimAlpha = if (animate) {
+        val animatedDimAlpha by animateFloatAsState(
+            targetValue = targetDimAlpha,
+            animationSpec = tween(180),
+            label = "story dim alpha",
+        )
+        animatedDimAlpha
+    } else {
+        targetDimAlpha
+    }
+    val cardProgress = if (listItem) {
+        if (style.cardStyle) 1f else 0f
+    } else {
+        val animatedCardProgress by animateFloatAsState(
+            targetValue = if (style.cardStyle) 1f else 0f,
+            animationSpec = contentTween(),
+            label = "story card style",
+        )
+        animatedCardProgress
+    }
+    val outlineAlpha = if (listItem) {
+        if (style.showOutline) 1f else 0f
+    } else {
+        val animatedOutlineAlpha by animateFloatAsState(
+            targetValue = if (style.showOutline) 1f else 0f,
+            animationSpec = contentTween(),
+            label = "story outline",
+        )
+        animatedOutlineAlpha
+    }
+    var previewFailed by remember(model.previewImageUrl, model.previewImageLoadFailed) {
+        mutableStateOf(model.previewImageLoadFailed)
+    }
+    val hasPreview = !previewFailed &&
+        (model.previewImageUrl != null || model.previewImageFallback != null || model.previewImageBitmap != null)
+    val animatePreviewMode = animatePreviewPlacement && hasPreview && !listItem
+    var animatedPreviewMode by remember(animatePreviewMode) { mutableStateOf(style.previewImageMode) }
+    val renderedPreviewMode = if (animatePreviewMode) animatedPreviewMode else style.previewImageMode
+    val renderedStyle = if (renderedPreviewMode == style.previewImageMode) {
+        style
+    } else {
+        style.copy(previewImageMode = renderedPreviewMode)
+    }
+    // Feed rows switch mode immediately; only the settings/preview surface needs a coroutine.
+    val mediumAccessoryAlpha = if (animatePreviewMode) {
+        val fade = remember {
+            Animatable(if (style.previewImageMode == StoryPreviewMode.MEDIUM) 1f else 0f)
+        }
+        LaunchedEffect(style.previewImageMode) {
+            val targetMode = style.previewImageMode
+            animatedPreviewMode = targetMode
+            fade.animateTo(
+                if (targetMode == StoryPreviewMode.MEDIUM) 1f else 0f,
+                tween(
+                    durationMillis = 75,
+                    delayMillis = if (targetMode == StoryPreviewMode.MEDIUM) 105 else 0,
+                    easing = ContentMotionEasing,
+                ),
+            )
+        }
+        fade.asState()
+    } else {
+        rememberUpdatedState(if (style.previewImageMode == StoryPreviewMode.MEDIUM) 1f else 0f)
+    }
+    val tintFallback = model.tintFallbackArgb?.let(::Color) ?: colors.cardBackground
+    val tintBaseColorArgb = model.tintFallbackArgb ?: HarmonicTheme.targetColorScheme.cardBackground.toArgb()
+    var extractedPreviewTint by remember(
+        model.previewImageUrl,
+        model.previewImageFallback,
+        model.previewImageBitmap,
+        tintBaseColorArgb,
+        style.paletteTintConfigKey,
+    ) { mutableStateOf<Int?>(null) }
+    var extractedFaviconTint by remember(
+        model.faviconUrl,
+        model.faviconFallback,
+        tintBaseColorArgb,
+        style.paletteTintConfigKey,
+    ) { mutableStateOf<Int?>(null) }
+    val handlePreviewLoadFailed: () -> Unit = {
+        previewFailed = true
+        onPreviewLoadFailed?.invoke()
+    }
+    val handlePreviewLoadSuccess: () -> Unit = {
+        onPreviewLoadSuccess?.invoke()
+    }
+    val handlePreviewTintExtracted: (Int) -> Unit = { tintColor ->
+        extractedPreviewTint = tintColor
+        onPreviewTintExtracted?.invoke(tintColor)
+    }
+    val handleFaviconTintExtracted: (Int) -> Unit = { tintColor ->
+        extractedFaviconTint = tintColor
+        onFaviconTintExtracted?.invoke(tintColor)
+    }
+    val previewAvailable = renderedPreviewMode != StoryPreviewMode.OFF && hasPreview
+    // Discovering an image URL precedes decoding and palette extraction. Keep the favicon
+    // tint during that gap, then transition directly to the preview tint when it is ready.
+    val previewTint = (model.previewImageTintArgb ?: extractedPreviewTint)
+        .takeIf { previewAvailable }
+    val rawTint = previewTint ?: model.faviconTintArgb ?: extractedFaviconTint
+    val tint = rememberStoryTintColor(rawTint, style.paletteTintConfigKey, pageBackground)
+    val targetBackground = when {
+        style.tintCard -> tint ?: tintFallback
+        style.hasBackground -> colors.cardBackground
+        // Transparent black would darken the surface during the color interpolation.
+        style.transparentNonCardBackground -> colors.cardBackground.copy(alpha = 0f)
+        else -> pageBackground
+    }
+    // Image palette extraction finishes after a list row is first composed. Preserve the old
+    // blend so an arriving preview/favicon tint does not flash into place.
+    val background = if (animate) {
+        animateColorAsState(
+            targetValue = targetBackground,
+            animationSpec = contentTween(),
+            label = "story card tint",
+        )
+    } else {
+        rememberUpdatedState(targetBackground)
+    }
+    return StoryRowPresentation(
+        dimAlpha = dimAlpha,
+        cardProgress = cardProgress,
+        outlineAlpha = outlineAlpha,
+        renderedStyle = renderedStyle,
+        mediumAccessoryAlpha = mediumAccessoryAlpha,
+        hasPreview = hasPreview,
+        background = background,
+        tintBaseColorArgb = tintBaseColorArgb,
+        onPreviewLoadFailed = handlePreviewLoadFailed,
+        onPreviewLoadSuccess = handlePreviewLoadSuccess,
+        onPreviewTintExtracted = handlePreviewTintExtracted,
+        onFaviconTintExtracted = handleFaviconTintExtracted,
+    )
+}
+
+private val MediumPreviewImageRailWidth = 132.dp
+
+/** Keeps the metric rail synchronized with the shared preview image's size transition. */
+@Composable
+internal fun storyPreviewRailWidth(
+    renderedPreviewMode: StoryPreviewMode,
+    hasPreview: Boolean,
+    animate: Boolean,
+    listItem: Boolean,
+): Dp? {
+    val targetRailWidth: Dp? = when {
+        renderedPreviewMode != StoryPreviewMode.MEDIUM -> 60.dp
+        hasPreview -> MediumPreviewImageRailWidth
+        else -> null
+    }
+    val animatedRailWidth = targetRailWidth?.let { width ->
+        if (animate && hasPreview && !listItem) {
+            val railModeTransition = updateTransition(
+                targetState = renderedPreviewMode,
+                label = "story preview rail mode",
+            )
+            val animatedWidth by railModeTransition.animateDp(
+                transitionSpec = { contentTween() },
+                label = "story metric rail width",
+            ) { mode ->
+                if (mode == StoryPreviewMode.MEDIUM) {
+                    MediumPreviewImageRailWidth
+                } else {
+                    60.dp
+                }
+            }
+            animatedWidth
+        } else if (animate) {
+            val animatedWidth by animateDpAsState(
+                targetValue = width,
+                animationSpec = contentTween(),
+                label = "story metric rail width",
+            )
+            animatedWidth
+        } else {
+            width
+        }
+    }
+    return animatedRailWidth
+}
+
+fun <T> contentTween() = tween<T>(
+    durationMillis = ContentAnimationDuration,
+    easing = ContentMotionEasing,
+)

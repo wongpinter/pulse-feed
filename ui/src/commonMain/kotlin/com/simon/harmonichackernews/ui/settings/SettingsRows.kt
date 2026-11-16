@@ -1,0 +1,676 @@
+package com.simon.harmonichackernews.ui.settings
+
+import com.simon.harmonichackernews.ui.theme.themeBackground
+
+import androidx.compose.material3.MaterialTheme
+import org.jetbrains.compose.resources.DrawableResource
+import com.simon.harmonichackernews.resources.*
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
+import com.simon.harmonichackernews.ui.common.HarmonicSwitch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
+import org.jetbrains.compose.resources.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import com.simon.harmonichackernews.ui.theme.AppUiFontFamily
+
+@Composable
+fun SettingsRadioButton(
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier.size(
+            HarmonicDimens.compose_settings_dialog_option_control_size,
+        ),
+        contentAlignment = Alignment.Center,
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = null,
+        )
+    }
+}
+
+@Composable
+internal fun SettingsCheckbox(
+    checked: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier.size(
+            HarmonicDimens.compose_settings_dialog_option_control_size,
+        ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+        )
+    }
+}
+
+@Composable
+fun SettingsMainToggle(
+    title: String,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    summary: String? = null,
+) {
+    val backgroundColor by animateColorAsState(
+        targetValue = MaterialTheme.colorScheme.primaryContainer.copy(
+            alpha = if (enabled) 1f else SettingsMainToggleDisabledAlpha,
+        ),
+        animationSpec = tween(SettingsMainToggleColorAnimationDurationMillis),
+        label = "settings main toggle background",
+    )
+    val textColor by animateColorAsState(
+        targetValue = MaterialTheme.colorScheme.onPrimaryContainer.copy(
+            alpha = if (enabled) 1f else SettingsMainToggleDisabledAlpha,
+        ),
+        animationSpec = tween(SettingsMainToggleColorAnimationDurationMillis),
+        label = "settings main toggle text",
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(
+                start = HarmonicDimens.settings_list_segment_horizontal_margin,
+                top = HarmonicDimens.settings_list_first_segment_top_margin,
+                end = HarmonicDimens.settings_list_segment_horizontal_margin,
+                bottom = 16.dp,
+            )
+            .defaultMinSize(minHeight = 72.dp)
+            .clip(RoundedCornerShape(36.dp))
+            .background(backgroundColor)
+            .settingsSearchTarget(title)
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
+            .padding(start = 24.dp, end = 16.dp, top = 14.dp, bottom = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = textColor,
+                fontFamily = AppUiFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp,
+                lineHeight = 21.sp,
+            )
+            // Animate the summary's layout height so the centered title moves with it.
+            // Keep the full text visible while that height changes, including on exit.
+            AnimatedContent(
+                targetState = summary?.takeIf { it.isNotBlank() },
+                transitionSpec = {
+                    val duration = SettingsMainToggleColorAnimationDurationMillis
+                    (fadeIn(tween(duration)) togetherWith fadeOut(tween(duration)))
+                        .using(SizeTransform(clip = false) { _, _ -> tween(duration) })
+                },
+                label = "settings main toggle summary",
+            ) { displayedSummary ->
+                if (displayedSummary != null) {
+                    Text(
+                        text = displayedSummary,
+                        modifier = Modifier.padding(top = 1.dp),
+                        color = textColor,
+                        fontFamily = AppUiFontFamily,
+                        fontSize = 13.sp,
+                        lineHeight = 17.sp,
+                    )
+                }
+            }
+        }
+        HarmonicSwitch(
+            checked = checked,
+            onCheckedChange = null,
+            enabled = enabled,
+        )
+    }
+}
+
+private const val SettingsMainToggleDisabledAlpha = 0.6f
+
+private const val SettingsMainToggleColorAnimationDurationMillis = 240
+
+@Composable
+fun SettingRow(
+    title: String,
+    summary: String? = null,
+    icon: DrawableResource?,
+    iconPainter: Painter? = null,
+    summaryFontSizeSp: Float = 14f,
+    summaryLineHeightSp: Float = 18f,
+    summaryMaxLines: Int = Int.MAX_VALUE,
+    enabled: Boolean = true,
+    onClick: (() -> Unit)?,
+    role: Role = Role.Button,
+    checkedState: Boolean? = null,
+    iconTint: Color? = null,
+    iconModifier: Modifier = Modifier,
+    trailing: (@Composable () -> Unit)? = null,
+    backgroundColor: Color? = null,
+    summaryColor: Color? = null,
+) {
+    val colors = HarmonicTheme.colors
+    val resolvedIconPainter = when {
+        icon != null -> painterResource(icon)
+        else -> iconPainter
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .defaultMinSize(
+                minHeight = HarmonicDimens.compose_settings_row_min_height,
+            )
+            .themeBackground { backgroundColor ?: cardBackground }
+            .settingsSearchTarget(title)
+            .alpha(if (enabled) 1f else 0.38f)
+            .then(
+                if (onClick != null) {
+                    if (checkedState != null) {
+                        Modifier.toggleable(
+                            value = checkedState,
+                            enabled = enabled,
+                            role = role,
+                            onValueChange = { onClick() },
+                        )
+                    } else {
+                        Modifier.clickable(enabled = enabled, role = role, onClick = onClick)
+                    }
+                } else {
+                    Modifier
+                },
+            )
+            .padding(
+                horizontal = HarmonicDimens.compose_settings_row_horizontal_padding,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (resolvedIconPainter != null) {
+            SettingsRowIcon(resolvedIconPainter, iconTint, iconModifier)
+            Spacer(
+                modifier = Modifier.width(
+                    HarmonicDimens.compose_settings_row_icon_end_space,
+                ),
+            )
+        } else {
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(
+                    vertical = HarmonicDimens.compose_settings_row_text_vertical_padding,
+                ),
+        ) {
+            Text(
+                text = title,
+                color = { colors.onSurface },
+                fontFamily = AppUiFontFamily,
+                fontSize = 16.sp,
+                lineHeight = 20.sp,
+            )
+            if (!summary.isNullOrBlank()) {
+                Text(
+                    text = summary,
+                    color = { summaryColor ?: colors.onSurfaceVariant },
+                    fontFamily = AppUiFontFamily,
+                    fontSize = summaryFontSizeSp.sp,
+                    lineHeight = summaryLineHeightSp.sp,
+                    maxLines = summaryMaxLines,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        trailing?.let {
+            Spacer(
+                modifier = Modifier.width(
+                    HarmonicDimens.compose_settings_row_trailing_start_space,
+                ),
+            )
+            it()
+        }
+    }
+}
+
+@Composable
+private fun SettingsRowIcon(painter: Painter, tint: Color?, modifier: Modifier) {
+    Icon(
+        painter = painter,
+        contentDescription = null,
+        modifier = modifier.size(HarmonicDimens.compose_settings_row_icon_size),
+        tint = tint ?: HarmonicTheme.colors.onSurfaceVariant,
+    )
+}
+
+@Composable
+fun SwitchSettingRow(
+    title: String,
+    summary: String? = null,
+    icon: DrawableResource,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    SettingRow(
+        title = title,
+        summary = summary,
+        icon = icon,
+        enabled = enabled,
+        role = Role.Switch,
+        checkedState = checked,
+        onClick = { onCheckedChange(!checked) },
+        trailing = {
+            HarmonicSwitch(
+                checked = checked,
+                onCheckedChange = null,
+                enabled = enabled,
+            )
+        },
+    )
+}
+
+@Composable
+fun SettingsDivider() {
+    Spacer(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(HarmonicDimens.settings_list_segment_internal_gap)
+            .themeBackground { pageBackground },
+    )
+}
+
+/**
+ * Renders an inline segmented preference. Optional title and summary text stay inside the same
+ * preference above the controls, matching custom View preference layouts.
+ */
+@Composable
+fun <T> SegmentedSetting(
+    title: String? = null,
+    summary: String? = null,
+    options: List<Pair<T, String>>,
+    optionIcons: Map<T, DrawableResource> = emptyMap(),
+    selected: T,
+    enabled: Boolean = true,
+    buttonHeight: Dp = HarmonicDimens.compose_settings_segmented_button_height,
+    optionWeights: Map<T, Float> = emptyMap(),
+    disabledOptions: Set<T> = emptySet(),
+    containerColor: Color? = null,
+    optionContent: (@Composable (T, Boolean) -> Unit)? = null,
+    contentPadding: PaddingValues = PaddingValues(
+        horizontal = HarmonicDimens.compose_settings_row_horizontal_padding,
+        vertical = HarmonicDimens.compose_settings_inline_control_padding,
+    ),
+    onSelected: (T) -> Unit,
+) {
+    val colors = HarmonicTheme.colors
+    val hasHeader = !title.isNullOrBlank() || !summary.isNullOrBlank()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .themeBackground { containerColor ?: cardBackground }
+            .settingsSearchTarget(title)
+            .alpha(if (enabled) 1f else 0.38f)
+            .padding(contentPadding),
+    ) {
+        if (!title.isNullOrBlank()) {
+            Text(
+                text = title,
+                color = { colors.onSurface },
+                fontFamily = AppUiFontFamily,
+                fontSize = 16.sp,
+                lineHeight = 20.sp,
+            )
+        }
+        if (!summary.isNullOrBlank()) {
+            Text(
+                text = summary,
+                modifier = if (title.isNullOrBlank()) {
+                    Modifier
+                } else {
+                    Modifier.padding(
+                        top = HarmonicDimens.compose_settings_inline_control_summary_top_margin,
+                    )
+                },
+                color = { colors.onSurfaceVariant },
+                fontFamily = AppUiFontFamily,
+                fontSize = 14.sp,
+                lineHeight = 18.sp,
+            )
+        }
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .selectableGroup()
+                .padding(
+                    top = if (hasHeader) {
+                        HarmonicDimens.compose_settings_inline_control_top_margin
+                    } else {
+                        0.dp
+                    },
+                ),
+        ) {
+            // Keep each option usable at large font sizes and in narrow settings panes. Balance
+            // the rows so four options become two pairs instead of a crowded row plus one item.
+            val columns = segmentedSettingColumns(options.size, maxWidth, LocalDensity.current.fontScale)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                options.chunked(columns).forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        row.forEachIndexed { index, (value, label) ->
+                            SegmentedSettingOption(
+                                value, label, index, row.lastIndex, selected == value,
+                                enabled && value !in disabledOptions, value in disabledOptions,
+                                buttonHeight, optionIcons[value],
+                                Modifier.weight(optionWeights[value] ?: 1f).fillMaxHeight(),
+                                optionContent, onSelected,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun <T> SegmentedSettingOption(
+    value: T,
+    label: String,
+    index: Int,
+    lastIndex: Int,
+    isSelected: Boolean,
+    optionEnabled: Boolean,
+    disabled: Boolean,
+    buttonHeight: Dp,
+    icon: DrawableResource?,
+    modifier: Modifier,
+    optionContent: (@Composable (T, Boolean) -> Unit)?,
+    onSelected: (T) -> Unit,
+) {
+    val colors = HarmonicTheme.colors
+    val outerCorner = HarmonicDimens.compose_settings_segmented_button_corner_radius
+    val defaultInnerCorner = HarmonicDimens.compose_settings_segmented_button_inner_corner_radius
+    val pressedInnerCorner = HarmonicDimens.compose_settings_segmented_button_pressed_inner_corner_radius
+    val interactionSource = remember(value) { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val innerCorner by animateDpAsState(
+        targetValue = when {
+            isPressed -> pressedInnerCorner
+            isSelected -> outerCorner
+            else -> defaultInnerCorner
+        },
+        animationSpec = spring(
+            dampingRatio = 0.6f,
+            stiffness = 800f,
+        ),
+        label = "settings segmented button corners",
+    )
+    val shape = remember(index, lastIndex, innerCorner, buttonHeight) {
+        segmentedSettingShape(
+            first = index == 0,
+            last = index == lastIndex,
+            outerCorner = outerCorner,
+            animatedInnerCorner = innerCorner,
+            buttonHeight = buttonHeight,
+        )
+    }
+    val selectedBackground = colors.secondaryContainer
+    Row(
+        modifier = modifier
+            .alpha(if (disabled) 0.38f else 1f)
+            .heightIn(min = buttonHeight)
+            .background(
+                if (isSelected) {
+                    selectedBackground
+                } else {
+                    androidx.compose.ui.graphics.Color.Transparent
+                },
+                shape,
+            )
+            .border(
+                1.dp,
+                if (isSelected) {
+                    selectedBackground
+                } else {
+                    colors.outlineVariant
+                },
+                shape,
+            )
+            .clip(shape)
+            .selectable(
+                selected = isSelected,
+                enabled = optionEnabled,
+                role = Role.RadioButton,
+                interactionSource = interactionSource,
+                onClick = { onSelected(value) },
+            )
+            .padding(horizontal = 6.dp, vertical = if (LocalDensity.current.fontScale > 1f) 4.dp else 0.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (optionContent != null) {
+            optionContent(value, isSelected)
+        } else {
+            icon?.let { icon ->
+                Icon(
+                    painter = painterResource(icon),
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = if (isSelected) {
+                        colors.onSecondaryContainer
+                    } else {
+                        colors.onSurfaceVariant
+                    },
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Text(
+                text = label,
+                color = if (isSelected) {
+                    colors.onSecondaryContainer
+                } else {
+                    colors.onSurface
+                },
+                fontFamily = AppUiFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                lineHeight = 18.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+internal fun segmentedSettingColumns(optionCount: Int, width: Dp, fontScale: Float): Int {
+    if (optionCount <= 1) return 1
+    val minimumWidth = 64.dp * fontScale.coerceAtLeast(1f)
+    val maximumColumns = ((width + 2.dp) / (minimumWidth + 2.dp)).toInt().coerceIn(1, optionCount)
+    val rows = (optionCount + maximumColumns - 1) / maximumColumns
+    return (optionCount + rows - 1) / rows
+}
+
+@Composable
+fun SliderSetting(
+    title: String,
+    valueLabel: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    enabled: Boolean = true,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: (() -> Unit)? = null,
+    onReset: (() -> Unit)? = null,
+    resetEnabled: Boolean = true,
+) {
+    val colors = HarmonicTheme.colors
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .themeBackground { cardBackground }
+            .settingsSearchTarget(title)
+            .alpha(if (enabled) 1f else 0.38f)
+            .padding(
+                horizontal = HarmonicDimens.compose_settings_row_horizontal_padding,
+                vertical = HarmonicDimens.compose_settings_inline_control_padding,
+            ),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title,
+                modifier = Modifier.weight(1f),
+                color = { colors.onSurface },
+                fontFamily = AppUiFontFamily,
+                fontSize = 16.sp,
+                lineHeight = 20.sp,
+            )
+            Text(
+                text = valueLabel,
+                color = { colors.onSurface },
+                fontFamily = AppUiFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp,
+                lineHeight = 20.sp,
+            )
+            if (onReset != null) {
+                androidx.compose.material3.IconButton(onClick = onReset, enabled = enabled && resetEnabled) {
+                    Icon(painterResource(Res.drawable.ic_refresh), "Reset ${title.lowercase()}", Modifier.size(20.dp))
+                }
+            }
+        }
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = enabled,
+            valueRange = valueRange,
+            steps = steps,
+        )
+    }
+}
+
+/** Keep spring overshoot from making RoundedCornerShape rescale the opposite, fixed corners. */
+internal fun segmentedSettingShape(
+    first: Boolean,
+    last: Boolean,
+    outerCorner: Dp,
+    animatedInnerCorner: Dp,
+    buttonHeight: Dp,
+): RoundedCornerShape {
+    val innerCorner = animatedInnerCorner.coerceIn(0.dp, buttonHeight / 2)
+    return RoundedCornerShape(
+        topStart = if (first) outerCorner else innerCorner,
+        topEnd = if (last) outerCorner else innerCorner,
+        bottomEnd = if (last) outerCorner else innerCorner,
+        bottomStart = if (first) outerCorner else innerCorner,
+    )
+}
+
+/** The parent owns the full-width navigation ripple; the switch consumes its own taps. */
+@Composable
+fun NavigationSwitchSettingRow(
+    title: String,
+    summary: String? = null,
+    icon: DrawableResource,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+    onCheckedChange: (Boolean) -> Unit,
+    switchEnabled: Boolean = enabled,
+) {
+    SettingRow(
+        title = title,
+        summary = summary,
+        icon = icon,
+        enabled = enabled,
+        onClick = onClick,
+        trailing = {
+            Icon(
+                painter = painterResource(Res.drawable.ic_chevron_right),
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(8.dp))
+            Spacer(
+                Modifier.width(1.dp).height(32.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant),
+            )
+            Spacer(Modifier.width(12.dp))
+            HarmonicSwitch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                enabled = switchEnabled,
+                modifier = Modifier.semantics { contentDescription = title },
+            )
+        },
+    )
+}

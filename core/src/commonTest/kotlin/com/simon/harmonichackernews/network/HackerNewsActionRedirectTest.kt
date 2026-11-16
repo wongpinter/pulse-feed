@@ -1,0 +1,162 @@
+package com.simon.harmonichackernews.network
+
+import com.simon.harmonichackernews.platform.HackerNewsAccount
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import kotlinx.coroutines.test.runTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+
+class HackerNewsActionRedirectTest {
+    @Test
+    fun submissionFormResponseAndRedirectBackToFormAreNotConfirmation() = runTest {
+        for (redirect in listOf(false, true)) {
+            val transport = HttpClient(MockEngine { request ->
+                when (request.url.encodedPath) {
+                    "/login" -> respond("<input name=\"fnid\" value=\"token\">")
+                    "/r" -> if (redirect) respond("", HttpStatusCode.Found, headersOf(HttpHeaders.Location, "/submit"))
+                        else respond("<html>Please slow down.</html>")
+                    else -> respond("<input name=\"fnid\" value=\"token\">Please slow down.")
+                }
+            })
+            try {
+                assertIs<HackerNewsActionResult.Failure>(repository(transport).submit(
+                    HackerNewsAccount("tester", "secret"), "Title", "Body", "",
+                ))
+            } finally {
+                transport.close()
+            }
+        }
+    }
+
+    @Test
+    fun successfulCommentRedirectIsFollowedAsGet() = runTest {
+        var requestCount = 0
+        val transport = HttpClient(MockEngine { request ->
+            when (++requestCount) {
+                1 -> {
+                    assertEquals(HttpMethod.Post, request.method)
+                    assertEquals("/comment", request.url.encodedPath)
+                    respond(
+                        content = "",
+                        status = HttpStatusCode.Found,
+                        headers = headersOf(HttpHeaders.Location, "/item?id=42#43"),
+                    )
+                }
+                else -> {
+                    assertEquals(HttpMethod.Get, request.method)
+                    assertEquals("/item", request.url.encodedPath)
+                    assertEquals("42", request.url.parameters["id"])
+                    respond("<html>comment posted</html>")
+                }
+            }
+        })
+        try {
+            val repository = repository(transport)
+
+            assertIs<HackerNewsActionResult.Success>(
+                repository.comment(HackerNewsAccount("tester", "secret"), "42", "Hello"),
+            )
+            assertEquals(2, requestCount)
+        } finally {
+            transport.close()
+        }
+    }
+
+    @Test
+    fun successfulCommentCanRedirectToHomepage() = runTest {
+        var requestCount = 0
+        val transport = HttpClient(MockEngine { request ->
+            requestCount++
+            when (request.url.encodedPath) {
+                "/comment" -> {
+                    assertEquals(HttpMethod.Post, request.method)
+                    respond("", HttpStatusCode.Found, headersOf(HttpHeaders.Location, "/"))
+                }
+                else -> {
+                    assertEquals(HttpMethod.Get, request.method)
+                    assertEquals("/", request.url.encodedPath)
+                    respond("<html><body>Hacker News front page</body></html>")
+                }
+            }
+        })
+        try {
+            assertIs<HackerNewsActionResult.Success>(
+                repository(transport).comment(HackerNewsAccount("tester", "secret"), "42", "Hello"),
+            )
+            assertEquals(2, requestCount)
+        } finally {
+            transport.close()
+        }
+    }
+
+    @Test
+    fun commentRejectRedirectRemainsFailure() = runTest {
+        // The rejection endpoint can return either a message or an expired one-time link.
+        for (body in listOf("<html>This item is too old.</html>", "Unknown or expired link.")) {
+            var requestCount = 0
+            val transport = HttpClient(MockEngine { request ->
+                requestCount++
+                when (request.url.encodedPath) {
+                    "/comment" -> respond(
+                        "", HttpStatusCode.Found,
+                        headersOf(HttpHeaders.Location, "/x?fnid=token&fnop=comment-reject"),
+                    )
+                    else -> {
+                        assertEquals(HttpMethod.Get, request.method)
+                        assertEquals("/x", request.url.encodedPath)
+                        assertEquals("comment-reject", request.url.parameters["fnop"])
+                        respond(body)
+                    }
+                }
+            })
+            try {
+                assertIs<HackerNewsActionResult.Failure>(
+                    repository(transport).comment(HackerNewsAccount("tester", "secret"), "1", "Hello"),
+                )
+                assertEquals(2, requestCount)
+            } finally {
+                transport.close()
+            }
+        }
+    }
+
+    @Test
+    fun crossOriginActionRedirectIsRejectedWithoutFollowingIt() = runTest {
+        var requestCount = 0
+        val transport = HttpClient(MockEngine {
+            requestCount++
+            respond(
+                content = "",
+                status = HttpStatusCode.Found,
+                headers = headersOf(HttpHeaders.Location, "https://example.com/item?id=42"),
+            )
+        })
+        try {
+            val failure = assertIs<HackerNewsActionResult.Failure>(
+                repository(transport).comment(
+                    HackerNewsAccount("tester", "secret"),
+                    "42",
+                    "Hello",
+                ),
+            )
+
+            assertEquals("Unexpected action redirect", failure.summary)
+            assertEquals(HackerNewsActionFailureReason.INDETERMINATE, failure.reason)
+            assertEquals(1, requestCount)
+        } finally {
+            transport.close()
+        }
+    }
+
+    private fun repository(transport: HttpClient) = KtorHackerNewsActionRepository(
+        client = KtorHttpClient(transport),
+        cookieClient = KtorHttpClient(transport),
+    )
+}

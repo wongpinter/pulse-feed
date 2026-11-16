@@ -1,0 +1,233 @@
+package com.simon.harmonichackernews.ui.settings
+
+import androidx.compose.runtime.Composable
+import com.simon.harmonichackernews.data.LinkPreviewType
+import com.simon.harmonichackernews.resources.Res
+import com.simon.harmonichackernews.resources.ic_arrow_back
+import com.simon.harmonichackernews.resources.ic_block
+import com.simon.harmonichackernews.resources.ic_cached
+import com.simon.harmonichackernews.resources.ic_book_ribbon
+import com.simon.harmonichackernews.resources.ic_font_download
+import com.simon.harmonichackernews.resources.ic_invert_colors
+import com.simon.harmonichackernews.resources.ic_link_preview_x
+import com.simon.harmonichackernews.resources.ic_preview
+import com.simon.harmonichackernews.resources.ic_open_in_browser
+import com.simon.harmonichackernews.resources.ic_shuffle
+import com.simon.harmonichackernews.resources.ic_web_asset
+import com.simon.harmonichackernews.resources.settings_section_web_links
+import com.simon.harmonichackernews.settings.ReadingBooleanPreference
+import org.jetbrains.compose.resources.DrawableResource
+import org.jetbrains.compose.resources.stringResource
+
+data class WebLinksSettingsUiState(
+    val integratedWebView: Boolean,
+    val closeWebViewOnBack: Boolean,
+    val preloadSummary: String,
+    val matchWebViewTheme: Boolean,
+    val blockWebViewAds: Boolean,
+    val readerModeEnabled: Boolean,
+    val readerModeDefault: Boolean,
+    val readerModeFontLabel: String,
+    val readerModeFontSize: Int,
+    val readerModeFontSizeDefault: Int,
+    val readerModeFontSizeRange: IntRange,
+    val externalBrowser: Boolean,
+    val redirectNitter: Boolean,
+    val nitterInstanceUrl: String,
+    val archiveDomainCount: Int,
+    val enabledLinkPreviews: Set<LinkPreviewType>,
+    val linkPreviewsEnabled: Boolean = true,
+    val pullToOpenBrowser: Boolean = false,
+)
+
+/** Hide controls for browser facilities the current host does not implement. */
+data class WebLinksSettingsCapabilities(
+    val adBlocking: Boolean = true,
+    val readerMode: Boolean = true,
+    val closeWebViewOnBack: Boolean = true,
+    val integratedWebView: Boolean = true,
+    val preloadWebsites: Boolean = true,
+)
+
+enum class WebLinksBooleanSetting(internal val preference: ReadingBooleanPreference) {
+    IntegratedWebView(ReadingBooleanPreference.INTEGRATED_WEB_VIEW),
+    CloseWebViewOnBack(ReadingBooleanPreference.CLOSE_WEB_VIEW_ON_BACK),
+    MatchWebViewTheme(ReadingBooleanPreference.MATCH_WEB_VIEW_THEME),
+    BlockWebViewAds(ReadingBooleanPreference.BLOCK_ADS),
+    ReaderModeEnabled(ReadingBooleanPreference.READER_MODE_ENABLED),
+    LinkPreviewsEnabled(ReadingBooleanPreference.LINK_PREVIEWS_ENABLED),
+    ReaderModeDefault(ReadingBooleanPreference.READER_MODE_DEFAULT),
+    PullToOpenBrowser(ReadingBooleanPreference.PULL_TO_OPEN_BROWSER),
+    ExternalBrowser(ReadingBooleanPreference.EXTERNAL_BROWSER),
+    RedirectNitter(ReadingBooleanPreference.REDIRECT_NITTER),
+}
+
+enum class WebLinksSettingsDialog { Preload, ReaderFont, ArchiveDomains, LinkPreviews, NitterInstance }
+
+@Composable
+fun WebLinksSettingsScreen(
+    state: WebLinksSettingsUiState,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onBooleanChanged: (WebLinksBooleanSetting, Boolean) -> Unit,
+    onReaderModeRequested: () -> Unit,
+    onDialogRequested: (WebLinksSettingsDialog) -> Unit,
+    contentVersion: Int = 0,
+    capabilities: WebLinksSettingsCapabilities = WebLinksSettingsCapabilities(),
+) {
+    SettingsPage(
+        title = stringResource(Res.string.settings_section_web_links),
+        showNavigation = showNavigation,
+        onBack = onBack,
+        contentVersion = contentVersion,
+    ) {
+        if (capabilities.integratedWebView) item {
+            SettingsCategory("In-app browser") {
+                BooleanSettingRow(
+                    title = "In-app browser",
+                    summary = "Open websites inside Pulse Feed. May reduce performance.",
+                    icon = Res.drawable.ic_web_asset,
+                    checked = state.integratedWebView,
+                    setting = WebLinksBooleanSetting.IntegratedWebView,
+                    onBooleanChanged = onBooleanChanged,
+                )
+                if (capabilities.closeWebViewOnBack) {
+                    SettingsDivider()
+                    BooleanSettingRow(
+                        title = "Hide browser on back",
+                        summary = "Return to comments instead of the previous webpage.",
+                        icon = Res.drawable.ic_arrow_back,
+                        checked = state.closeWebViewOnBack,
+                        setting = WebLinksBooleanSetting.CloseWebViewOnBack,
+                        onBooleanChanged = onBooleanChanged,
+                        enabled = state.integratedWebView,
+                    )
+                }
+                if (capabilities.preloadWebsites) {
+                    SettingsDivider()
+                    SettingRow(
+                        title = "Preload websites",
+                        summary = state.preloadSummary,
+                        icon = Res.drawable.ic_cached,
+                        enabled = state.integratedWebView,
+                        onClick = { onDialogRequested(WebLinksSettingsDialog.Preload) },
+                    )
+                }
+                SettingsDivider()
+                BooleanSettingRow(
+                    title = "Match in-app browser dark mode to theme",
+                    icon = Res.drawable.ic_invert_colors,
+                    checked = state.matchWebViewTheme,
+                    setting = WebLinksBooleanSetting.MatchWebViewTheme,
+                    onBooleanChanged = onBooleanChanged,
+                    enabled = state.integratedWebView,
+                )
+                if (capabilities.adBlocking) {
+                    SettingsDivider()
+                    BooleanSettingRow(
+                        title = "Block in-app browser ads",
+                        summary = "May cause some sites to stop working and has a small performance penalty",
+                        icon = Res.drawable.ic_block,
+                        checked = state.blockWebViewAds,
+                        setting = WebLinksBooleanSetting.BlockWebViewAds,
+                        onBooleanChanged = onBooleanChanged,
+                        enabled = state.integratedWebView,
+                    )
+                }
+            }
+        }
+        item {
+            SettingsCategory("Browser and links") {
+                if (capabilities.integratedWebView && capabilities.readerMode) {
+                    NavigationSwitchSettingRow(
+                        title = "Reader mode",
+                        icon = Res.drawable.ic_book_ribbon,
+                        enabled = state.integratedWebView,
+                        onClick = onReaderModeRequested,
+                        checked = state.readerModeEnabled,
+                        onCheckedChange = { onBooleanChanged(WebLinksBooleanSetting.ReaderModeEnabled, it) },
+                    )
+                    SettingsDivider()
+                }
+                BooleanSettingRow(
+                    title = "Use external browser",
+                    icon = Res.drawable.ic_open_in_browser,
+                    checked = state.externalBrowser,
+                    setting = WebLinksBooleanSetting.ExternalBrowser,
+                    onBooleanChanged = onBooleanChanged,
+                    summary = "In place of custom tabs",
+                )
+                SettingsDivider()
+                BooleanSettingRow(
+                    title = "Pull down to open browser",
+                    summary = if (state.integratedWebView && capabilities.integratedWebView) {
+                        "Turn off the in-app browser to use this gesture"
+                    } else {
+                        "Pull down from the top of comments and release to open the story link"
+                    },
+                    icon = Res.drawable.ic_open_in_browser,
+                    checked = state.pullToOpenBrowser,
+                    setting = WebLinksBooleanSetting.PullToOpenBrowser,
+                    onBooleanChanged = onBooleanChanged,
+                    enabled = !state.integratedWebView || !capabilities.integratedWebView,
+                )
+                SettingsDivider()
+                BooleanSettingRow(
+                    title = "Redirect Twitter/X to Nitter",
+                    icon = Res.drawable.ic_shuffle,
+                    checked = state.redirectNitter,
+                    setting = WebLinksBooleanSetting.RedirectNitter,
+                    onBooleanChanged = onBooleanChanged,
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "Nitter instance URL",
+                    summary = state.nitterInstanceUrl,
+                    icon = Res.drawable.ic_link_preview_x,
+                    enabled = state.redirectNitter,
+                    onClick = { onDialogRequested(WebLinksSettingsDialog.NitterInstance) },
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "Redirect to archive version",
+                    summary = when (state.archiveDomainCount) {
+                        0 -> "No domains"
+                        1 -> "1 domain"
+                        else -> "${state.archiveDomainCount} domains"
+                    },
+                    icon = Res.drawable.ic_shuffle,
+                    onClick = { onDialogRequested(WebLinksSettingsDialog.ArchiveDomains) },
+                )
+                SettingsDivider()
+                NavigationSwitchSettingRow(
+                    title = "Link previews",
+                    summary = if (state.linkPreviewsEnabled) "${state.enabledLinkPreviews.size} of ${LinkPreviewType.entries.size} enabled" else "Off",
+                    checked = state.linkPreviewsEnabled,
+                    onCheckedChange = { onBooleanChanged(WebLinksBooleanSetting.LinkPreviewsEnabled, it) },
+                    icon = Res.drawable.ic_preview,
+                    onClick = { onDialogRequested(WebLinksSettingsDialog.LinkPreviews) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BooleanSettingRow(
+    title: String,
+    icon: DrawableResource,
+    checked: Boolean,
+    setting: WebLinksBooleanSetting,
+    onBooleanChanged: (WebLinksBooleanSetting, Boolean) -> Unit,
+    summary: String? = null,
+    enabled: Boolean = true,
+) {
+    SwitchSettingRow(
+        title = title,
+        summary = summary,
+        icon = icon,
+        checked = checked,
+        enabled = enabled,
+        onCheckedChange = { onBooleanChanged(setting, it) },
+    )
+}

@@ -1,0 +1,124 @@
+package com.simon.harmonichackernews.app
+
+import com.simon.harmonichackernews.network.IosNetworkComponent
+import com.simon.harmonichackernews.network.PreviewCachePolicy
+import com.simon.harmonichackernews.platform.IosPlatformBindings
+import com.simon.harmonichackernews.platform.IosArticleEmbeddingEngine
+import com.simon.harmonichackernews.platform.StorageKeyPolicy
+import com.simon.harmonichackernews.platform.createIosPlatformDependencies
+import com.simon.harmonichackernews.settings.AppLaunchPreferenceKeys
+import com.simon.harmonichackernews.settings.DataStoreKeyValueStore
+import com.simon.harmonichackernews.settings.ProcessPreferenceStores
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import com.simon.harmonichackernews.settings.SurfaceEffectMode
+import com.simon.harmonichackernews.summary.LocalModelService
+import com.simon.harmonichackernews.summary.IosLocalAiEnvironment
+import kotlinx.io.files.Path
+
+/** Native runtime and storage decisions required before the iOS host creates its app graph. */
+class IosHostRuntimeBindings(
+    val metadata: AppMetadata,
+    val currentMinutesFromMidnight: () -> Int,
+    val systemDark: () -> Boolean,
+    val filesDirectory: String,
+    val cacheDirectory: String,
+    val localModels: LocalModelService? = null,
+) {
+    init {
+        require(filesDirectory.isNotBlank()) { "The iOS files directory is required" }
+        require(cacheDirectory.isNotBlank()) { "The iOS cache directory is required" }
+    }
+}
+
+/**
+ * Swift-facing owner for one Harmonic application graph.
+ *
+ * Run `:ui:assembleHarmonicKitXCFramework`, link the generated
+ * `HarmonicKit.xcframework`, construct this object at application startup, retain it for the
+ * process lifetime, and call [close] during host teardown. The Xcode host remains responsible for
+ * navigation and for the native services it supplies through [IosPlatformBindings].
+ */
+class IosHarmonicAppBootstrap(
+    userAgent: String,
+    bindings: IosPlatformBindings,
+    runtime: IosHostRuntimeBindings,
+) {
+    private fun openStore(root: String, name: String): DataStoreKeyValueStore =
+        runBlocking(Dispatchers.Default) {
+            ProcessPreferenceStores.open(
+                Path(root, "datastore", "$name.preferences_pb").toString(),
+                onWriteFailure = { println("Harmonic preference write failed: $it") },
+            )
+        }
+    val preferences = openStore(runtime.filesDirectory, "settings")
+    val appData = openStore(runtime.filesDirectory, AppLaunchPreferenceKeys.STORE_NAME)
+    val previewCache = openStore(runtime.cacheDirectory, PreviewCachePolicy.STORE_NAME)
+    val fileAccess = openStore(runtime.cacheDirectory, StorageKeyPolicy.FILE_ACCESS_STORE)
+    val network = IosNetworkComponent(userAgent)
+    private val articleEmbeddingEngine = bindings.nativeArticleEmbeddings?.let {
+        IosArticleEmbeddingEngine(it, Path(runtime.cacheDirectory, "local_ai").toString())
+    }
+    private val localAi = bindings.nativeLiteRt?.takeIf { runtime.localModels == null }?.let {
+        IosLocalAiEnvironment.create(
+            preferences = preferences,
+            modelsDirectory = Path(runtime.filesDirectory, "local_ai_models").toString(),
+            cacheDirectory = Path(runtime.cacheDirectory, "local_ai").toString(),
+            userAgent = userAgent,
+            apple = bindings.localSummary,
+            liteRt = it,
+            transfers = bindings.modelTransfers,
+        )
+    }
+    val platform = createIosPlatformDependencies(
+        appData,
+        bindings,
+        localSummary = localAi?.summary ?: bindings.localSummary,
+    )
+    val persistentStorage = HarmonicPersistentStorageFactory.create(
+        roots = HarmonicStorageRoots(
+            files = Path(runtime.filesDirectory),
+            pdfCache = Path(runtime.cacheDirectory, StorageKeyPolicy.PDF_CACHE_DIRECTORY),
+        ),
+        appDataStore = appData,
+        fileAccessStore = fileAccess,
+    )
+    val app = HarmonicAppComposition(
+        network = network.graph,
+        platform = platform,
+        host = HarmonicHostConfiguration(
+            metadata = runtime.metadata,
+            settingsStore = preferences,
+            appDataStore = appData,
+            previewCacheStore = previewCache,
+            settingsChanges = preferences.changes,
+            currentMinutesFromMidnight = runtime.currentMinutesFromMidnight,
+            systemDark = runtime.systemDark,
+            showCommentsUpButtonByDefault = true,
+            defaultSurfaceEffectMode = SurfaceEffectMode.Glass,
+            storyCacheRepository = persistentStorage.storyCacheRepository,
+            feedDatabasePath = Path("${runtime.filesDirectory}/feed/pulse-feed-items.db").toString(),
+            articleEmbeddingCache = persistentStorage.articleEmbeddingCache,
+            // WKWebView cannot consume the stored snapshot format yet.
+            articleSnapshotStore = null,
+            pdfDownloadStore = persistentStorage.pdfDownloadStore,
+            localModels = runtime.localModels ?: localAi?.models,
+            cloudAiSupported = false,
+            articleEmbeddingEngine = articleEmbeddingEngine,
+            nativeArticleEmbeddingEngine = com.simon.harmonichackernews.platform.IosSystemArticleEmbeddingEngine(),
+        ),
+    )
+
+    /** Creates independent navigation and screen state for one UIWindowScene. */
+    fun createScene(): HarmonicSceneComposition = app.createScene()
+
+    fun close() {
+        localAi?.close()
+        app.close()
+        network.close()
+        runBlocking(Dispatchers.Default) {
+            articleEmbeddingEngine?.close()
+            listOf(preferences, appData, previewCache, fileAccess).forEach { it.awaitPersisted() }
+        }
+    }
+}

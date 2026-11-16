@@ -1,0 +1,282 @@
+package com.simon.harmonichackernews.ui.navigation
+
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.zIndex
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.rememberLifecycleOwner
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.ui.common.consumeAllPointerGestures
+import kotlinx.coroutines.flow.first
+
+/** Identities are captured at gesture start, so a committed pop cannot move the new top away. */
+internal data class ActivityBackPreview<K : Any>(
+    val source: K,
+    val parent: K?,
+    val enterModifier: Modifier,
+    val exitModifier: Modifier,
+)
+
+internal typealias ActivitySurfaceTransition = @Composable (
+    transition: Transition<EnterExitState>,
+    skipExit: Boolean,
+    content: @Composable () -> Unit,
+) -> Unit
+
+private class ActivityStackLayer<T, K : Any>(
+    entry: T,
+    val key: K,
+    initiallyVisible: Boolean,
+) {
+    var entry by mutableStateOf(entry)
+    val visibility = MutableTransitionState(initiallyVisible).apply { targetState = true }
+    var exitCompleted by mutableStateOf(false)
+    var forwardExit by mutableStateOf(false)
+}
+
+/**
+ * One lifetime and rendering policy for full-screen stacks, including nested Settings.
+ * Entries keep their composition identity until their exit finishes. A predictive pop latches
+ * completion on the outgoing entry; clearing the host's gesture cannot replay its exit.
+ * The ordered layers are the sole source of z-order, including while removed entries exit.
+ */
+@Composable
+internal fun <T, K : Any> ActivityNavigationStack(
+    entries: List<T>,
+    entryKey: (T) -> K,
+    completedPredictiveBack: Boolean = false,
+    root: @Composable () -> Unit,
+    content: @Composable (T) -> Unit,
+    modifier: Modifier = Modifier,
+    preview: ActivityBackPreview<K>? = null,
+    completedExitKeys: Set<K> = emptySet(),
+    fadeOnly: (T) -> Boolean = { false },
+    hideCoveredRoot: Boolean = false,
+    reflowKey: Any? = Unit,
+    surfaceTransitions: Map<K, ActivitySurfaceTransition> = emptyMap(),
+) {
+    // Reflow changes pane ownership, not navigation history. Reconcile it without retained exits.
+    val layers = remember(reflowKey) {
+        mutableStateListOf<ActivityStackLayer<T, K>>().apply {
+            entries.forEach { entry ->
+                add(ActivityStackLayer(entry, entryKey(entry), initiallyVisible = true))
+            }
+        }
+    }
+    val keys = entries.map(entryKey)
+    val completingPop = completedPredictiveBack || layers.any {
+        it.key in completedExitKeys && it.key !in keys
+    }
+    LaunchedEffect(entries, completedPredictiveBack, completedExitKeys) {
+        entries.forEach { entry ->
+            val retained = layers.firstOrNull { it.key == entryKey(entry) }
+            if (retained == null) {
+                layers += ActivityStackLayer(entry, entryKey(entry), initiallyVisible = false)
+            } else {
+                retained.entry = entry
+            }
+        }
+        layers.forEach { layer ->
+            val inStack = layer.key in keys
+            if ((completedPredictiveBack || layer.key in completedExitKeys) && !inStack) layer.exitCompleted = true
+            layer.visibility.targetState = inStack
+        }
+    }
+    val offsetPx = with(LocalDensity.current) { ActivityNavigationTransitionOffset.roundToPx() }
+    val rootOffset by animateFloatAsState(
+        targetValue = if (entries.isNotEmpty() && !fadeOnly(entries.last()) &&
+            keys.last() !in surfaceTransitions) -offsetPx.toFloat() else 0f,
+        animationSpec = if (
+            completingPop || (entries.isEmpty() && layers.isEmpty())
+        ) snap() else tween(
+            ActivityNavigationTransitionDurationMillis, easing = activityNavigationEasing(),
+        ),
+        label = "navigation root offset",
+    )
+    // A requested entry is not necessarily drawing yet. Its composition and enter transition
+    // can begin on later frames, so a timer from the stack update can hide the source too soon.
+    // Retain the source until the actual covering layer has finished entering.
+    // A retained page is still a complete opaque surface once its own enter has settled,
+    // including the sampled edge exposed by its source translation. It can cover older pages
+    // while a newer destination is entering above it. Custom surface transitions may expose
+    // part of their predecessor, so only the standard and fade-only surfaces count as covers.
+    // Check membership against the requested stack as well as transition state: a removed top
+    // must stop covering its parent before asynchronous visibility reconciliation runs.
+    val coveringLayerIndex = layers.indexOfLast { layer ->
+        layer.key in keys && layer.key !in surfaceTransitions && layer.visibility.let {
+            it.isIdle && it.currentState && it.targetState
+        }
+    }
+    // Retention keeps compositions alive, but covered destinations must stop lifecycle work.
+    // Include pending reconciliation and predictive previews, not just running animations.
+    val transitioning = preview != null || layers.any {
+        !it.visibility.isIdle || it.key !in keys
+    } || keys.any { key -> layers.none { it.key == key } }
+    val rootLifecycle = when {
+        entries.isEmpty() -> if (transitioning) Lifecycle.State.STARTED else Lifecycle.State.RESUMED
+        entries.size == 1 && transitioning -> Lifecycle.State.STARTED
+        else -> Lifecycle.State.CREATED
+    }
+    val rootCovered = hideCoveredRoot && preview == null &&
+        !completingPop && coveringLayerIndex >= 0
+    val rootIsPreviewParent = preview != null && preview.parent == null
+    val background = MaterialTheme.colorScheme.pageBackground
+    Box(modifier.fillMaxSize()) {
+        Box(
+            Modifier.fillMaxSize()
+                .drawWithContent { if (!rootCovered && (preview == null || rootIsPreviewParent)) drawContent() }
+                .then(if (rootIsPreviewParent) Modifier.background(background) else Modifier)
+                .drawWithContent {
+                    // Keep inset recalculation and backdrop sampling in the resting page's
+                    // coordinate space. A translated graphics layer makes safe-area padding
+                    // grow as the page moves offscreen, reflowing the retained content.
+                    withTransform({
+                        translate(left = if (preview == null && !completingPop) rootOffset else 0f)
+                    }) {
+                        this@drawWithContent.drawContent()
+                    }
+                }
+                .then(if (entries.isEmpty()) Modifier else Modifier.clearAndSetSemantics { }),
+        ) {
+            Box(Modifier.fillMaxSize().then(if (rootIsPreviewParent) preview.enterModifier else Modifier)) {
+                NavigationDestinationLifecycle(rootLifecycle, root)
+            }
+        }
+        layers.forEachIndexed { index, layer ->
+            // Key the whole layer, including AnimatedVisibility, to preserve native views and scroll.
+            key(layer.key) {
+                val inStack = layer.key in keys
+                val isCurrent = layer.key == keys.lastOrNull()
+                val completedExit = layer.exitCompleted || ((completedPredictiveBack || layer.key in completedExitKeys) && !inStack)
+                val skipExit = completingPop || layer.exitCompleted
+                val usesFade = fadeOnly(layer.entry)
+                val surfaceTransition = surfaceTransitions[layer.key]
+                val offset by animateFloatAsState(
+                    targetValue = if (inStack && !isCurrent && entries.lastOrNull()?.let(fadeOnly) != true &&
+                        keys.lastOrNull() !in surfaceTransitions) -offsetPx.toFloat() else 0f,
+                    animationSpec = if (skipExit) snap() else tween(
+                        ActivityNavigationTransitionDurationMillis, easing = activityNavigationEasing(),
+                    ),
+                    label = "navigation entry offset",
+                )
+                val backModifier = when (layer.key) {
+                    preview?.source -> preview.exitModifier
+                    preview?.parent -> preview.enterModifier
+                    else -> Modifier
+                }
+                val revealed = if (preview == null) {
+                    index >= coveringLayerIndex
+                } else {
+                    layer.key == preview.source || layer.key == preview.parent
+                }
+                LaunchedEffect(layer) {
+                    snapshotFlow {
+                        layer.visibility.isIdle && !layer.visibility.currentState && !layer.visibility.targetState
+                    }.first { it }
+                    layers.remove(layer)
+                }
+                AnimatedVisibility(
+                    visibleState = layer.visibility,
+                    modifier = Modifier.fillMaxSize().zIndex(index + 1f)
+                        .graphicsLayer { alpha = if (completedExit) 0f else 1f }
+                        .drawWithContent {
+                            if (revealed) {
+                                drawContent()
+                            }
+                        }
+                        // Only the immediate predecessor is revealed; older pages cannot leak at its edges.
+                        .then(if (layer.key == preview?.parent) Modifier.background(background) else Modifier)
+                        .then(if (isCurrent) Modifier else Modifier.clearAndSetSemantics { }),
+                    enter = if (usesFade) fadeIn(tween(220)) else EnterTransition.None,
+                    exit = if (usesFade && !skipExit) fadeOut(tween(180)) else ExitTransition.None,
+                ) {
+                    val surface: @Composable () -> Unit = {
+                        Box(Modifier.fillMaxSize()
+                            // The viewport owns a graphics layer that can re-record after a child
+                            // invalidates even when its outer draw is skipped. Keep that recording
+                            // empty too, without unplacing or disposing the retained content.
+                            .drawWithContent { if (revealed) drawContent() }
+                            .background(background)) {
+                            // An opaque surface alone does not consume taps in blank areas.
+                            Box(Modifier.fillMaxSize().consumeAllPointerGestures())
+                            CompositionLocalProvider(
+                                LocalActivityNavigationTransition provides transition,
+                                LocalActivityNavigationForwardExit provides { layer.forwardExit = true },
+                            ) {
+                                val maxLifecycle = when {
+                                    !inStack -> Lifecycle.State.CREATED
+                                    isCurrent -> if (transitioning) Lifecycle.State.STARTED else Lifecycle.State.RESUMED
+                                    layer.key == preview?.parent ||
+                                        (transitioning && layer.key == keys.getOrNull(keys.lastIndex - 1)) -> Lifecycle.State.STARTED
+                                    else -> Lifecycle.State.CREATED
+                                }
+                                NavigationDestinationLifecycle(maxLifecycle) { content(layer.entry) }
+                            }
+                        }
+                    }
+                    if (surfaceTransition != null) {
+                        Box(Modifier.fillMaxSize()
+                            .navigationSurfaceTranslation { if (preview == null && !skipExit) offset else 0f }
+                            .then(backModifier)) {
+                            surfaceTransition(transition, skipExit, surface)
+                        }
+                    } else if (usesFade) {
+                        surface()
+                    } else {
+                        ActivityNavigationTransitionViewport(
+                            transition = transition,
+                            transitionOffsetPx = offsetPx,
+                            baseTranslationX = { if (preview == null && !skipExit) offset else 0f },
+                            skipExitAnimation = skipExit,
+                            forwardExit = layer.forwardExit,
+                            modifier = Modifier.fillMaxSize(),
+                            contentModifier = backModifier,
+                            surfaceVisible = revealed,
+                            content = surface,
+                        )
+                    }
+                }
+            }
+        }
+        if (preview != null) {
+            Box(Modifier.fillMaxSize().zIndex(Float.MAX_VALUE).consumeAllPointerGestures())
+        }
+    }
+}
+
+/** A child owner also respects a covered parent stack and the host's background lifecycle. */
+@Composable
+private fun NavigationDestinationLifecycle(maxLifecycle: Lifecycle.State, content: @Composable () -> Unit) {
+    val owner = rememberLifecycleOwner(maxLifecycle = maxLifecycle)
+    CompositionLocalProvider(LocalLifecycleOwner provides owner, content = content)
+}

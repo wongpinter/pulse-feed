@@ -1,0 +1,139 @@
+package com.simon.harmonichackernews.adapters
+
+import com.simon.harmonichackernews.settings.QuoteSpacing
+import com.simon.harmonichackernews.settings.QuoteHighlightColor
+import com.simon.harmonichackernews.settings.QuoteHighlightStyle
+
+import com.simon.harmonichackernews.settings.UserAvatarOptions
+import com.simon.harmonichackernews.settings.CommentsHeaderMetaInfo
+import com.simon.harmonichackernews.settings.CommentsHeaderLayout
+import com.simon.harmonichackernews.settings.CommentsHeaderEdge
+import com.simon.harmonichackernews.settings.CommentsHeaderButtons
+import com.simon.harmonichackernews.settings.CommentsHeaderTint
+
+import com.simon.harmonichackernews.settings.DisplayStyle
+import com.simon.harmonichackernews.settings.CommentIndicatorThickness
+import com.simon.harmonichackernews.settings.CommentDepthPreferences
+import com.simon.harmonichackernews.settings.CommentPreferences
+import com.simon.harmonichackernews.settings.PaletteTintPreferences
+import com.simon.harmonichackernews.settings.TextPreferences
+
+data class CommentDisplaySettings(
+    val collapseParent: Boolean,
+    val showFavicons: Boolean,
+    val showHeaderPreviewImage: Boolean,
+    val tintHeader: Boolean,
+    val showUpButton: Boolean,
+    val paletteTintMode: String,
+    val preferredTextSize: Float,
+    val commentDepthIndicatorMode: String,
+    val showNavigationBar: Boolean,
+    val font: String,
+    val showInvert: Boolean,
+    val showTopLevelDepthIndicator: Boolean,
+    val theme: String?,
+    val isTablet: Boolean,
+    val faviconProvider: String,
+    val swapLongPressTap: Boolean,
+    val displayStyle: DisplayStyle,
+    val showDividers: Boolean,
+    val highlightCommentMeta: Boolean,
+    val collectReferenceLinks: Boolean,
+    val hasAccountDetails: Boolean,
+    val canProvideSummary: Boolean,
+    val showAdditionalSummaryInfo: Boolean,
+    val enableSummaryBoldFormatting: Boolean,
+    val indicatorThickness: CommentIndicatorThickness = CommentIndicatorThickness.STANDARD,
+    val highlightQuotes: Boolean = false,
+    val quoteHighlightColor: QuoteHighlightColor = QuoteHighlightColor.MATERIAL,
+    val quoteSpacing: QuoteSpacing = QuoteSpacing.COMFORTABLE,
+    val quoteHighlightStyle: QuoteHighlightStyle = QuoteHighlightStyle.BOTH,
+    val quotePadding: Boolean = true,
+    val roundedDepthIndicators: Boolean = false,
+    val continuousDepthIndicators: Boolean = false,
+    val expandedReferenceLinks: Boolean = true,
+    val userAvatarsEnabled: Boolean = false,
+    val userAvatarOptions: UserAvatarOptions = UserAvatarOptions(),
+    val markNewComments: Boolean = true,
+    val headerLayout: CommentsHeaderLayout = CommentsHeaderLayout.STANDARD,
+    val headerEdge: CommentsHeaderEdge = CommentsHeaderEdge.FADE,
+    val headerMetaInfo: CommentsHeaderMetaInfo = CommentsHeaderMetaInfo.ON_IMAGE,
+    val headerTint: CommentsHeaderTint = CommentsHeaderTint.IMAGE,
+    val showHeaderDomain: Boolean = true,
+    val showHeaderPoints: Boolean = true,
+    val showHeaderCategories: Boolean = true,
+    val headerButtons: CommentsHeaderButtons = CommentsHeaderButtons(),
+    val canAsk: Boolean = canProvideSummary,
+    val peekStoryHeader: Boolean = true,
+    val spacing: Int = com.simon.harmonichackernews.settings.RowSpacingPreferences.DEFAULT,
+) {
+    val combineHeaderActions: Boolean get() = headerMetaInfo == CommentsHeaderMetaInfo.BUTTONS
+    val cardStyle: Boolean get() = displayStyle == DisplayStyle.RAISED || displayStyle == DisplayStyle.OUTLINED
+    val hasBackground: Boolean get() = displayStyle != DisplayStyle.FLAT
+
+    companion object {
+        fun from(
+            preferences: CommentPreferences,
+            showInvert: Boolean,
+            isTablet: Boolean,
+            hasAccountDetails: Boolean,
+            canProvideSummary: Boolean,
+            showAdditionalSummaryInfo: Boolean = false,
+            enableSummaryBoldFormatting: Boolean = true,
+            canAsk: Boolean = canProvideSummary,
+        ): CommentDisplaySettings = CommentDisplaySettings(
+            collapseParent = preferences.collapseParent,
+            indicatorThickness = preferences.indicatorThickness,
+            highlightQuotes = preferences.highlightQuotes,
+            quoteSpacing = preferences.quoteSpacing,
+            quoteHighlightColor = preferences.quoteHighlightColor,
+            quoteHighlightStyle = preferences.quoteHighlightStyle,
+            quotePadding = preferences.quotePadding,
+            roundedDepthIndicators = preferences.roundedDepthIndicators,
+            continuousDepthIndicators = preferences.continuousDepthIndicators &&
+                preferences.depthIndicatorMode != CommentDepthPreferences.AUTHOR,
+            userAvatarsEnabled = preferences.userAvatarsEnabled,
+            userAvatarOptions = preferences.userAvatarOptions,
+            showFavicons = preferences.showFavicons,
+            showHeaderDomain = preferences.showHeaderDomain,
+            showHeaderPoints = preferences.showHeaderPoints,
+            showHeaderCategories = preferences.showHeaderCategories,
+            headerButtons = preferences.headerButtons,
+            showHeaderPreviewImage = preferences.showHeaderPreviewImage,
+            tintHeader = preferences.tintHeader,
+            headerLayout = preferences.headerLayout,
+            headerEdge = preferences.headerEdge,
+            headerMetaInfo = preferences.headerMetaInfo,
+            headerTint = preferences.headerTint,
+            showUpButton = preferences.showUpButton,
+            peekStoryHeader = preferences.peekStoryHeader,
+            paletteTintMode = PaletteTintPreferences.normalizeConfigKey(
+                preferences.paletteTintConfigKey,
+            ),
+            preferredTextSize = TextPreferences.clampCommentTextSize(preferences.textSize),
+            commentDepthIndicatorMode = CommentDepthPreferences.sanitizeMode(
+                preferences.depthIndicatorMode,
+            ),
+            showNavigationBar = preferences.showNavigationButtons,
+            font = TextPreferences.sanitizeFont(preferences.font),
+            showInvert = showInvert,
+            showTopLevelDepthIndicator = preferences.showTopLevelDepthIndicator,
+            theme = preferences.theme,
+            isTablet = isTablet,
+            faviconProvider = preferences.faviconProvider,
+            swapLongPressTap = preferences.swapLongPressTap,
+            spacing = preferences.spacing,
+            displayStyle = preferences.displayStyle,
+            showDividers = preferences.showDividers,
+            markNewComments = preferences.markNewComments,
+            highlightCommentMeta = preferences.highlightMetadata,
+            collectReferenceLinks = preferences.collectReferenceLinks,
+            expandedReferenceLinks = preferences.expandedReferenceLinks,
+            hasAccountDetails = hasAccountDetails,
+            canProvideSummary = canProvideSummary,
+            canAsk = canAsk,
+            showAdditionalSummaryInfo = showAdditionalSummaryInfo,
+            enableSummaryBoldFormatting = enableSummaryBoldFormatting,
+        )
+    }
+}

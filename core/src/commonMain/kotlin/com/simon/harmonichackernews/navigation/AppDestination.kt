@@ -1,0 +1,126 @@
+package com.simon.harmonichackernews.navigation
+
+import com.simon.harmonichackernews.data.Story
+import com.simon.harmonichackernews.data.StorySnapshot
+import com.simon.harmonichackernews.data.applySnapshot
+import com.simon.harmonichackernews.data.toSnapshot
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
+sealed interface AppDestination
+
+/** Stable navigation identity. Story content is hydrated by the destination feature. */
+@Serializable
+data class StoryRoute(
+    val storyId: Int,
+    val showWebsite: Boolean = false,
+    val scrollToCommentId: Int = -1,
+    val openedFromCachedStories: Boolean = false,
+    val debugMarkAllCommentsNew: Boolean = false,
+) {
+    init {
+        require(storyId > 0) { "A positive Hacker News item ID is required" }
+    }
+}
+
+/** Optional immutable content used for an immediate header while the route hydrates by item ID. */
+@Serializable
+data class StoryNavigationSeed(
+    val story: StorySnapshot,
+    val pdfTitle: String? = null,
+    val videoTitle: String? = null,
+    val isLink: Boolean = false,
+    @SerialName("commentMasterId")
+    val rootStoryId: Int = 0,
+    @SerialName("commentMasterTitle")
+    val rootStoryTitle: String? = null,
+    @SerialName("commentMasterUrl")
+    val rootStoryUrl: String? = null,
+)
+
+/** A stable route with an optional transient domain seed; no rendering/resource state is routed. */
+@Serializable
+data class StoryDestination(
+    val storyId: Int,
+    val showWebsite: Boolean = false,
+    val scrollToCommentId: Int = -1,
+    val seed: StoryNavigationSeed? = null,
+    val openedFromCachedStories: Boolean = false,
+    val debugMarkAllCommentsNew: Boolean = false,
+) : AppDestination {
+    init {
+        require(storyId > 0) { "A positive Hacker News item ID is required" }
+    }
+
+    val route: StoryRoute
+        get() = StoryRoute(storyId, showWebsite, scrollToCommentId, openedFromCachedStories, debugMarkAllCommentsNew)
+}
+
+fun StoryRoute.toDestination(): StoryDestination = StoryDestination(
+    storyId = storyId,
+    showWebsite = showWebsite,
+    scrollToCommentId = scrollToCommentId,
+    openedFromCachedStories = openedFromCachedStories,
+    debugMarkAllCommentsNew = debugMarkAllCommentsNew,
+)
+
+@Serializable
+enum class EditorType {
+    POST,
+    TOP_LEVEL_COMMENT,
+    COMMENT_REPLY,
+}
+
+@Serializable
+data class EditorDestination(
+    val type: EditorType = EditorType.POST,
+    val itemId: Int = -1,
+    val parentText: String? = null,
+    val postTitle: String? = null,
+    val userName: String? = null,
+    /** The story a comment belongs to, used to mark it as commented on. Unknown when not positive. */
+    val rootStoryId: Int = -1,
+) : AppDestination {
+    val isValid: Boolean
+        get() = type == EditorType.POST || itemId > 0
+}
+
+@Serializable
+data class SubmissionsDestination(val userName: String) : AppDestination {
+    init {
+        require(userName.isNotBlank()) { "A username is required" }
+    }
+}
+
+fun Story.toDestination(
+    showWebsite: Boolean = false,
+    scrollToCommentId: Int = -1,
+): StoryDestination = StoryDestination(
+    storyId = id,
+    showWebsite = showWebsite,
+    scrollToCommentId = scrollToCommentId,
+    seed = StoryNavigationSeed(
+        story = toSnapshot(),
+        pdfTitle = pdfTitle,
+        videoTitle = videoTitle,
+        isLink = isLink,
+        rootStoryId = rootStoryId,
+        rootStoryTitle = rootStoryTitle,
+        rootStoryUrl = rootStoryUrl,
+    ),
+)
+
+/** Rebuilds the mutable compatibility model at the Android rendering boundary. */
+fun StoryDestination.toStory(): Story = Story().also { story ->
+    story.id = storyId
+    seed?.let { initial ->
+        story.applySnapshot(initial.story)
+        story.pdfTitle = initial.pdfTitle
+        story.videoTitle = initial.videoTitle
+        story.isLink = initial.isLink
+        story.rootStoryId = initial.rootStoryId
+        story.rootStoryTitle = initial.rootStoryTitle
+        story.rootStoryUrl = initial.rootStoryUrl
+        story.loaded = true
+    }
+}

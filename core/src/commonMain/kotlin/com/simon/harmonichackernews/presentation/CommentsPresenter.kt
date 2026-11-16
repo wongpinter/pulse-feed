@@ -1,0 +1,983 @@
+package com.simon.harmonichackernews.presentation
+
+import com.simon.harmonichackernews.network.AlgoliaCommentsDisplayReuse
+
+import com.simon.harmonichackernews.data.Comment
+import com.simon.harmonichackernews.data.PreparedCommentThread
+import com.simon.harmonichackernews.data.Story
+import com.simon.harmonichackernews.data.toSnapshot
+import com.simon.harmonichackernews.network.AlgoliaCommentRequest
+import com.simon.harmonichackernews.network.AlgoliaCommentsResponse
+import com.simon.harmonichackernews.network.AlgoliaStorySummary
+import com.simon.harmonichackernews.network.CommentThreadLoadResult
+import com.simon.harmonichackernews.network.CommentThreadRepository
+import com.simon.harmonichackernews.network.HackerNewsActionResult
+import com.simon.harmonichackernews.network.HackerNewsVotingService
+import com.simon.harmonichackernews.network.PollOptionsLoader
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** Optional host hook for low-overhead, cross-thread performance slices. */
+data class CommentsPerformanceTrace(
+    val begin: (name: String, cookie: Int) -> Unit = { _, _ -> },
+    val end: (name: String, cookie: Int) -> Unit = { _, _ -> },
+)
+
+data class CommentsPresenterState(
+    val thread: PortableCommentThreadState = PortableCommentThreadState(),
+    val savedItemRevision: Long = 0L,
+    val lastLoadedMillis: Long = 0L,
+    val loaded: Boolean = false,
+    val showingCached: Boolean = false,
+    val refreshing: Boolean = false,
+    val failure: StoryLoadFailure? = null,
+    val usingOfficialApiFallback: Boolean = false,
+    val showRefreshPrompt: Boolean = false,
+    val storyVoteLoading: Boolean = false,
+    val storyFavoriteLoading: Boolean = false,
+    val pollVoteInFlightOptionId: Int? = null,
+    val commentFavoriteLoadingId: Int = -1,
+    val commentVoteLoadingId: Int = -1,
+    val commentVoteLoadingAction: CommentMenuAction? = null,
+    val downvotedCommentIds: Set<Int> = emptySet(),
+)
+
+sealed interface CommentsAction {
+    data class ResetThread(
+        val story: Story?,
+        val header: Comment,
+        val sorting: String,
+    ) : CommentsAction
+    data class SetSorting(val sorting: String) : CommentsAction
+    data class ToggleExpanded(val commentId: Int) : CommentsAction
+    data class ExpandParents(val commentId: Int) : CommentsAction
+    data class RestoreCollapsedComments(val collapsedIds: Set<Int>) : CommentsAction
+    data object EnableOpThreadFilter : CommentsAction
+    data object ResetOpThreadFilter : CommentsAction
+    data object EnableUserThreadFilter : CommentsAction
+    data object ResetUserThreadFilter : CommentsAction
+    data class SetSearchQuery(val query: String) : CommentsAction
+    data class SetSearchActive(val active: Boolean) : CommentsAction
+    data class BeginThreadLoad(val nowMillis: Long) : CommentsAction
+    data class EvaluateUpdateAvailability(
+        val nowMillis: Long,
+        val alwaysShow: Boolean,
+        val storyTimeEpochSeconds: Int,
+    ) : CommentsAction
+    data class SetLoaded(val loaded: Boolean) : CommentsAction
+    data class SetRefreshing(val refreshing: Boolean) : CommentsAction
+    data class SetFailure(val failure: StoryLoadFailure?) : CommentsAction
+    data class SetShowRefreshPrompt(val show: Boolean) : CommentsAction
+    data class SetStoryVoteLoading(val loading: Boolean) : CommentsAction
+    data class SetStoryFavoriteLoading(val loading: Boolean) : CommentsAction
+    data class RequestCommentActions(val comment: PortableCommentItem) : CommentsAction
+    data class ToggleBookmark(val itemId: Int) : CommentsAction
+    data class ToggleStoryVote(val itemId: Int, val isComment: Boolean) : CommentsAction
+    data class ToggleStoryFavorite(val itemId: Int, val isComment: Boolean) : CommentsAction
+    data class ToggleCommentFavorite(val commentId: Int) : CommentsAction
+    data class VoteComment(
+        val commentId: Int,
+        val direction: String,
+        val previousDownvoted: Boolean,
+    ) : CommentsAction
+    data class LoadThread(
+        val story: Story,
+        val useAlgolia: Boolean,
+        val filteredUsers: Set<String>,
+        val sorting: String,
+        val collapseTopLevel: Boolean,
+        val previousResponse: String?,
+        val restoreScrollFromCache: Boolean,
+        /**
+         * Defers potentially blocking cache access until the cancellable thread-load job runs.
+         * Production hosts use a background dispatcher; direct responses remain useful for
+         * refreshes and focused presenter tests.
+         */
+        val loadPreviousResponse: (suspend () -> String?)? = null,
+        /** Optional host gate after background parsing and before cached UI state is published. */
+        val beforeApplyCachedResponse: (suspend () -> Unit)? = null,
+        val loadPreparedThread: (suspend () -> PreparedCommentThread?)? = null,
+        val openingRequest: AlgoliaCommentRequest? = null,
+        val userInitiated: Boolean = false,
+        /** Background downloads are not evidence that the cached comments were read. */
+        val cachedCommentsPreviouslyViewed: Boolean = false,
+    ) : CommentsAction
+    data class LoadPollOptions(val story: Story, val forceRefresh: Boolean = false) : CommentsAction
+    data class VotePollOption(val optionId: Int) : CommentsAction
+    data object CancelThreadLoad : CommentsAction
+    data object CancelPollOptionsLoad : CommentsAction
+    data object CancelPollVote : CommentsAction
+}
+
+sealed interface CommentsPresenterEffect {
+    data class ShowCommentActions(val comment: PortableCommentItem) : CommentsPresenterEffect
+    data class ThreadApplied(
+        val requestId: Int,
+        val storyId: Int,
+        val contentApplied: Boolean,
+        val networkCompleted: Boolean,
+        val responseToCache: String? = null,
+        val cacheSummary: AlgoliaStorySummary? = null,
+        val restoreScroll: Boolean = false,
+        val broadcastStoryUpdate: Boolean = false,
+        val headerChanged: Boolean = false,
+        val usedOfficialFallback: Boolean = false,
+    ) : CommentsPresenterEffect
+    data class ThreadFailed(
+        val requestId: Int,
+        val storyId: Int,
+        val result: CommentThreadLoadResult.Failure,
+    ) : CommentsPresenterEffect
+    data class PollOptionsChanged(
+        val storyId: Int,
+        val failedOptionId: Int? = null,
+    ) : CommentsPresenterEffect
+    data class PollOptionsLookupFailed(
+        val storyId: Int,
+        val cause: Throwable,
+    ) : CommentsPresenterEffect
+    data class PollVoteStarted(val optionId: Int) : CommentsPresenterEffect
+    data class PollVoteCompleted(
+        val optionId: Int,
+        val outcome: PollVoteOutcome,
+    ) : CommentsPresenterEffect
+    data class SavedItemActionStarted(val request: CommentsSavedItemRequest) : CommentsPresenterEffect
+    data class SavedItemActionCompleted(
+        val request: CommentsSavedItemRequest,
+        val outcome: SavedItemActionOutcome,
+    ) : CommentsPresenterEffect
+    data class SavedItemActionStartFailed(
+        val request: CommentsSavedItemRequest,
+        val cause: Throwable,
+    ) : CommentsPresenterEffect
+}
+
+sealed interface PollVoteOutcome {
+    data object Success : PollVoteOutcome
+    data class Failure(val result: HackerNewsActionResult) : PollVoteOutcome
+}
+
+sealed interface CommentsSavedItemRequest {
+    val itemId: Int
+
+    data class StoryVote(override val itemId: Int) : CommentsSavedItemRequest
+    data class StoryFavorite(override val itemId: Int) : CommentsSavedItemRequest
+    data class CommentFavorite(override val itemId: Int) : CommentsSavedItemRequest
+    data class CommentVote(
+        override val itemId: Int,
+        val direction: String,
+        val previousDownvoted: Boolean,
+    ) : CommentsSavedItemRequest
+}
+
+/** Portable comments-screen presentation owner; the platform shell handles emitted effects. */
+class CommentsPresenter(
+    private val scope: CoroutineScope,
+    private val sessionState: CommentsSessionState,
+    private val commentThreadRepository: CommentThreadRepository,
+    private val pollOptionsLoader: PollOptionsLoader,
+    private val savedItemActions: SavedItemActionUseCase,
+    private val votingService: HackerNewsVotingService,
+    private val performanceTrace: CommentsPerformanceTrace = CommentsPerformanceTrace(),
+    private val threadPreparationDispatcher: CoroutineDispatcher = Dispatchers.Unconfined,
+    private val prepareInitialContent: suspend (PortableCommentThreadState) -> Unit = {},
+) : Feature<CommentsAction, CommentsPresenterState, CommentsPresenterEffect> {
+    val thread: CommentThreadStore = sessionState.commentThread
+    private val search = CommentSearchSession(scope, thread, threadPreparationDispatcher)
+    private val mutableState = MutableStateFlow(
+        CommentsPresenterState(
+            thread = thread.state.value,
+            lastLoadedMillis = sessionState.lastLoaded,
+            loaded = sessionState.commentsLoaded,
+            showingCached = sessionState.showingCached,
+            refreshing = sessionState.refreshInProgress,
+            failure = when {
+                !sessionState.loadingFailed -> null
+                sessionState.loadingFailedServerError -> StoryLoadFailure.NOT_FOUND
+                else -> StoryLoadFailure.GENERAL
+            },
+            showRefreshPrompt = sessionState.showRefreshPrompt,
+            storyVoteLoading = sessionState.storyVoteLoading,
+            storyFavoriteLoading = sessionState.storyFavoriteLoading,
+        ),
+    )
+    override val state: StateFlow<CommentsPresenterState> = mutableState.asStateFlow()
+
+    private val mutableEffects = MutableSharedFlow<CommentsPresenterEffect>(extraBufferCapacity = 8)
+    override val effects: SharedFlow<CommentsPresenterEffect> = mutableEffects.asSharedFlow()
+    private var threadLoadJob: Job? = null
+    private var pollOptionsLoadJob: Job? = null
+    private var pollOptionsStoryId: Int = 0
+    private var pollOptionsLoadStarted = false
+    private var pollOptionsLookupStarted = false
+    private var pollOptionsGeneration = 0
+    private var pollVoteJob: Job? = null
+    private var pollVoteGeneration: Long = 0L
+    private val threadLoadSession = KeyedRequestSession<Int>()
+    private val savedItemActionJobs = mutableMapOf<String, Job>()
+    private val storyVotePendingIds = linkedSetOf<Int>()
+    private val storyFavoritePendingIds = linkedSetOf<Int>()
+    private val commentFavoritePendingIds = linkedSetOf<Int>()
+    private val commentVotePendingActions = linkedMapOf<Int, CommentMenuAction>()
+
+    val savedItemState: SavedItemStateReader get() = savedItemActions
+
+    init {
+        scope.launch { thread.state.collect { publish(thread = it) } }
+    }
+
+    override fun dispatch(intent: CommentsAction) {
+        val action = intent
+        when (action) {
+            is CommentsAction.ResetThread -> {
+                thread.reset(action.story, action.header, action.sorting)
+                publish(showingCached = false)
+            }
+            is CommentsAction.SetSorting -> thread.setSorting(action.sorting)
+            is CommentsAction.ToggleExpanded -> thread.toggleExpanded(action.commentId)
+            is CommentsAction.ExpandParents -> thread.expandParents(action.commentId)
+            is CommentsAction.RestoreCollapsedComments ->
+                thread.restoreCollapsedComments(action.collapsedIds)
+            CommentsAction.EnableOpThreadFilter -> thread.enableOpThreadFilter()
+            CommentsAction.ResetOpThreadFilter -> thread.resetOpThreadFilter()
+            CommentsAction.EnableUserThreadFilter -> thread.enableUserThreadFilter()
+            CommentsAction.ResetUserThreadFilter -> thread.resetUserThreadFilter()
+            is CommentsAction.SetSearchQuery -> thread.setSearchQuery(action.query)
+            is CommentsAction.SetSearchActive -> search.setActive(action.active)
+            is CommentsAction.BeginThreadLoad -> publish(
+                lastLoadedMillis = action.nowMillis,
+                showRefreshPrompt = false,
+            )
+            is CommentsAction.EvaluateUpdateAvailability -> publish(
+                showRefreshPrompt = CommentsPresentationPolicy.shouldShowRefreshPrompt(
+                    nowMillis = action.nowMillis,
+                    lastLoadedMillis = state.value.lastLoadedMillis,
+                    alwaysShow = action.alwaysShow,
+                    storyTimeEpochSeconds = action.storyTimeEpochSeconds,
+                ),
+            )
+            is CommentsAction.SetLoaded -> publish(loaded = action.loaded)
+            is CommentsAction.SetRefreshing -> publish(refreshing = action.refreshing)
+            is CommentsAction.SetFailure -> publish(failure = action.failure)
+            is CommentsAction.SetShowRefreshPrompt -> publish(showRefreshPrompt = action.show)
+            is CommentsAction.SetStoryVoteLoading -> publish(storyVoteLoading = action.loading)
+            is CommentsAction.SetStoryFavoriteLoading -> publish(storyFavoriteLoading = action.loading)
+            is CommentsAction.RequestCommentActions ->
+                mutableEffects.tryEmit(CommentsPresenterEffect.ShowCommentActions(action.comment))
+            is CommentsAction.ToggleBookmark -> {
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    savedItemActions.toggleBookmarkAtomic(action.itemId)
+                    publish(savedItemRevision = state.value.savedItemRevision + 1L)
+                }
+            }
+            is CommentsAction.ToggleStoryVote -> performSavedItemAction(
+                request = CommentsSavedItemRequest.StoryVote(action.itemId),
+                kind = SavedItemActionKind.VOTE,
+            ) { savedItemActions.toggleVoteAndExecuteAtomic(
+                    itemId = action.itemId,
+                    isComment = action.isComment,
+                ) }
+            is CommentsAction.ToggleStoryFavorite -> performSavedItemAction(
+                request = CommentsSavedItemRequest.StoryFavorite(action.itemId),
+                kind = SavedItemActionKind.FAVORITE,
+            ) { savedItemActions.toggleFavoriteAndExecuteAtomic(action.itemId, action.isComment) }
+            is CommentsAction.ToggleCommentFavorite -> performSavedItemAction(
+                request = CommentsSavedItemRequest.CommentFavorite(action.commentId),
+                kind = SavedItemActionKind.FAVORITE,
+            ) { savedItemActions.toggleFavoriteAndExecuteAtomic(
+                    action.commentId,
+                    isComment = true,
+                ) }
+            is CommentsAction.VoteComment -> performSavedItemAction(
+                request = CommentsSavedItemRequest.CommentVote(
+                    itemId = action.commentId,
+                    direction = action.direction,
+                    previousDownvoted = action.previousDownvoted,
+                ),
+                kind = SavedItemActionKind.VOTE,
+            ) { savedItemActions.updateVoteAndExecuteAtomic(
+                    itemId = action.commentId,
+                    isComment = true,
+                    direction = action.direction,
+                ) }
+            is CommentsAction.LoadThread -> loadThread(action)
+            is CommentsAction.LoadPollOptions -> loadPollOptions(action.story, action.forceRefresh)
+            is CommentsAction.VotePollOption -> votePollOption(action.optionId)
+            CommentsAction.CancelThreadLoad -> {
+                threadLoadJob?.cancel()
+                threadLoadJob = null
+                threadLoadSession.invalidate()
+            }
+            CommentsAction.CancelPollOptionsLoad -> cancelPollOptionsLoad()
+            CommentsAction.CancelPollVote -> cancelPollVote()
+        }
+    }
+
+    private fun votePollOption(optionId: Int) {
+        if (optionId <= 0 || pollVoteJob?.isActive == true) return
+        val generation = ++pollVoteGeneration
+        publish(pollVoteInFlightOptionId = optionId)
+        mutableEffects.tryEmit(CommentsPresenterEffect.PollVoteStarted(optionId))
+        val job = scope.launch {
+            val outcome = try {
+                val result = votingService.vote(optionId.toString(), POLL_VOTE_DIRECTION)
+                when (result) {
+                    is HackerNewsActionResult.Success -> PollVoteOutcome.Success
+                    else -> PollVoteOutcome.Failure(result)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                PollVoteOutcome.Failure(
+                    HackerNewsActionResult.Failure("Poll vote failed", error.message),
+                )
+            } finally {
+                if (pollVoteGeneration == generation) {
+                    publish(pollVoteInFlightOptionId = null)
+                }
+            }
+            mutableEffects.emit(CommentsPresenterEffect.PollVoteCompleted(optionId, outcome))
+        }
+        pollVoteJob = job
+        job.invokeOnCompletion {
+            if (pollVoteJob === job) pollVoteJob = null
+        }
+    }
+
+    private fun cancelPollVote() {
+        pollVoteGeneration++
+        pollVoteJob?.cancel()
+        pollVoteJob = null
+        if (state.value.pollVoteInFlightOptionId != null) {
+            publish(pollVoteInFlightOptionId = null)
+        }
+    }
+
+    fun isCurrentThreadLoad(requestId: Int, storyId: Int): Boolean =
+        threadLoadSession.isCurrent(requestId, storyId)
+
+    private fun performSavedItemAction(
+        request: CommentsSavedItemRequest,
+        kind: SavedItemActionKind,
+        executeAction: suspend () -> SavedItemActionOutcome,
+    ) {
+        val key = "$kind:${request.itemId}"
+        if (savedItemActionJobs[key]?.isActive == true) return
+        when (request) {
+            is CommentsSavedItemRequest.StoryVote -> {
+                storyVotePendingIds += request.itemId
+                publish(storyVoteLoading = true)
+            }
+            is CommentsSavedItemRequest.StoryFavorite -> {
+                storyFavoritePendingIds += request.itemId
+                publish(storyFavoriteLoading = true)
+            }
+            is CommentsSavedItemRequest.CommentFavorite -> {
+                commentFavoritePendingIds.remove(request.itemId)
+                commentFavoritePendingIds += request.itemId
+                publish(commentFavoriteLoadingId = request.itemId)
+            }
+            is CommentsSavedItemRequest.CommentVote -> {
+                val loadingAction = VoteDirection.fromWireValue(request.direction).commentMenuAction
+                commentVotePendingActions.remove(request.itemId)
+                commentVotePendingActions[request.itemId] = loadingAction
+                publish(
+                    commentVoteLoadingId = request.itemId,
+                    commentVoteLoadingAction = loadingAction,
+                )
+            }
+        }
+        mutableEffects.tryEmit(CommentsPresenterEffect.SavedItemActionStarted(request))
+        val job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            var outcome: SavedItemActionOutcome? = null
+            var startError: Throwable? = null
+            try {
+                outcome = executeAction()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                startError = error
+            } finally {
+                finishSavedItemAction(request, outcome)
+            }
+            startError?.let { error ->
+                mutableEffects.emit(CommentsPresenterEffect.SavedItemActionStartFailed(request, error))
+            }
+            outcome?.let { completed ->
+                mutableEffects.emit(CommentsPresenterEffect.SavedItemActionCompleted(request, completed))
+            }
+        }
+        savedItemActionJobs[key] = job
+        job.invokeOnCompletion {
+            if (savedItemActionJobs[key] === job) savedItemActionJobs.remove(key)
+        }
+    }
+
+    private fun finishSavedItemAction(
+        request: CommentsSavedItemRequest,
+        outcome: SavedItemActionOutcome?,
+    ) {
+        when (request) {
+            is CommentsSavedItemRequest.StoryVote -> {
+                storyVotePendingIds.remove(request.itemId)
+                publish(storyVoteLoading = storyVotePendingIds.isNotEmpty())
+            }
+            is CommentsSavedItemRequest.StoryFavorite -> {
+                storyFavoritePendingIds.remove(request.itemId)
+                publish(storyFavoriteLoading = storyFavoritePendingIds.isNotEmpty())
+            }
+            is CommentsSavedItemRequest.CommentFavorite -> {
+                commentFavoritePendingIds.remove(request.itemId)
+                publish(commentFavoriteLoadingId = commentFavoritePendingIds.lastOrNull() ?: -1)
+            }
+            is CommentsSavedItemRequest.CommentVote -> {
+                val downvoted = when (outcome) {
+                    is SavedItemActionOutcome.Success -> request.direction == "down"
+                    is SavedItemActionOutcome.Failure -> request.previousDownvoted
+                    is SavedItemActionOutcome.Indeterminate -> request.direction == "down"
+                    null -> null
+                }
+                commentVotePendingActions.remove(request.itemId)
+                val fallbackLoading = commentVotePendingActions.entries.lastOrNull()
+                val current = state.value
+                publish(
+                    commentVoteLoadingId = fallbackLoading?.key ?: -1,
+                    commentVoteLoadingAction = fallbackLoading?.value,
+                    downvotedCommentIds = when (downvoted) {
+                        true -> current.downvotedCommentIds + request.itemId
+                        false -> current.downvotedCommentIds - request.itemId
+                        null -> current.downvotedCommentIds
+                    },
+                )
+            }
+        }
+    }
+
+    private fun loadThread(action: CommentsAction.LoadThread) {
+        threadLoadJob?.cancel()
+        if (action.openingRequest?.isClosed == true) return
+        if (thread.state.value.sorting != action.sorting) thread.setSorting(action.sorting)
+        val storyId = action.story.id
+        val knownTopLevelCommentIds = action.story.kids?.toList().orEmpty()
+        val requestId = threadLoadSession.begin(storyId)
+        publish(usingOfficialApiFallback = false, failure = null)
+        // Only HTTP starts here. Cache reads, parsing and publication stay in their existing
+        // scheduled load job; a navigation lease may already have started the same transfer.
+        val request = if (action.useAlgolia) {
+            action.openingRequest ?: commentThreadRepository.acquireAlgoliaRequest(storyId)
+        } else {
+            action.openingRequest?.close()
+            null
+        }
+        threadLoadJob = scope.launch {
+            // Freeze the baseline policy for this request. Publishing provisional content must
+            // not turn the rest of the same initial load into a refresh.
+            var extendInitialBaseline = !thread.hasLoadedComments
+            var topLevelCommentIds = knownTopLevelCommentIds
+            val preloadedAlgolia = if (action.useAlgolia && topLevelCommentIds.isNotEmpty()) {
+                commentThreadRepository.takePreloadedAlgolia(
+                    storyId,
+                    topLevelCommentIds,
+                    action.filteredUsers,
+                    awaitInFlight = false,
+                )
+            } else {
+                null
+            }
+            preloadedAlgolia?.let { prepared ->
+                val original = CommentThreadLoadResult.Algolia(prepared.response, prepared.parsed)
+                var partialApplied = false
+                val reconciled = reconcileAlgoliaThread(action, requestId, original, topLevelCommentIds, extendInitialBaseline) {
+                    partialApplied = true
+                }
+                if (threadLoadSession.isCurrent(requestId, storyId)) applyAlgoliaThread(
+                    action = action,
+                    requestId = requestId,
+                    parsed = reconciled.parsed,
+                    networkCompleted = true,
+                    responseToCache = reconciled.response.takeIf { reconciled !== original },
+                    restoreScroll = action.restoreScrollFromCache && !partialApplied,
+                    extendInitialBaseline = extendInitialBaseline,
+                    broadcastStoryUpdate = true,
+                )
+                return@launch
+            }
+            val preloadedOfficial = if (!action.useAlgolia) {
+                commentThreadRepository.takePreloadedOfficial(
+                    storyId,
+                    topLevelCommentIds,
+                    action.filteredUsers,
+                )
+            } else {
+                null
+            }
+            preloadedOfficial?.let { prepared ->
+                if (threadLoadSession.isCurrent(requestId, storyId)) applyOfficialThread(
+                    action = action,
+                    requestId = requestId,
+                    officialStory = prepared.story,
+                    comments = prepared.comments,
+                    usedAsFallback = prepared.usedAsFallback,
+                    extendInitialBaseline = extendInitialBaseline,
+                )
+                return@launch
+            }
+            val (cachedPrepared, previousResponse) = traced(TRACE_CACHE_READ, requestId) {
+                val prepared = action.loadPreparedThread?.invoke()
+                prepared to if (prepared == null) {
+                    action.loadPreviousResponse?.invoke() ?: action.previousResponse
+                } else null
+            }
+            if (topLevelCommentIds.isEmpty() && cachedPrepared != null) {
+                topLevelCommentIds = cachedPrepared.rankedIds
+            }
+            // Display cached content without awaiting a live ranking lookup. Hydrated summaries
+            // carry known IDs; legacy caches use Algolia order until the network result arrives.
+            val cachedParsed = if (cachedPrepared != null) {
+                withContext(threadPreparationDispatcher) {
+                    cachedPrepared.restore(topLevelCommentIds, action.filteredUsers)
+                }
+            } else previousResponse?.let { cachedResponse ->
+                traced(TRACE_PARSE_CACHED_JSON, requestId) {
+                    runCatching {
+                        commentThreadRepository.parseAlgolia(
+                            cachedResponse,
+                            topLevelCommentIds,
+                            action.filteredUsers,
+                        )
+                    }.getOrNull()
+                }
+            }
+            cachedParsed?.let parsed@ { parsed ->
+                if (!threadLoadSession.isCurrent(requestId, storyId)) return@parsed
+                // An empty cache is provisional when HN already supplied comment IDs.
+                if (parsed.comments.isEmpty() && topLevelCommentIds.isNotEmpty()) return@parsed
+                val prepared = if (!thread.hasLoadedComments) {
+                    val headerChanged = parsed.updateStoryInformation(
+                        action.story,
+                        thread.allComments.size,
+                    )
+                    val preparedThread = traced(TRACE_PREPARE_CACHED_THREAD, requestId) {
+                        withContext(threadPreparationDispatcher) {
+                            thread.prepareInitialParsedComments(
+                                story = action.story,
+                                parsedComments = parsed.comments,
+                                sorting = action.sorting,
+                                collapseTopLevel = action.collapseTopLevel,
+                            )
+                        }
+                    }
+                    CachedThreadPreparation(preparedThread, headerChanged)
+                } else {
+                    null
+                }
+                if (threadLoadSession.isCurrent(requestId, storyId)) {
+                    action.beforeApplyCachedResponse?.invoke()
+                }
+                if (threadLoadSession.isCurrent(requestId, storyId)) {
+                    traced(TRACE_APPLY_CACHED_THREAD, requestId) {
+                        applyAlgoliaThread(
+                            action = action,
+                            requestId = requestId,
+                            parsed = parsed,
+                            networkCompleted = false,
+                            responseToCache = null,
+                            restoreScroll = action.restoreScrollFromCache,
+                            broadcastStoryUpdate = false,
+                            prepared = prepared,
+                            fromCache = true,
+                            extendInitialBaseline = extendInitialBaseline,
+                        )
+                    }
+                    if (action.cachedCommentsPreviouslyViewed) extendInitialBaseline = false
+                }
+            }
+            // Display disk-cached comments before joining an unfinished network preload. Large
+            // discussions can take seconds to download even when their cached thread is ready.
+            val pendingPreload = if (action.useAlgolia && topLevelCommentIds.isNotEmpty()) {
+                commentThreadRepository.takePreloadedAlgolia(
+                    storyId, topLevelCommentIds, action.filteredUsers,
+                )
+            } else null
+            val result = pendingPreload?.let {
+                CommentThreadLoadResult.Algolia(it.response, it.parsed)
+            } ?: commentThreadRepository.load(
+                storyId = storyId,
+                useAlgolia = action.useAlgolia,
+                filteredUsers = action.filteredUsers,
+                topLevelCommentIds = topLevelCommentIds,
+                cachedThread = cachedParsed?.cacheSummary?.preparedThread,
+                reuseDisplay = cachedParsed?.let {
+                    AlgoliaCommentsDisplayReuse(
+                        it, topLevelCommentIds, action.filteredUsers,
+                    )
+                },
+                algoliaRequest = request,
+                onAlgoliaFallback = {
+                    if (threadLoadSession.isCurrent(requestId, storyId)) {
+                        publish(usingOfficialApiFallback = true)
+                    }
+                },
+            )
+            if (!threadLoadSession.isCurrent(requestId, storyId)) return@launch
+            when (result) {
+                is CommentThreadLoadResult.Algolia -> {
+                    val reconciled = reconcileAlgoliaThread(action, requestId, result, topLevelCommentIds, extendInitialBaseline)
+                    // A joined preload may publish before its cache hash is ready. Only a screen
+                    // with an existing prepared cache needs to complete that comparison now.
+                    val pending = reconciled.parsed.cacheSummary?.preparedThread
+                    val parsed = if (cachedPrepared != null && pending?.sourceDigest == "") {
+                        withContext(threadPreparationDispatcher) {
+                            reconciled.parsed.copy(cacheSummary = pending.withSourceDigest(reconciled.response).cacheSummary())
+                        }
+                    } else reconciled.parsed
+                    if (!threadLoadSession.isCurrent(requestId, storyId)) return@launch
+                    val sameResponse = if (cachedPrepared != null) {
+                        cachedPrepared.sourceDigest == parsed.cacheSummary?.preparedThread?.sourceDigest
+                    } else previousResponse == reconciled.response
+                    if (!thread.hasLoadedComments || cachedParsed == null || !sameResponse ||
+                        (topLevelCommentIds.isEmpty() &&
+                            !parsed.cacheSummary?.topLevelCommentIds.isNullOrEmpty())
+                    ) {
+                        applyAlgoliaThread(
+                            action = action,
+                            requestId = requestId,
+                            parsed = parsed,
+                            networkCompleted = true,
+                            responseToCache = reconciled.response,
+                            extendInitialBaseline = extendInitialBaseline,
+                            restoreScroll = false,
+                            broadcastStoryUpdate = true,
+                        )
+                    } else {
+                        publish(loaded = true, refreshing = false, failure = null, showingCached = false)
+                        mutableEffects.emit(
+                            CommentsPresenterEffect.ThreadApplied(
+                                requestId = requestId,
+                                storyId = storyId,
+                                contentApplied = false,
+                                networkCompleted = true,
+                                // The network confirmed the cached header, which may still be
+                                // newer than the story retained by the feed.
+                                broadcastStoryUpdate = true,
+                            ),
+                        )
+                    }
+                }
+                is CommentThreadLoadResult.Official -> {
+                    applyOfficialThread(
+                        action = action,
+                        requestId = requestId,
+                        officialStory = result.story,
+                        comments = result.comments,
+                        usedAsFallback = result.usedAsFallback,
+                        extendInitialBaseline = extendInitialBaseline,
+                    )
+                }
+                is CommentThreadLoadResult.Failure -> {
+                    publish(
+                        loaded = true,
+                        refreshing = false,
+                        failure = if (state.value.showingCached && !action.userInitiated && result.noInternet) {
+                            null
+                        } else {
+                            CommentsPresentationPolicy.failureFor(result)
+                        },
+                    )
+                    mutableEffects.emit(
+                        CommentsPresenterEffect.ThreadFailed(requestId, storyId, result),
+                    )
+                }
+            }
+        }.also { job ->
+            val cancellation = request?.invokeOnClose { job.cancel() }
+            job.invokeOnCompletion {
+                cancellation?.dispose()
+                request?.close()
+            }
+        }
+    }
+
+    private suspend fun reconcileAlgoliaThread(
+        action: CommentsAction.LoadThread,
+        requestId: Int,
+        result: CommentThreadLoadResult.Algolia,
+        topLevelCommentIds: List<Int>,
+        extendInitialBaseline: Boolean,
+        onPartialApplied: () -> Unit = {},
+    ): CommentThreadLoadResult.Algolia = commentThreadRepository.reconcileMissingTopLevelComments(
+        result, topLevelCommentIds, action.filteredUsers,
+    ) {
+        if (threadLoadSession.isCurrent(requestId, action.story.id) && result.parsed.comments.isNotEmpty()) {
+            applyAlgoliaThread(
+                action, requestId, result.parsed, networkCompleted = false,
+                responseToCache = null, restoreScroll = action.restoreScrollFromCache,
+                extendInitialBaseline = extendInitialBaseline,
+                broadcastStoryUpdate = false,
+            )
+            onPartialApplied()
+        }
+    }
+
+    private suspend fun <T> traced(
+        name: String,
+        cookie: Int,
+        block: suspend () -> T,
+    ): T {
+        performanceTrace.begin(name, cookie)
+        return try {
+            block()
+        } finally {
+            performanceTrace.end(name, cookie)
+        }
+    }
+
+    private suspend fun applyOfficialThread(
+        action: CommentsAction.LoadThread,
+        requestId: Int,
+        officialStory: Story,
+        comments: MutableList<Comment>,
+        usedAsFallback: Boolean,
+        extendInitialBaseline: Boolean,
+    ) {
+        CommentsPresentationPolicy.mergeOfficialStoryHeader(action.story, officialStory)
+        if (!applyPreparedUpdate(action, requestId, comments, preserveExisting = false, extendInitialBaseline)) return
+        publish(loaded = true, refreshing = false, failure = null, showingCached = false)
+        mutableEffects.emit(
+            CommentsPresenterEffect.ThreadApplied(
+                requestId = requestId,
+                storyId = action.story.id,
+                contentApplied = true,
+                networkCompleted = true,
+                headerChanged = true,
+                broadcastStoryUpdate = true,
+                usedOfficialFallback = usedAsFallback,
+            ),
+        )
+    }
+
+    private fun loadPollOptions(story: Story, forceRefresh: Boolean) {
+        if (forceRefresh || pollOptionsStoryId != story.id) {
+            cancelPollOptionsLoad()
+            pollOptionsStoryId = story.id
+        }
+        when (
+            CommentsPresentationPolicy.nextPollLoadAction(
+                active = true,
+                loadStarted = pollOptionsLoadStarted,
+                lookupStarted = pollOptionsLookupStarted,
+                story = story,
+            )
+        ) {
+            PollLoadAction.NONE -> return
+            PollLoadAction.LOAD_KNOWN_OPTIONS -> startPollOptionsLoad(story)
+            PollLoadAction.LOOK_UP_OPTIONS -> {
+                pollOptionsLookupStarted = true
+                val generation = pollOptionsGeneration
+                pollOptionsLoadJob = scope.launch {
+                    try {
+                        val optionIds = pollOptionsLoader.findOptionIds(story.id)
+                        if (pollOptionsStoryId != story.id || generation != pollOptionsGeneration) return@launch
+                        if (optionIds.isNotEmpty()) {
+                            story.pollOptionIds = optionIds
+                            startPollOptionsLoad(story)
+                        }
+                    } catch (error: kotlinx.coroutines.CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        if (pollOptionsStoryId == story.id && generation == pollOptionsGeneration) {
+                            pollOptionsLookupStarted = false
+                            mutableEffects.emit(
+                                CommentsPresenterEffect.PollOptionsLookupFailed(story.id, error),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startPollOptionsLoad(story: Story) {
+        val optionIds = story.pollOptionIds ?: return
+        pollOptionsLoadStarted = true
+        val existing = story.pollOptions.orEmpty().associateBy { it.id }
+        story.pollOptions = ArrayList(pollOptionsLoader.placeholders(optionIds).map { existing[it.id] ?: it })
+        val generation = pollOptionsGeneration
+        pollOptionsLoadJob = scope.launch {
+            pollOptionsLoader.loadOptions(optionIds).collect { loaded ->
+                if (pollOptionsStoryId != story.id || generation != pollOptionsGeneration) return@collect
+                val pollOption = story.pollOptions
+                    ?.firstOrNull { it.id == loaded.id }
+                    ?: return@collect
+                pollOption.points = loaded.points
+                pollOption.text = loaded.text
+                pollOption.loaded = loaded.loaded
+                pollOption.loadFailed = loaded.loadFailed
+                mutableEffects.emit(
+                    CommentsPresenterEffect.PollOptionsChanged(
+                        storyId = story.id,
+                        failedOptionId = loaded.id.takeIf { loaded.loadFailed },
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun cancelPollOptionsLoad() {
+        pollOptionsGeneration++
+        pollOptionsLoadJob?.cancel()
+        pollOptionsLoadJob = null
+        pollOptionsStoryId = 0
+        pollOptionsLoadStarted = false
+        pollOptionsLookupStarted = false
+    }
+
+    private suspend fun applyAlgoliaThread(
+        action: CommentsAction.LoadThread,
+        requestId: Int,
+        parsed: AlgoliaCommentsResponse,
+        networkCompleted: Boolean,
+        responseToCache: String?,
+        restoreScroll: Boolean,
+        broadcastStoryUpdate: Boolean,
+        prepared: CachedThreadPreparation? = null,
+        fromCache: Boolean = false,
+        extendInitialBaseline: Boolean = false,
+    ) {
+        val headerChanged = prepared?.headerChanged ?: parsed.updateStoryInformation(
+            action.story,
+            thread.allComments.size,
+        )
+        val initialThread = prepared?.thread ?: if (!thread.hasLoadedComments) {
+            withContext(threadPreparationDispatcher) {
+                thread.prepareInitialParsedComments(
+                    action.story, parsed.comments, action.sorting, action.collapseTopLevel,
+                )
+            }
+        } else null
+        if (initialThread != null) prepareInitialContent(initialThread.state)
+        if (!threadLoadSession.isCurrent(requestId, action.story.id)) return
+        if (initialThread == null) {
+            if (!applyPreparedUpdate(action, requestId, parsed.comments, preserveExisting = true, extendInitialBaseline)) return
+        } else {
+            thread.commitPreparedInitialComments(action.story, initialThread, thread.state.value.sorting)
+        }
+        publish(
+            loaded = true,
+            showingCached = fromCache,
+            refreshing = if (networkCompleted) false else state.value.refreshing,
+            failure = null,
+        )
+        mutableEffects.emit(
+            CommentsPresenterEffect.ThreadApplied(
+                requestId = requestId,
+                storyId = action.story.id,
+                contentApplied = true,
+                networkCompleted = networkCompleted,
+                responseToCache = responseToCache,
+                cacheSummary = if (responseToCache != null) parsed.cacheSummary else null,
+                restoreScroll = restoreScroll,
+                broadcastStoryUpdate = broadcastStoryUpdate,
+                headerChanged = headerChanged || broadcastStoryUpdate,
+            ),
+        )
+    }
+
+    private suspend fun applyPreparedUpdate(
+        action: CommentsAction.LoadThread,
+        requestId: Int,
+        comments: List<Comment>,
+        preserveExisting: Boolean,
+        extendInitialBaseline: Boolean,
+    ): Boolean {
+        while (threadLoadSession.isCurrent(requestId, action.story.id)) {
+            val input = thread.capturePreparationInput()
+            val story = action.story.toSnapshot()
+            val prepared = withContext(threadPreparationDispatcher) {
+                CommentThreadStore.prepareUpdate(
+                    input, story, comments, action.collapseTopLevel, preserveExisting, extendInitialBaseline,
+                )
+            }
+            if (!thread.hasLoadedComments) prepareInitialContent(prepared.state)
+            if (!threadLoadSession.isCurrent(requestId, action.story.id)) return false
+            // Sort, filtering, expansion and search may change while the worker runs. Rebase on
+            // that new immutable state instead of overwriting the user's latest interaction.
+            if (thread.state.value !== input.state) continue
+            thread.commitPreparedInitialComments(action.story, prepared)
+            return true
+        }
+        return false
+    }
+
+    private fun publish(
+        thread: PortableCommentThreadState = state.value.thread,
+        savedItemRevision: Long = state.value.savedItemRevision,
+        lastLoadedMillis: Long = state.value.lastLoadedMillis,
+        loaded: Boolean = state.value.loaded,
+        showingCached: Boolean = state.value.showingCached,
+        refreshing: Boolean = state.value.refreshing,
+        failure: StoryLoadFailure? = state.value.failure,
+        usingOfficialApiFallback: Boolean = state.value.usingOfficialApiFallback,
+        showRefreshPrompt: Boolean = state.value.showRefreshPrompt,
+        storyVoteLoading: Boolean = state.value.storyVoteLoading,
+        storyFavoriteLoading: Boolean = state.value.storyFavoriteLoading,
+        pollVoteInFlightOptionId: Int? = state.value.pollVoteInFlightOptionId,
+        commentFavoriteLoadingId: Int = state.value.commentFavoriteLoadingId,
+        commentVoteLoadingId: Int = state.value.commentVoteLoadingId,
+        commentVoteLoadingAction: CommentMenuAction? = state.value.commentVoteLoadingAction,
+        downvotedCommentIds: Set<Int> = state.value.downvotedCommentIds,
+    ) {
+        sessionState.lastLoaded = lastLoadedMillis
+        sessionState.commentsLoaded = loaded
+        sessionState.showingCached = showingCached
+        sessionState.refreshInProgress = refreshing
+        sessionState.loadingFailed = failure != null
+        sessionState.loadingFailedServerError = failure == StoryLoadFailure.NOT_FOUND
+        sessionState.showRefreshPrompt = showRefreshPrompt
+        sessionState.storyVoteLoading = storyVoteLoading
+        sessionState.storyFavoriteLoading = storyFavoriteLoading
+        mutableState.value = CommentsPresenterState(
+            thread = thread,
+            savedItemRevision = savedItemRevision,
+            lastLoadedMillis = lastLoadedMillis,
+            loaded = loaded,
+            showingCached = showingCached,
+            refreshing = refreshing,
+            failure = failure,
+            usingOfficialApiFallback = usingOfficialApiFallback,
+            showRefreshPrompt = showRefreshPrompt,
+            storyVoteLoading = storyVoteLoading,
+            storyFavoriteLoading = storyFavoriteLoading,
+            pollVoteInFlightOptionId = pollVoteInFlightOptionId,
+            commentFavoriteLoadingId = commentFavoriteLoadingId,
+            commentVoteLoadingId = commentVoteLoadingId,
+            commentVoteLoadingAction = commentVoteLoadingAction,
+            downvotedCommentIds = downvotedCommentIds,
+        )
+    }
+
+    private companion object {
+        private data class CachedThreadPreparation(
+            val thread: PreparedInitialCommentThread,
+            val headerChanged: Boolean,
+        )
+
+        const val POLL_VOTE_DIRECTION = "up"
+        const val TRACE_CACHE_READ = "CommentsOpen.cacheRead"
+        const val TRACE_PARSE_CACHED_JSON = "CommentsOpen.parseCachedJson"
+        const val TRACE_APPLY_CACHED_THREAD = "CommentsOpen.applyCachedThread"
+        const val TRACE_PREPARE_CACHED_THREAD = "CommentsOpen.prepareCachedThreadState"
+    }
+}

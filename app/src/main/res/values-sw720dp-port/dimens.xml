@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="single_view_side_margin">80dp</dimen>
+    <integer name="stories_pane_weight">4</integer>
+    <dimen name="margin_between_panes">0dp</dimen>
+
+    <dimen name="comments_header_top_padding">32dp</dimen>
+
+</resources>

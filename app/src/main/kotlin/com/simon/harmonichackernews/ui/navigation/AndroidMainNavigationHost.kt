@@ -1,0 +1,751 @@
+package com.simon.harmonichackernews.ui.navigation
+
+import androidx.compose.material3.MaterialTheme
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.compose.ReportDrawnWhen
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
+import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.movableContentOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.res.dimensionResource
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import androidx.lifecycle.ViewModelProvider
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.AndroidCommentsCoordinator
+import com.simon.harmonichackernews.MainActivity
+import com.simon.harmonichackernews.ui.session.HarmonicSceneViewModel
+import com.simon.harmonichackernews.R
+import com.simon.harmonichackernews.AndroidStoriesCoordinator
+import com.simon.harmonichackernews.ui.comments.SideBySideCommentsHost
+import com.simon.harmonichackernews.ui.comments.LocalSideBySideCommentsPortal
+import com.simon.harmonichackernews.ui.comments.EmptyCommentsScreen
+import com.simon.harmonichackernews.ui.common.CaptchaDialog
+import com.simon.harmonichackernews.ui.common.FailureDetailDialog
+import com.simon.harmonichackernews.ui.common.AndroidLoginDialog
+import com.simon.harmonichackernews.ui.common.UserMessageSnackbarHost
+import com.simon.harmonichackernews.ui.debug.CoulombGasScreen
+import com.simon.harmonichackernews.ui.editor.EditorSubmissionState
+import com.simon.harmonichackernews.ui.editor.AndroidEditorCoordinator
+import com.simon.harmonichackernews.ui.editor.ComposeEditorScreen
+import com.simon.harmonichackernews.ui.settings.SettingsChangelogDialog
+import com.simon.harmonichackernews.ui.settings.SettingsSection
+import com.simon.harmonichackernews.ui.settings.SettingsShell
+import com.simon.harmonichackernews.ui.settings.ProvideSettingsPlatformStyle
+import com.simon.harmonichackernews.ui.settings.SettingsPlatformStyle
+import com.simon.harmonichackernews.ui.settings.AndroidUserSettingsDialog
+import com.simon.harmonichackernews.ui.settings.AndroidWelcomeScreen
+import com.simon.harmonichackernews.ui.submissions.AndroidSubmissionsCoordinator
+import com.simon.harmonichackernews.ui.submissions.AndroidSubmissionsScreen
+import com.simon.harmonichackernews.ui.stories.CacheStoriesDialog
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import com.simon.harmonichackernews.ui.HarmonicUiDependencies
+import com.simon.harmonichackernews.ui.LocalHarmonicUiDependencies
+import com.simon.harmonichackernews.ui.ProvideHarmonicUiDependencies
+import com.simon.harmonichackernews.harmonicAppComposition
+import com.simon.harmonichackernews.navigation.MainDestination
+import com.simon.harmonichackernews.settings.AppLaunchDialog
+import com.simon.harmonichackernews.ui.feed.FeedReaderShell
+import com.simon.harmonichackernews.utils.AndroidActivityTheme
+import android.content.Intent
+import android.net.Uri
+import com.simon.harmonichackernews.widget.refreshStoryWidgets
+import java.util.concurrent.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+object AndroidMainNavigationHost {
+    @JvmStatic
+    fun install(activity: MainActivity, savedState: Bundle?): AndroidMainNavigationController {
+        val appComposition = activity.harmonicAppComposition
+        val scene = ViewModelProvider(activity, HarmonicSceneViewModel.factory(appComposition))[HarmonicSceneViewModel::class.java].scene
+        val controller = AndroidMainNavigationController(
+            scene,
+            savedState,
+        )
+        val composeView = ComposeView(activity).apply {
+            id = R.id.main_navigation_compose
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                val themeSelection by appComposition.appearance.selections.collectAsStateWithLifecycle(
+                    initialValue = appComposition.appearance.selection(),
+                )
+                ProvideHarmonicUiDependencies(
+                    HarmonicUiDependencies(appComposition, scene),
+                ) {
+                    HarmonicTheme(
+                        selection = themeSelection,
+                    ) {
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalPredictiveBackCompletion provides remember { PredictiveBackCompletion() },
+                        ) {
+                            MainNavigation(
+                                activity = activity,
+                                controller = controller,
+                            )
+                            com.simon.harmonichackernews.ui.AndroidLocalNetworkPermissionHost(
+                                (activity.application as com.simon.harmonichackernews.HarmonicApplication).localNetworkAccess,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        activity.setContentView(composeView)
+        return controller
+    }
+}
+
+@OptIn(ExperimentalMaterial3AdaptiveApi::class)
+@Composable
+private fun MainNavigation(
+    activity: MainActivity,
+    controller: AndroidMainNavigationController,
+) {
+    val navigationSnapshot by controller.navigationState.state.collectAsStateWithLifecycle()
+    // Feed alerts are opt-in; the channel is created on first schedule, so the runtime permission
+    // is only meaningful when the reader enables them.
+    val feedNotificationPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { }
+    val requestFeedNotificationPermission: () -> Unit = {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                activity,
+                android.Manifest.permission.POST_NOTIFICATIONS,
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            feedNotificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+    val backCompletion = LocalPredictiveBackCompletion.current
+    val backInput = rememberNavigationBackInput()
+    // Launcher metrics report only once the feed timeline has a real first state: cached articles,
+    // an empty-subscription state, or a settled startup refresh. Reporting unconditionally made the
+    // metric meaningless.
+    var feedContentReady by remember { mutableStateOf(false) }
+    ReportDrawnWhen {
+        val appComposition = controller.scene.app
+        navigationSnapshot.currentDestination != MainDestination.STORIES ||
+            feedContentReady ||
+            appComposition.feedSubscriptions.state.value.let { it.items.isNotEmpty() || it.feeds.isEmpty() }
+    }
+    val appearance = controller.scene.app.appearance
+    val uiDependencies = LocalHarmonicUiDependencies.current
+    val settings by uiDependencies.settings.updates.collectAsStateWithLifecycle(
+        initialValue = uiDependencies.settings.snapshot(),
+    )
+    val adaptiveInfo = currentWindowAdaptiveInfoV2()
+    val context = activity
+    val supportsTwoPane = LocalConfiguration.current.smallestScreenWidthDp >= 600
+    val hasHingeAngleSensor = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_SENSOR_HINGE_ANGLE)
+    val isFoldable = adaptiveInfo.windowPosture.hingeList.isNotEmpty() || hasHingeAngleSensor
+    val density = LocalDensity.current
+    val windowWidth = with(density) { LocalWindowInfo.current.containerSize.width.toDp() }
+    val tabletPaneSpacer = with(density) {
+        context.resources.getDimensionPixelSize(R.dimen.margin_between_panes).toDp()
+    }
+    val tabletStoriesWeight = context.resources.getInteger(R.integer.stories_pane_weight)
+    val directive = remember(adaptiveInfo, windowWidth, supportsTwoPane, isFoldable, tabletPaneSpacer) {
+        calculateHarmonicPaneScaffoldDirective(
+            adaptiveInfo = adaptiveInfo,
+            windowWidth = windowWidth,
+            supportsTwoPane = supportsTwoPane,
+            isFoldable = isFoldable,
+        ).copy(
+            horizontalPartitionSpacerSize = if (isFoldable) 12.dp else tabletPaneSpacer,
+        )
+    }
+    val isTwoPane = directive.maxHorizontalPartitions > 1
+    SideEffect {
+        controller.updateAdaptiveState(
+            twoPane = isTwoPane,
+            foldable = isTwoPane && isFoldable,
+        )
+        controller.updateStoriesHostDestination(navigationSnapshot.currentDestination)
+        controller.updateCommentsHostDestination(navigationSnapshot.currentDestination)
+    }
+    val paneProportion = if (isFoldable) {
+        0.5f
+    } else {
+        tabletStoriesWeight / (tabletStoriesWeight + LEGACY_COMMENTS_PANE_WEIGHT)
+    }
+    val backAnimationScope = rememberCoroutineScope()
+    var activeBackAnimation by remember {
+        mutableStateOf<DefaultActivityPredictiveBackAnimation?>(null)
+    }
+    var completedStoryKey by remember { mutableStateOf<MainNavigationSurfaceKey?>(null) }
+
+    fun popMainBackStack() {
+        if (controller.isExternalStoryEntry) {
+            activity.finish()
+        } else if (controller.navigationState.state.value.currentDestination == MainDestination.STORY) {
+            controller.detailRemovedFromBackStack()
+        } else {
+            activity.finish()
+        }
+    }
+
+    val scenePlan = mainNavigationScenePlan(
+        navigationSnapshot, isTwoPane, controller.externalStoryEntrySerial,
+    )
+    // Selecting a detail does not add a screen above the root Stories/Comments surface.
+    val storyAtTaskRoot = controller.isExternalStoryEntry ||
+        (scenePlan.storyUsesTwoPane && scenePlan.surfaces.size == 1)
+    val paneStatusBarColor = MaterialTheme.colorScheme.pageBackground
+    val statusBarHeight = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+
+    LaunchedEffect(navigationSnapshot.closeRequest) {
+        if (
+            navigationSnapshot.closeRequest > 0 &&
+            navigationSnapshot.currentDestination == MainDestination.STORY
+        ) {
+            popMainBackStack()
+        }
+    }
+
+    PredictiveNavigationBackHandler(
+        // Let Android own Back at the task root, including a selected two-pane detail.
+        // Browser history, split restoration, and comments overlays still consume Back first.
+        enabled = navigationSnapshot.currentDestination == MainDestination.STORY &&
+            (!storyAtTaskRoot ||
+                controller.getCommentsCoordinator()?.handlesBackInternally() == true),
+    ) { events ->
+        val storySerialAtGestureStart = controller.navigationState.state.value.storyRequest?.serial
+        if (backCompletion.handleFollowingBack(events, backInput)) {
+            return@PredictiveNavigationBackHandler
+        }
+        fun popGestureStoryIfStillCurrent(completedGesture: Boolean = false) {
+            if (controller.navigationState.state.value.storyRequest?.serial == storySerialAtGestureStart) {
+                controller.detailRemovedFromBackStack()
+                if (completedGesture && storySerialAtGestureStart != null) {
+                    completedStoryKey = MainNavigationSurfaceKey(MainDestination.STORY, storySerialAtGestureStart)
+                }
+            }
+        }
+        val internalBackCoordinator = controller.getCommentsCoordinator()
+            ?.takeIf(AndroidCommentsCoordinator::handlesBackInternally)
+        if (internalBackCoordinator != null) {
+            var predictiveBackStarted = false
+            try {
+                events.collect { event ->
+                    if (predictiveBackStarted) {
+                        internalBackCoordinator.updateInternalPredictiveBack(event)
+                    } else {
+                        predictiveBackStarted = true
+                        internalBackCoordinator.startInternalPredictiveBack(event)
+                    }
+                }
+                internalBackCoordinator.commitInternalBack()
+            } catch (_: CancellationException) {
+                if (predictiveBackStarted) {
+                    internalBackCoordinator.cancelInternalPredictiveBack()
+                }
+            }
+            return@PredictiveNavigationBackHandler
+        }
+
+        if (scenePlan.storyUsesTwoPane) {
+            var frozenWebViewCoordinator: AndroidCommentsCoordinator? = null
+            try {
+                events.collect {
+                    val currentFrozenCoordinator = frozenWebViewCoordinator
+                    if (currentFrozenCoordinator == null) {
+                        controller.getCommentsCoordinator()
+                            ?.takeIf { it.beginWebViewPredictiveBack() }
+                            ?.let { frozenWebViewCoordinator = it }
+                    } else {
+                        currentFrozenCoordinator
+                            .maintainWebViewPredictiveBack()
+                    }
+                }
+                popGestureStoryIfStillCurrent()
+            } catch (_: CancellationException) {
+                // A cancelled two-pane gesture keeps the current detail selected.
+            } finally {
+                frozenWebViewCoordinator?.endWebViewPredictiveBack()
+            }
+            return@PredictiveNavigationBackHandler
+        }
+
+        var animation: DefaultActivityPredictiveBackAnimation? = null
+        var frozenWebViewCoordinator: AndroidCommentsCoordinator? = null
+        try {
+            events.collect { event ->
+                val currentFrozenCoordinator = frozenWebViewCoordinator
+                if (currentFrozenCoordinator == null) {
+                    controller.getCommentsCoordinator()
+                        ?.takeIf { it.beginWebViewPredictiveBack() }
+                        ?.let { frozenWebViewCoordinator = it }
+                } else {
+                    currentFrozenCoordinator.maintainWebViewPredictiveBack()
+                }
+                val currentAnimation = animation
+                    ?: DefaultActivityPredictiveBackAnimation(event).also {
+                        animation = it
+                        activeBackAnimation = it
+                    }
+                backAnimationScope.launch {
+                    currentAnimation.animate(event)
+                }
+            }
+
+            val currentAnimation = animation
+            if (currentAnimation == null) {
+                popGestureStoryIfStillCurrent()
+                return@PredictiveNavigationBackHandler
+            }
+            val retainedWebView = frozenWebViewCoordinator
+            frozenWebViewCoordinator = null
+            backCompletion.finish(
+                scope = backAnimationScope,
+                animation = currentAnimation,
+                frameHoldCount = 3,
+                onCommit = {
+                    popGestureStoryIfStillCurrent(completedGesture = true)
+                },
+                onFinished = {
+                    if (activeBackAnimation === currentAnimation) activeBackAnimation = null
+                    retainedWebView?.endWebViewPredictiveBack()
+                },
+            )
+        } catch (_: CancellationException) {
+            withContext(NonCancellable) {
+                animation?.cancel()
+                if (activeBackAnimation === animation) activeBackAnimation = null
+            }
+        } finally {
+            frozenWebViewCoordinator?.endWebViewPredictiveBack()
+        }
+    }
+
+    val settingsRequest = navigationSnapshot.settingsRequest
+    fun closeSettings() {
+        controller.closeSettings()
+        controller.applySettingsChanges()
+    }
+
+    val settingsPredictiveBack = rememberDefaultActivityPredictiveBackState(
+        requestKey = settingsRequest?.let { MainNavigationSurfaceKey(MainDestination.SETTINGS, it.serial) },
+        enabled = navigationSnapshot.currentDestination == MainDestination.SETTINGS,
+        completedFrameHoldCount = 3,
+        onBack = ::closeSettings,
+    )
+
+    val submissionsRequest = navigationSnapshot.submissionsRequest
+    val submissionsPredictiveBack = rememberDefaultActivityPredictiveBackState(
+        requestKey = submissionsRequest?.let { MainNavigationSurfaceKey(MainDestination.SUBMISSIONS, it.serial) },
+        enabled = navigationSnapshot.currentDestination == MainDestination.SUBMISSIONS,
+        onBack = controller::closeSubmissions,
+    )
+    val editorRequest = navigationSnapshot.editorRequest
+    var editorPredictiveBackEnabled by remember(editorRequest?.serial) {
+        mutableStateOf(false)
+    }
+    val editorPredictiveBack = rememberDefaultActivityPredictiveBackState(
+        requestKey = editorRequest?.let { MainNavigationSurfaceKey(MainDestination.EDITOR, it.serial) },
+        enabled = navigationSnapshot.currentDestination == MainDestination.EDITOR &&
+            editorPredictiveBackEnabled,
+        completedFrameHoldCount = 3,
+        onBack = controller::closeEditor,
+    )
+
+    val welcomeRequest = navigationSnapshot.welcomeRequest
+    val welcomePredictiveBack = rememberDefaultActivityPredictiveBackState(
+        requestKey = welcomeRequest?.let { MainNavigationSurfaceKey(MainDestination.WELCOME, it.serial) },
+        enabled = navigationSnapshot.currentDestination == MainDestination.WELCOME,
+        completedFrameHoldCount = 3,
+        onBack = controller::closeWelcome,
+    )
+
+    PredictiveNavigationBackHandler(
+        enabled = navigationSnapshot.currentDestination == MainDestination.IMMERSIVE,
+    ) { events ->
+        try {
+            events.collect { }
+            controller.closeCoulombGas()
+        } catch (_: CancellationException) {
+            // A cancelled gesture leaves the simulation open.
+        }
+    }
+
+    val storiesController = controller.storiesComposeController
+    PredictiveNavigationBackHandler(
+        // Let the preview's Back callback dismiss the overlay before leaving search.
+        enabled = storiesController?.searching == true &&
+            !storiesController.isStoryPreviewShowing() &&
+            navigationSnapshot.currentDestination == MainDestination.STORIES,
+    ) { events ->
+        val searchController = storiesController ?: return@PredictiveNavigationBackHandler
+        var started = false
+        try {
+            events.collect { event ->
+                if (started) {
+                    searchController.updateSearchBack(event.progress)
+                } else {
+                    started = searchController.startSearchBack(event.progress)
+                }
+            }
+            searchController.finishSearchBack()
+        } catch (_: CancellationException) {
+            if (started) searchController.cancelSearchBack()
+        }
+    }
+
+    val gesture = activeBackAnimation ?: settingsPredictiveBack.animation ?:
+        submissionsPredictiveBack.animation ?: editorPredictiveBack.animation ?: welcomePredictiveBack.animation
+    val preview = rememberMainNavigationBackPreview(
+        scenePlan, gesture, gesture?.enterModifier ?: Modifier, gesture?.exitModifier ?: Modifier,
+    )
+    HarmonicAppRoot(
+        plan = scenePlan,
+        commentsSwipeBackEnabled = settings.comments.swipeBack,
+        canStartCommentsSwipeBack = {
+            controller.getCommentsCoordinator()?.canSwipeBackFromComments() == true
+        },
+        onCommentsSwipeBack = {
+            // A link or system Back can change the store before the next composition.
+            if (controller.navigationState.state.value.storyRequest?.serial == navigationSnapshot.storyRequest?.serial &&
+                controller.navigationState.state.value.currentDestination == MainDestination.STORY) {
+                popMainBackStack()
+            }
+        },
+        preview = preview,
+        completedPredictiveBack = setOfNotNull(
+            completedStoryKey,
+            settingsPredictiveBack.completedRequestKey,
+            submissionsPredictiveBack.completedRequestKey,
+            editorPredictiveBack.completedRequestKey,
+            welcomePredictiveBack.completedRequestKey,
+        ),
+        modifier = Modifier.background(MaterialTheme.colorScheme.pageBackground)
+            .semantics { testTagsAsResourceId = true },
+        stories = { detail, paneComments ->
+            val appComposition = activity.harmonicAppComposition
+            val feedReader: @Composable () -> Unit = {
+                FeedReaderShell(
+                    store = appComposition.feedSubscriptions,
+                    syncCoordinator = appComposition.feedSync,
+                    onOpenExternalLink = { url ->
+                        runCatching {
+                            activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        }
+                    },
+                    articleFetcher = appComposition.feedArticleFetcher,
+                    subscribeRequests = appComposition.feedSubscribeRequests,
+                    refreshRuntime = appComposition.feedRefresh,
+                    openRequests = appComposition.feedOpenRequests,
+                    requestNotificationPermission = requestFeedNotificationPermission,
+                    isBlockedHost = { host -> appComposition.webContent.adBlocklist.contains(host) },
+                    onFirstContentReady = { feedContentReady = true },
+                )
+            }
+            if (isTwoPane) {
+                SideBySideCommentsHost { listOverlay ->
+                    MainNavigationScene(
+                        listPaneOverlay = listOverlay,
+                        storyRequest = detail,
+                        directive = directive,
+                        paneProportion = paneProportion,
+                        isFoldable = isFoldable,
+                        onBack = ::popMainBackStack,
+                        stories = feedReader,
+                        emptyDetail = { EmptyCommentsScreen() },
+                        animateDetailVisibilityChanges = true,
+                        comments = paneComments,
+                    )
+                }
+            } else {
+                feedReader()
+            }
+        },
+        comments = { request, fullScreen ->
+            // External links and nested stories retain their own navigation surface. They can
+            // temporarily use both panes without introducing a synthetic story list underneath.
+            if (fullScreen && isTwoPane) {
+                SideBySideCommentsHost(standalone = true) { listOverlay ->
+                    val split = LocalSideBySideCommentsPortal.current?.controller?.sideBySideActive == true
+                    val comments = remember(request.serial) {
+                        movableContentOf { showUp: Boolean ->
+                            CommentsPane(request, controller, showUp, statusBarHeight, true)
+                        }
+                    }
+                    MainNavigationScene(
+                        storyRequest = request,
+                        directive = directive,
+                        paneProportion = paneProportion,
+                        isFoldable = isFoldable,
+                        onBack = ::popMainBackStack,
+                        stories = {},
+                        emptyDetail = {},
+                        listPaneOverlay = listOverlay,
+                        comments = { comments(!split) },
+                    )
+                }
+            } else {
+                CommentsPane(
+                    request = request,
+                    controller = controller,
+                    showUpButton = fullScreen,
+                    statusBarHeight = statusBarHeight,
+                    drawStatusBarProtection = true,
+                )
+            }
+        },
+        settings = { request ->
+            ProvideSettingsPlatformStyle(
+                style = SettingsPlatformStyle(
+                    topBarHeight = dimensionResource(
+                        R.dimen.compose_settings_toolbar_height,
+                    ),
+                    topBarNavigationHeight = dimensionResource(
+                        R.dimen.detail_toolbar_navigation_height,
+                    ),
+                    topBarNavigationInset = dimensionResource(
+                        R.dimen.detail_toolbar_navigation_inset,
+                    ),
+                    textStyle = TextStyle(
+                        platformStyle = PlatformTextStyle(
+                            includeFontPadding = true,
+                        ),
+                    ),
+                ),
+            ) {
+                SettingsShell(
+                    focusHideComments = request.initialSectionRoute ==
+                        com.simon.harmonichackernews.ui.settings.HideCommentsSettingsRoute,
+                    initialSection = controller
+                        .getInitialSettingsSectionRoute(request)
+                        ?.let(SettingsSection::fromRoute),
+                    onBackFromSettings = ::closeSettings,
+                    backHandlerEnabled = navigationSnapshot.currentDestination ==
+                        MainDestination.SETTINGS && settingsRequest?.serial == request.serial,
+                    onSectionChanged = controller::updateSettingsSection,
+                    onThemeChanged = {
+                        AndroidActivityTheme.setupTheme(activity)
+                        appearance.refreshSelection()
+                        refreshStoryWidgets(activity, reloadStories = false)
+                    },
+                )
+            }
+        },
+        submissions = { request, detail, paneComments ->
+            key(request.serial) {
+                val viewModel = com.simon.harmonichackernews.ui.session.submissionsViewModel(controller.scene, request)
+                val coordinator = remember(request.serial) {
+                    AndroidSubmissionsCoordinator(
+                        activity = activity,
+                        viewModel = viewModel,
+                        userName = request.userName,
+                        scene = controller.scene,
+                        navigator = AndroidSubmissionsCoordinator.Navigator { destination ->
+                            controller.openSubmissionStory(destination)
+                        },
+                    )
+                }
+                DisposableEffect(coordinator) {
+                    onDispose(coordinator::close)
+                }
+                val submissionsContent: @Composable () -> Unit = {
+                    val startInset = animatedExtraPanePadding()
+                    Box(Modifier.fillMaxSize().padding(start = startInset)) {
+                        AndroidSubmissionsScreen(
+                            userName = coordinator.userName,
+                            store = coordinator.store,
+                            displaySettings = coordinator.displaySettings,
+                            initialScrollRestoration = coordinator.initialScrollRestoration,
+                            onBack = controller::closeSubmissions,
+                        )
+                        StatusBarProtection(
+                            color = paneStatusBarColor,
+                            statusBarHeight = statusBarHeight,
+                        )
+                    }
+                }
+                if (isTwoPane) {
+                    SideBySideCommentsHost { listOverlay ->
+                        MainNavigationScene(
+                            listPaneOverlay = listOverlay,
+                            storyRequest = detail,
+                            directive = directive,
+                            paneProportion = paneProportion,
+                            isFoldable = isFoldable,
+                            onBack = ::popMainBackStack,
+                            stories = submissionsContent,
+                            emptyDetail = { EmptyCommentsScreen() },
+                            animateDetailVisibilityChanges = true,
+                            modifier = Modifier.background(MaterialTheme.colorScheme.pageBackground),
+                            comments = paneComments,
+                        )
+                    }
+                } else {
+                    submissionsContent()
+                }
+            }
+        },
+        editor = { request ->
+            key(request.serial) {
+                Box(Modifier.fillMaxSize()) {
+                    val editorController = remember(request.serial) {
+                        EditorSubmissionState()
+                    }
+                    val coordinator = remember(request.serial) {
+                        AndroidEditorCoordinator(
+                            activity,
+                            request.destination,
+                            controller,
+                            controller::closeEditor,
+                        )
+                    }
+                    DisposableEffect(coordinator) {
+                        onDispose(coordinator::close)
+                    }
+                    SideEffect {
+                        coordinator.attachController(editorController)
+                    }
+                    ComposeEditorScreen(
+                        type = coordinator.type,
+                        parentText = coordinator.parentText,
+                        postTitle = coordinator.postTitle,
+                        user = coordinator.user,
+                        submitting = editorController.submitting,
+                        onPredictiveBackEnabledChanged = {
+                            editorPredictiveBackEnabled = it
+                        },
+                        onClose = controller::closeEditor,
+                        onSubmit = coordinator::submit,
+                        onOpenLink = { uiDependencies.links.open(it) },
+                    )
+                }
+            }
+        },
+        immersive = {
+            DisposableEffect(activity) {
+                activity.setImmersiveContentEnabled(true)
+                onDispose {
+                    activity.setImmersiveContentEnabled(false)
+                }
+            }
+            CoulombGasScreen()
+        },
+        welcome = { request ->
+            AndroidWelcomeScreen(
+                styleChooser = request.styleChooser,
+                onDismiss = controller::closeWelcome,
+            )
+        },
+        foreground = {
+        if (navigationSnapshot.changelogDialogVisible) {
+            SettingsChangelogDialog(
+                onDismiss = controller::dismissChangelogDialog,
+                onOpenGithub = {
+                    uiDependencies.links.open(uiDependencies.metadata.projectUrl)
+                },
+            )
+        }
+
+        if (navigationSnapshot.cacheStoriesDialogVisible) {
+            CacheStoriesDialog(
+                initialStoryCount = uiDependencies.userSettings
+                    .cache.storiesToCache,
+                integratedWebView = uiDependencies.userSettings.reading.integratedWebView,
+                onDismiss = controller::dismissCacheStoriesDialog,
+                onConfirm = controller::confirmCacheStories,
+            )
+        }
+
+        if (navigationSnapshot.loginDialogVisible) {
+            AndroidLoginDialog(
+                onDismiss = controller::dismissLoginDialog,
+            )
+        }
+
+        navigationSnapshot.captchaRequest?.let { request ->
+            key(request.serial) {
+                CaptchaDialog(
+                    challenge = request.challenge,
+                    onDismiss = {
+                        if (controller.navigationState.state.value.captchaRequest?.serial == request.serial) {
+                            controller.dismissCaptchaDialog()
+                        }
+                    },
+                    onCaptchaResponse = { response ->
+                        if (controller.navigationState.state.value.captchaRequest?.serial == request.serial) {
+                            controller.completeCaptchaDialog(response)
+                        }
+                    },
+                )
+            }
+        }
+
+        navigationSnapshot.userRequest?.let { request ->
+            key(request.serial) {
+                AndroidUserSettingsDialog(
+                    userName = request.userName,
+                    onDismiss = controller::dismissUserDialog,
+                    onTagChanged = controller::notifyUserTagChanged,
+                )
+            }
+        }
+
+        navigationSnapshot.failureRequest?.let { request ->
+            key(request.serial) {
+                FailureDetailDialog(
+                    title = request.title,
+                    message = request.message,
+                    showCopyComment = request.clipboardText != null,
+                    onCopyComment = {
+                        request.clipboardText?.let { text ->
+                            uiDependencies.platform.clipboard.copy("Hacker News comment", text)
+                            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                                controller.showMessage("Comment copied to clipboard")
+                            }
+                        }
+                        controller.dismissFailureDetailDialog()
+                    },
+                    onDismiss = controller::dismissFailureDetailDialog,
+                )
+            }
+        }
+
+            UserMessageSnackbarHost(
+                messages = uiDependencies.userMessages,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .zIndex(100f),
+            )
+        },
+    )
+}

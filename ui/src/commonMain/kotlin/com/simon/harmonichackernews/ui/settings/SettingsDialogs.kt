@@ -1,0 +1,524 @@
+package com.simon.harmonichackernews.ui.settings
+
+import com.simon.harmonichackernews.resources.*
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import com.simon.harmonichackernews.ui.common.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
+import com.simon.harmonichackernews.ui.common.PredictiveBackDialog
+import com.simon.harmonichackernews.ui.theme.AppUiFontFamily
+
+@Composable
+fun SettingsAlertDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    neutralButton: (@Composable () -> Unit)? = null,
+    dismissButton: (@Composable () -> Unit)? = null,
+    title: (@Composable () -> Unit)? = null,
+    text: (@Composable () -> Unit)? = null,
+    edgeToEdgeContent: Boolean = false,
+    showButtons: Boolean = true,
+    separateDismissButton: Boolean = false,
+    properties: DialogProperties = DialogProperties(),
+    scrollableContent: Boolean = false,
+    compactSpacing: Boolean = false,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    foreground: (@Composable BoxScope.() -> Unit)? = null,
+) {
+    val dialogMaxWidth = settingsDialogMaxWidth()
+    SynchronizedSettingsDialogs {
+        PredictiveBackDialog(
+            onDismissRequest = onDismissRequest,
+            properties = DialogProperties(
+                dismissOnBackPress = properties.dismissOnBackPress,
+                dismissOnClickOutside = properties.dismissOnClickOutside,
+                usePlatformDefaultWidth = false,
+            ),
+        ) {
+            SettingsAlertDialogLayout(
+                onDismissRequest = onDismissRequest,
+                confirmButton = confirmButton,
+                modifier = modifier,
+                neutralButton = neutralButton,
+                dismissButton = dismissButton,
+                title = title,
+                text = text,
+                edgeToEdgeContent = edgeToEdgeContent,
+                showButtons = showButtons,
+                separateDismissButton = separateDismissButton,
+                dismissOnClickOutside = properties.dismissOnClickOutside,
+                scrollableContent = scrollableContent,
+                compactSpacing = compactSpacing,
+                foreground = foreground,
+                containerColor = containerColor,
+                dialogMaxWidth = dialogMaxWidth,
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun SettingsAlertDialogLayout(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    neutralButton: (@Composable () -> Unit)? = null,
+    dismissButton: (@Composable () -> Unit)? = null,
+    title: (@Composable () -> Unit)? = null,
+    text: (@Composable () -> Unit)? = null,
+    edgeToEdgeContent: Boolean = false,
+    showButtons: Boolean = true,
+    separateDismissButton: Boolean = false,
+    dismissOnClickOutside: Boolean = true,
+    scrollableContent: Boolean = false,
+    compactSpacing: Boolean = false,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    foreground: (@Composable BoxScope.() -> Unit)? = null,
+    dialogMaxWidth: Dp,
+) {
+    val contentWindowInsets = synchronizedSettingsDialogInsets()
+    val compactScroll = rememberScrollState()
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    Box(
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        if (dismissOnClickOutside) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .pointerInput(onDismissRequest) {
+                        detectTapGestures { onDismissRequest() }
+                    },
+            )
+        }
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(contentWindowInsets)
+                .padding(
+                    horizontal = HarmonicDimens.compose_settings_dialog_horizontal_margin,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            // With a keyboard and large text, title + actions alone can fill a short window.
+            // Let the complete card scroll there while bounding the body: lazy lists inside it
+            // must still receive a finite height rather than the outer scroll's infinity.
+            val shortWindow = maxHeight < 300.dp * fontScale
+            val verticalMargin = if (shortWindow) 4.dp else HarmonicDimens.compose_settings_dialog_vertical_margin
+            val availableHeight = (maxHeight - verticalMargin * 2).coerceAtLeast(0.dp)
+            val inlineActions = shortWindow && scrollableContent && showButtons && title != null &&
+                minOf(maxWidth, dialogMaxWidth) >= 560.dp * fontScale
+            val compactHeight = !inlineActions && availableHeight < 128.dp * fontScale && (title != null || showButtons)
+            val compactBodyHeight = (availableHeight * 0.65f).coerceAtLeast(64.dp)
+            Surface(
+                modifier = modifier
+                    .widthIn(max = dialogMaxWidth)
+                    .fillMaxWidth()
+                    .heightIn(max = availableHeight)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) awaitPointerEvent()
+                        }
+                    },
+                shape = MaterialTheme.shapes.extraLarge,
+                color = containerColor,
+                tonalElevation = 6.dp,
+                shadowElevation = 8.dp,
+            ) {
+                Box(
+                    Modifier.testTag("settings-dialog-animated-content")
+                        .animateSettingsDialogContentSize(),
+                    propagateMinConstraints = true,
+                ) {
+                    Column(
+                        Modifier.then(
+                            if (compactHeight) Modifier.verticalScroll(compactScroll)
+                                .testTag("settings-dialog-compact-scroll") else Modifier,
+                        ),
+                    ) {
+                        if (inlineActions) {
+                            // In phone landscape + IME there may be only ~120dp of height.
+                            // Share one toolbar row so the editor and both actions remain visible.
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = HarmonicDimens.compose_settings_dialog_content_padding),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(Modifier.weight(1f).padding(end = 8.dp)) { title?.invoke() }
+                                neutralButton?.invoke()
+                                dismissButton?.invoke()
+                                confirmButton()
+                            }
+                        } else title?.let { titleContent ->
+                            Box(
+                                modifier = Modifier.padding(
+                                    start = HarmonicDimens.compose_settings_dialog_content_padding,
+                                    top = if (shortWindow) 8.dp else HarmonicDimens.compose_settings_dialog_content_padding,
+                                    end = HarmonicDimens.compose_settings_dialog_content_padding,
+                                    bottom = 0.dp,
+                                ),
+                            ) {
+                                titleContent()
+                            }
+                        }
+                        text?.let { textContent ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (compactHeight && scrollableContent) {
+                                            Modifier.heightIn(max = compactBodyHeight)
+                                        } else if (compactHeight) {
+                                            // Plain content participates in the complete card scroll.
+                                            // Scroll/lazy bodies opt into a finite viewport explicitly.
+                                            Modifier
+                                        } else if (scrollableContent) {
+                                            Modifier.weight(1f, fill = false)
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
+                                    .padding(
+                                        start = if (edgeToEdgeContent) {
+                                            0.dp
+                                        } else {
+                                            HarmonicDimens.compose_settings_dialog_content_padding
+                                        },
+                                        top = if (edgeToEdgeContent) {
+                                            0.dp
+                                        } else if (inlineActions) {
+                                            0.dp
+                                        } else if (title == null) {
+                                            HarmonicDimens.compose_settings_dialog_content_padding
+                                        } else 8.dp,
+                                        end = if (edgeToEdgeContent) {
+                                            0.dp
+                                        } else {
+                                            HarmonicDimens.compose_settings_dialog_content_padding
+                                        },
+                                        bottom = if (edgeToEdgeContent || compactSpacing) 0.dp else 8.dp,
+                                    ),
+                            ) {
+                                textContent()
+                            }
+                        }
+                        if (showButtons && !inlineActions) {
+                            val actionsModifier = Modifier
+                                .fillMaxWidth()
+                                .padding(
+                                    horizontal = HarmonicDimens.compose_settings_dialog_content_padding,
+                                    vertical = if (shortWindow) 0.dp else if (compactSpacing) 6.dp else HarmonicDimens.compose_settings_dialog_action_vertical_padding,
+                                )
+                            // Measure each complete action against the available row width before
+                            // wrapping. A Row can squeeze its final label into the remaining few
+                            // pixels even when the dialog is wide enough to miss a width heuristic.
+                            FlowRow(
+                                modifier = actionsModifier,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                neutralButton?.invoke()
+                                if (neutralButton != null) Spacer(Modifier.weight(1f))
+                                dismissButton?.invoke()
+                                if (separateDismissButton && dismissButton != null) {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                                confirmButton()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        foreground?.invoke(this)
+    }
+}
+
+/** Read in the caller's window: the iOS dialog's available height changes with the keyboard. */
+@Composable
+internal fun settingsDialogMaxWidth(): Dp {
+    val size = LocalWindowInfo.current.containerSize
+    return with(LocalDensity.current) {
+        val shortEdge = minOf(size.width, size.height).toDp()
+        val longEdge = maxOf(size.width, size.height).toDp()
+        if (shortEdge >= 600.dp && longEdge >= shortEdge * 1.3f) {
+            HarmonicDimens.compose_settings_dialog_tablet_max_width
+        } else {
+            HarmonicDimens.compose_settings_dialog_max_width
+        }
+    }
+}
+
+@Composable
+fun SettingsDialogTextButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    TextButton(
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        contentPadding = PaddingValues(horizontal = 24.dp),
+        content = content,
+    )
+}
+
+@Composable
+fun SingleChoiceDialog(
+    title: String,
+    options: List<Pair<String, String>>,
+    selected: String,
+    onDismiss: () -> Unit,
+    onSelected: (String) -> Unit,
+) {
+    SettingsAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { SettingsDialogTitle(title) },
+        edgeToEdgeContent = true,
+        scrollableContent = true,
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .selectableGroup(),
+                contentPadding = PaddingValues(vertical = 8.dp),
+            ) {
+                items(options, key = { it.first }, contentType = { "radio-option" }) { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .selectable(
+                                selected = option.first == selected,
+                                role = Role.RadioButton,
+                                onClick = { onSelected(option.first) },
+                            )
+                            .padding(horizontal = 24.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SettingsRadioButton(selected = option.first == selected)
+                        Text(
+                            text = option.second,
+                            modifier = Modifier.padding(start = 4.dp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontFamily = AppUiFontFamily,
+                            fontSize = 16.sp,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        showButtons = false,
+    )
+}
+
+@Composable
+fun MultiChoiceDialog(
+    title: String,
+    options: List<String>,
+    selected: Set<String>,
+    onDismiss: () -> Unit,
+    onSelectionChanged: (Set<String>) -> Unit,
+    description: String? = null,
+) {
+    var workingSelection by remember(options, selected) {
+        mutableStateOf(selected)
+    }
+    SettingsAlertDialog(
+        onDismissRequest = onDismiss,
+        title = { SettingsDialogTitle(title) },
+        edgeToEdgeContent = true,
+        scrollableContent = true,
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp),
+            ) {
+                if (!description.isNullOrBlank()) {
+                    item(key = "description", contentType = "description") {
+                        Text(
+                            text = description,
+                            modifier = Modifier.padding(
+                                start = 24.dp,
+                                top = 4.dp,
+                                end = 24.dp,
+                                bottom = 12.dp,
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = AppUiFontFamily,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp,
+                        )
+                    }
+                }
+                items(options, key = { it }, contentType = { "checkbox-option" }) { option ->
+                    val checked = option in workingSelection
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clickable(
+                                role = Role.Checkbox,
+                                onClick = {
+                                    workingSelection = if (checked) {
+                                        workingSelection - option
+                                    } else {
+                                        workingSelection + option
+                                    }
+                                },
+                            )
+                            .padding(horizontal = 24.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SettingsCheckbox(checked = checked)
+                        Text(
+                            text = option,
+                            modifier = Modifier.padding(start = 4.dp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontFamily = AppUiFontFamily,
+                            fontSize = 16.sp,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            SettingsDialogTextButton(onClick = { onSelectionChanged(workingSelection) }) {
+                Text("OK")
+            }
+        },
+        dismissButton = {
+            SettingsDialogTextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+/** Use for simple message/confirmation dialogs so body typography stays consistent. */
+@Composable
+fun MessageActionDialog(
+    title: String? = null,
+    message: CharSequence,
+    positiveLabel: String? = null,
+    negativeLabel: String? = null,
+    neutralLabel: String? = null,
+    onPositive: () -> Unit = {},
+    onNegative: () -> Unit = {},
+    onNeutral: () -> Unit = {},
+    onDismiss: () -> Unit,
+) {
+    SettingsAlertDialog(
+        onDismissRequest = onDismiss,
+        title = title?.let {
+            {
+                SettingsDialogTitle(it)
+            }
+        },
+        text = {
+            SettingsDialogBodyText(message.toString())
+        },
+        confirmButton = {
+            positiveLabel?.let { label ->
+                SettingsDialogTextButton(onClick = onPositive) {
+                    Text(label)
+                }
+            }
+        },
+        dismissButton = {
+            negativeLabel?.let { label ->
+                SettingsDialogTextButton(onClick = onNegative) {
+                    Text(label)
+                }
+            }
+        },
+        neutralButton = {
+            neutralLabel?.let { label ->
+                SettingsDialogTextButton(onClick = onNeutral) {
+                    Text(label)
+                }
+            }
+        },
+    )
+}
+
+/** Shared body for dialogs with custom content or container animations. */
+@Composable
+fun SettingsDialogBodyText(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.onSurface,
+        fontFamily = AppUiFontFamily,
+        fontSize = 16.sp,
+        lineHeight = 20.sp,
+    )
+}
+
+@Composable
+fun SettingsDialogTitle(title: String) {
+    Text(
+        text = title,
+        modifier = Modifier.semantics { heading() },
+        color = MaterialTheme.colorScheme.onSurface,
+        fontFamily = AppUiFontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 24.sp,
+        lineHeight = 30.sp,
+    )
+}

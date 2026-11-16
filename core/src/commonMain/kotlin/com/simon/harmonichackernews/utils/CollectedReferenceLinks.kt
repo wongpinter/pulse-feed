@@ -1,0 +1,575 @@
+package com.simon.harmonichackernews.utils
+
+import com.fleeksoft.ksoup.Ksoup
+import com.fleeksoft.ksoup.nodes.Element
+import com.fleeksoft.ksoup.nodes.Node
+import com.fleeksoft.ksoup.nodes.TextNode
+import com.fleeksoft.ksoup.select.Selector
+
+/** Extracts standalone and trailing reference links without any platform URL or HTML APIs. */
+object CollectedReferenceLinks {
+    private val referenceMarkerPattern = Regex(
+        "\\s*(?:\\[(\\d{1,3})]\\s*(?::|\\.|-|\\u2013|\\u2014)?|" +
+            "(\\d{1,3})(\\s*:|[.)](?=\\s))|\\[([†‡*§¶]{1,3})]|([†‡*§¶]{1,3}))\\s*",
+    )
+    private val commonBareDomainTlds = setOf(
+        "app", "biz", "blog", "cloud", "com", "dev", "edu", "fm", "gov", "info",
+        "io", "mil", "net", "news", "online", "org", "site", "store", "tech", "tv",
+        "wiki", "xyz",
+    )
+    private const val MAX_REFERENCE_HTML_CHARS = 64 * 1024
+    private val whitespacePattern = Regex("\\s+")
+    private val anchorsWithHref = Selector.evaluatorOf("a[href]")
+
+    fun parse(inputHtml: String?): Result {
+        if (inputHtml.isNullOrEmpty() || inputHtml.length > MAX_REFERENCE_HTML_CHARS) {
+            // Keep oversized content intact; collecting references is an optional presentation.
+            return Result.empty(inputHtml)
+        }
+        // Most HN comments have no links. Avoid building a DOM for those rows while still sending
+        // anchors, explicit URLs, and possible bare domains through the legacy-compatible parser.
+        if (!mayContainLink(inputHtml)) return Result.empty(inputHtml)
+
+        val document = Ksoup.parse(inputHtml)
+        document.outputSettings().prettyPrint(false)
+        val body = document.body()
+        val nodes = body.childNodes().toList()
+        if (nodes.isEmpty()) return Result.empty(inputHtml)
+
+        // Every child has a unique position in this detached DOM. Indexing avoids repeatedly
+        // scanning reference/removal lists, without relying on Node equality or hashing.
+        val nodesToRemove = BooleanArray(nodes.size)
+        val collectedNodes = arrayOfNulls<CollectedNode>(nodes.size)
+        collectStandaloneAnchorRuns(nodes, collectedNodes, nodesToRemove)
+        collectStandaloneLinkNodes(nodes, collectedNodes, nodesToRemove)
+        collectTrailingReferenceNodes(nodes, collectedNodes, nodesToRemove)
+        if (collectedNodes.all { it == null }) return Result.empty(inputHtml)
+        val contentBlocks = buildContentBlocks(nodes, collectedNodes, nodesToRemove)
+        val links = collectedNodes.filterNotNull().flatMap(CollectedNode::links)
+        nodes.forEachIndexed { index, node -> if (nodesToRemove[index]) node.remove() }
+        return Result(body.html().trim(), links, contentBlocks)
+    }
+
+    private fun mayContainLink(inputHtml: String): Boolean =
+        inputHtml.indexOf("<a", ignoreCase = true) >= 0 ||
+            inputHtml.indexOf("http://", ignoreCase = true) >= 0 ||
+            inputHtml.indexOf("https://", ignoreCase = true) >= 0 ||
+            containsPossibleBareDomain(inputHtml)
+
+    /** A permissive prefilter: scan each host character once, including unsuccessful candidates. */
+    private fun containsPossibleBareDomain(value: String): Boolean {
+        var hostStarted = false
+        var lettersAfterDot = -1
+        for (char in value) {
+            when {
+                char.isAsciiLetter() -> {
+                    hostStarted = true
+                    if (lettersAfterDot >= 0 && ++lettersAfterDot >= 2) return true
+                }
+                char in '0'..'9' -> {
+                    hostStarted = true
+                    lettersAfterDot = -1
+                }
+                char == '.' && hostStarted -> lettersAfterDot = 0
+                char == '-' && hostStarted -> lettersAfterDot = -1
+                else -> {
+                    hostStarted = false
+                    lettersAfterDot = -1
+                }
+            }
+        }
+        return false
+    }
+
+    private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
+
+    private fun collectStandaloneLinkNodes(
+        nodes: List<Node>,
+        collectedNodes: Array<CollectedNode?>,
+        nodesToRemove: BooleanArray,
+    ) {
+        nodes.forEachIndexed { index, node ->
+            if (nodesToRemove[index]) return@forEachIndexed
+            if (isIgnorable(node)) return@forEachIndexed
+            // A prose footnote after a numbered link must not prevent collecting that link.
+            // Both parsers require the entire standalone node to consist of references.
+            val parsedLinks = parseUnnumberedLinkNode(node).ifEmpty { parseReferenceNode(node) }
+            if (parsedLinks.isEmpty() || !hasStandaloneLineBoundaries(nodes, index, node)) {
+                return@forEachIndexed
+            }
+            collectedNodes[index] = CollectedNode(parsedLinks)
+            nodesToRemove[index] = true
+        }
+    }
+
+    private fun collectStandaloneAnchorRuns(
+        nodes: List<Node>,
+        collectedNodes: Array<CollectedNode?>,
+        nodesToRemove: BooleanArray,
+    ) {
+        var start = 0
+        while (start < nodes.size) {
+            val firstAnchor = (nodes[start] as? Element)?.takeIf(::isAnchorTag)
+            // Reject inline starts before parsing a run, avoiding repeated scans of its suffixes.
+            if (firstAnchor == null || !hasLineBoundaryBefore(nodes, start)) {
+                start++
+                continue
+            }
+
+            val firstLink = parseUnnumberedAnchor(firstAnchor)
+            if (firstLink == null) {
+                start++
+                continue
+            }
+            val links = mutableListOf(firstLink)
+            var end = start
+            var position = start + 1
+            while (position < nodes.size) {
+                val candidate = nodes[position]
+                when {
+                    candidate is Element && isAnchorTag(candidate) -> {
+                        val link = parseUnnumberedAnchor(candidate) ?: break
+                        links += link
+                        end = position
+                        position++
+                    }
+                    isInterReferenceSeparatorNode(candidate) -> position++
+                    else -> break
+                }
+            }
+
+            if (
+                links.size > 1 &&
+                hasLineBoundaryAfter(nodes, end)
+            ) {
+                collectedNodes[start] = CollectedNode(links)
+                for (nodeIndex in start..end) nodesToRemove[nodeIndex] = true
+                start = end + 1
+            } else {
+                start++
+            }
+        }
+    }
+
+    private fun isInterReferenceSeparatorNode(node: Node): Boolean =
+        node is TextNode &&
+            node.getWholeText().isNotEmpty() &&
+            node.getWholeText().all { it.isWhitespace() || it == ',' || it == ';' || it == '|' }
+
+    private fun collectTrailingReferenceNodes(
+        nodes: List<Node>,
+        collectedNodes: Array<CollectedNode?>,
+        nodesToRemove: BooleanArray,
+    ) {
+        val trailingIgnorableNodes = mutableListOf<Int>()
+        for (index in nodes.indices.reversed()) {
+            val node = nodes[index]
+            if (collectedNodes[index] != null) {
+                addNodesToRemove(nodesToRemove, trailingIgnorableNodes)
+                trailingIgnorableNodes.clear()
+                continue
+            }
+            if (isIgnorable(node)) {
+                trailingIgnorableNodes += index
+                continue
+            }
+
+            val parsedLinks = parseReferenceNode(node)
+            if (parsedLinks.isEmpty()) break
+            collectedNodes[index] = CollectedNode(parsedLinks)
+            nodesToRemove[index] = true
+            addNodesToRemove(nodesToRemove, trailingIgnorableNodes)
+            trailingIgnorableNodes.clear()
+        }
+    }
+
+    private fun addNodesToRemove(target: BooleanArray, indices: List<Int>) {
+        indices.forEach { target[it] = true }
+    }
+
+    private fun hasStandaloneLineBoundaries(nodes: List<Node>, index: Int, node: Node): Boolean {
+        if (node is Element && isBlockLineBoundaryElement(node)) return true
+        return hasLineBoundaryBefore(nodes, index) && hasLineBoundaryAfter(nodes, index)
+    }
+
+    private fun hasLineBoundaryBefore(nodes: List<Node>, index: Int): Boolean {
+        for (candidateIndex in index - 1 downTo 0) {
+            val node = nodes[candidateIndex]
+            if (isBlankTextNode(node)) continue
+            return isLineBreakElement(node) ||
+                isBlockLineBoundaryNode(node) ||
+                (node is TextNode && endsWithLineBreak(node.getWholeText()))
+        }
+        return true
+    }
+
+    private fun hasLineBoundaryAfter(nodes: List<Node>, index: Int): Boolean {
+        for (candidateIndex in index + 1 until nodes.size) {
+            val node = nodes[candidateIndex]
+            if (isBlankTextNode(node)) continue
+            return isLineBreakElement(node) ||
+                isBlockLineBoundaryNode(node) ||
+                (node is TextNode && startsWithLineBreak(node.getWholeText()))
+        }
+        return true
+    }
+
+    private fun isBlankTextNode(node: Node): Boolean =
+        node is TextNode && node.getWholeText().isBlank()
+
+    private fun isLineBreakElement(node: Node): Boolean =
+        node is Element && node.tagName().equals("br", ignoreCase = true)
+
+    private fun isBlockLineBoundaryNode(node: Node): Boolean =
+        node is Element && isBlockLineBoundaryElement(node)
+
+    private fun isBlockLineBoundaryElement(element: Element): Boolean =
+        when (element.tagName().lowercase()) {
+            "p", "div", "li" -> true
+            else -> false
+        }
+
+    private fun startsWithLineBreak(text: String): Boolean =
+        text.firstOrNull() == '\n' || text.firstOrNull() == '\r'
+
+    private fun endsWithLineBreak(text: String): Boolean =
+        text.lastOrNull() == '\n' || text.lastOrNull() == '\r'
+
+    private fun buildContentBlocks(
+        nodes: List<Node>,
+        collectedNodes: Array<CollectedNode?>,
+        nodesToRemove: BooleanArray,
+    ): List<ContentBlock> = buildList {
+        val html = StringBuilder()
+        nodes.forEachIndexed { index, node ->
+            val collectedNode = collectedNodes[index]
+            if (collectedNode != null) {
+                flushTextBlock(html, this)
+                collectedNode.links.forEach { add(ContentBlock.link(it)) }
+            } else if (!nodesToRemove[index]) {
+                html.append(node.outerHtml())
+            }
+        }
+        flushTextBlock(html, this)
+    }
+
+    private fun isIgnorable(node: Node): Boolean = when (node) {
+        is TextNode -> node.getWholeText().isBlank()
+        is Element ->
+            (node.tagName().equals("br", ignoreCase = true) || isReferenceContainerTag(node)) &&
+                node.text().isBlank()
+        else -> false
+    }
+
+    private fun parseReferenceNode(node: Node): List<ReferenceLink> = when (node) {
+        is Element -> if (isReferenceContainerTag(node)) parseReferenceElement(node) else emptyList()
+        is TextNode -> parseBareReferenceText(node.getWholeText())
+        else -> emptyList()
+    }
+
+    private fun parseUnnumberedLinkNode(node: Node): List<ReferenceLink> = when (node) {
+        is Element -> when {
+            isAnchorTag(node) -> listOfNotNull(parseUnnumberedAnchor(node))
+            isReferenceContainerTag(node) -> parseUnnumberedLinkElement(node)
+            else -> emptyList()
+        }
+        is TextNode -> parseUnnumberedLinkText(node.getWholeText())
+        else -> emptyList()
+    }
+
+    private fun isReferenceContainerTag(element: Element): Boolean =
+        when (element.tagName().lowercase()) {
+            "p", "div", "span", "li" -> true
+            else -> false
+        }
+
+    private fun isAnchorTag(element: Element): Boolean =
+        element.tagName().equals("a", ignoreCase = true) && element.hasAttr("href")
+
+    private fun parseReferenceElement(element: Element): List<ReferenceLink> {
+        // These nodes already belong to the normalized comment DOM. Serializing and parsing
+        // their children again duplicates the same HTML work for every candidate paragraph.
+        val text = normalizeReferenceWhitespace(element.text())
+        if (!startsWithReferenceMarker(text)) return emptyList()
+        val anchors = element.select(anchorsWithHref)
+        return if (anchors.isNotEmpty()) parseAnchoredReferenceText(text, anchors)
+        else parseBareReferenceText(text)
+    }
+
+    private fun parseUnnumberedLinkElement(element: Element): List<ReferenceLink> {
+        val text = normalizeReferenceWhitespace(element.text())
+        if (text.isEmpty() || startsWithReferenceMarker(text)) return emptyList()
+        val anchors = element.select(anchorsWithHref)
+        return if (anchors.isNotEmpty()) parseUnnumberedAnchoredLinkText(text, anchors)
+        else parseUnnumberedLinkText(text)
+    }
+
+    private fun parseAnchoredReferenceText(
+        text: String,
+        anchors: List<Element>,
+    ): List<ReferenceLink> {
+        val links = mutableListOf<ReferenceLink>()
+        var position = 0
+        anchors.forEach { anchor ->
+            val marker = referenceMarkerAt(text, position) ?: return emptyList()
+            position = marker.range.last + 1
+            val displayLabel = normalizeReferenceWhitespace(anchor.text())
+            if (displayLabel.isEmpty() || !text.startsWith(displayLabel, position)) return emptyList()
+            position += displayLabel.length
+            position = skipInterReferenceSeparators(text, position)
+
+            val url = normalizeUrl(anchor.attr("href"))
+            if (!isUsableUrl(url)) return emptyList()
+            links += ReferenceLink(
+                referenceNumber(marker),
+                referenceMarkerLabel(marker),
+                url,
+                getAnchorLabel(displayLabel, url),
+            )
+        }
+        return links.takeIf { position == text.length }.orEmpty()
+    }
+
+    private fun parseUnnumberedAnchoredLinkText(
+        text: String,
+        anchors: List<Element>,
+    ): List<ReferenceLink> {
+        val links = mutableListOf<ReferenceLink>()
+        var position = 0
+        anchors.forEach { anchor ->
+            position = skipInterReferenceSeparators(text, position)
+            val url = normalizeUrl(anchor.attr("href"))
+            if (!isUsableUrl(url)) return emptyList()
+
+            val displayLabel = normalizeReferenceWhitespace(anchor.text())
+            if (displayLabel.isEmpty() || !text.startsWith(displayLabel, position)) return emptyList()
+            position += displayLabel.length
+            links += ReferenceLink(null, url, getAnchorLabel(displayLabel, url))
+        }
+        position = skipInterReferenceSeparators(text, position)
+        return links.takeIf { position == text.length }.orEmpty()
+    }
+
+    private fun parseBareReferenceText(text: String): List<ReferenceLink> {
+        val normalizedText = normalizeReferenceWhitespace(text)
+        if (!startsWithReferenceMarker(normalizedText)) return emptyList()
+
+        val links = mutableListOf<ReferenceLink>()
+        var position = 0
+        while (position < normalizedText.length) {
+            val marker = referenceMarkerAt(normalizedText, position) ?: return emptyList()
+            position = marker.range.last + 1
+            val urlStart = position
+            while (position < normalizedText.length && !isBareUrlTerminator(normalizedText[position])) {
+                position++
+            }
+
+            val label = trimTrailingUrlPunctuation(normalizedText.substring(urlStart, position))
+            val url = normalizeBareUrl(label)
+            if (!isUsableUrl(url)) return emptyList()
+            links += ReferenceLink(
+                referenceNumber(marker),
+                referenceMarkerLabel(marker),
+                url,
+                label,
+            )
+            position = skipInterReferenceSeparators(normalizedText, position)
+        }
+        return links
+    }
+
+    private fun parseUnnumberedLinkText(text: String): List<ReferenceLink> {
+        val normalizedText = normalizeReferenceWhitespace(text)
+        if (normalizedText.isEmpty() || startsWithReferenceMarker(normalizedText)) return emptyList()
+
+        val links = mutableListOf<ReferenceLink>()
+        var position = 0
+        while (position < normalizedText.length) {
+            position = skipInterReferenceSeparators(normalizedText, position)
+            if (position >= normalizedText.length) break
+            val urlStart = position
+            while (position < normalizedText.length && !isBareUrlTerminator(normalizedText[position])) {
+                position++
+            }
+
+            val label = trimTrailingUrlPunctuation(normalizedText.substring(urlStart, position))
+            val url = normalizeBareUrl(label)
+            if (!isUsableUrl(url)) return emptyList()
+            links += ReferenceLink(null, url, label)
+        }
+        return links
+    }
+
+    private fun parseUnnumberedAnchor(anchor: Element): ReferenceLink? {
+        val url = normalizeUrl(anchor.attr("href"))
+        if (!isUsableUrl(url)) return null
+        val displayLabel = normalizeReferenceWhitespace(anchor.text())
+        if (displayLabel.isEmpty()) return null
+        return ReferenceLink(null, url, getAnchorLabel(displayLabel, url))
+    }
+
+    private fun getAnchorLabel(displayLabel: String, url: String): String {
+        if (displayLabel.endsWith("...")) {
+            val prefix = displayLabel.dropLast(3)
+            if (url.startsWith(prefix)) return url
+        }
+        return displayLabel
+    }
+
+    private fun startsWithReferenceMarker(text: String): Boolean = referenceMarkerAt(text, 0) != null
+
+    private fun referenceMarkerAt(text: String, position: Int): MatchResult? =
+        referenceMarkerPattern.matchAt(text, position)
+
+    private fun referenceNumber(marker: MatchResult): String? =
+        marker.groups[1]?.value ?: marker.groups[2]?.value
+
+    private fun referenceMarkerLabel(marker: MatchResult): String? =
+        marker.groups[1]?.value?.let { "[$it]" }
+            ?: marker.groups[2]?.value?.let { it + marker.groupValues[3].trim() }
+            ?: marker.groups[4]?.value?.let { "[$it]" }
+            ?: marker.groups[5]?.value
+
+    private fun skipInterReferenceSeparators(text: String, start: Int): Int {
+        var position = start
+        while (position < text.length) {
+            val current = text[position]
+            if (current.isWhitespace() || current == ',' || current == ';' || current == '|') {
+                position++
+            } else {
+                break
+            }
+        }
+        return position
+    }
+
+    private fun isBareUrlTerminator(value: Char): Boolean =
+        value.isWhitespace() || value == ',' || value == ';' || value == '|'
+
+    private fun normalizeReferenceWhitespace(value: String): String =
+        value.replace('\u00a0', ' ').trim().replace(whitespacePattern, " ")
+
+    private fun normalizeUrl(value: String?): String {
+        // Anchor attributes have already been HTML-decoded. Punctuation in an explicit href
+        // belongs to the destination; only bare URLs detected in prose need trimming.
+        val url = value.orEmpty().trim()
+        return when {
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("/") -> HackerNewsLinks.BASE_URL + url
+            "://" !in url && looksLikeDomain(url) -> "https://$url"
+            else -> url
+        }
+    }
+
+    private fun normalizeBareUrl(value: String?): String {
+        val url = trimTrailingUrlPunctuation(
+            HtmlTextUtils.plainText(value).trim()
+                .replace("&#x2F;", "/")
+                .replace("&#47;", "/"),
+        )
+        return if (url.startsWith("/") && !url.startsWith("//")) url else normalizeUrl(url)
+    }
+
+    private fun trimTrailingUrlPunctuation(value: String?): String =
+        value.orEmpty().trim().trimEnd('.', ',', ';', ':', '!', '?')
+
+    private fun isUsableUrl(url: String?): Boolean =
+        url != null &&
+            (url.startsWith("http://") || url.startsWith("https://")) &&
+            url.length > "https://".length
+
+    private fun looksLikeDomain(value: String?): Boolean {
+        if (value.isNullOrEmpty()) return false
+        val hostEnd = value.indexOfFirst { it == '/' || it == ':' }.let {
+            if (it < 0) value.length else it
+        }
+        if (hostEnd !in 4..253 || !(value[0].isAsciiLetter() || value[0] in '0'..'9')) return false
+        var lastDot = -1
+        for (index in 0 until hostEnd) {
+            val char = value[index]
+            if (char == '.') lastDot = index
+            else if (!char.isAsciiLetter() && char !in '0'..'9' && char != '-') return false
+        }
+        if (lastDot < 1 || hostEnd - lastDot < 3) return false
+        val tld = value.substring(lastDot + 1, hostEnd).lowercase()
+        if (!tld.all { it.isAsciiLetter() }) return false
+        var position = hostEnd
+        if (position < value.length && value[position] == ':') {
+            val portStart = ++position
+            while (position < value.length && value[position] in '0'..'9') position++
+            if (position == portStart) return false
+        }
+        if (position < value.length) {
+            if (value[position] != '/') return false
+            for (index in position until value.length) if (value[index].isWhitespace()) return false
+        }
+        // Bare domains are only a convenience. Keep this conservative so dotted identifiers such
+        // as browser.ml.enable are not promoted into collected links.
+        return tld.length == 2 || tld in commonBareDomainTlds
+    }
+
+    private fun flushTextBlock(html: StringBuilder, target: MutableList<ContentBlock>) {
+        val value = html.toString().trim()
+        if (value.isNotEmpty()) target += ContentBlock.text(value)
+        html.clear()
+    }
+
+    private data class CollectedNode(
+        val links: List<ReferenceLink>,
+    )
+
+    class Result(
+        bodyHtml: String?,
+        links: List<ReferenceLink>,
+        contentBlocks: List<ContentBlock>,
+    ) {
+        val bodyHtml: String = bodyHtml.orEmpty()
+        val links: List<ReferenceLink> = links.toList()
+        val contentBlocks: List<ContentBlock> = contentBlocks.toList()
+
+        fun hasLinks(): Boolean = links.isNotEmpty()
+        fun hasInterleavedLinks(): Boolean {
+            var seenLink = false
+            return contentBlocks.any { block ->
+                if (block.isLink()) seenLink = true
+                seenLink && !block.isLink()
+            }
+        }
+
+        companion object {
+            fun empty(bodyHtml: String?) = Result(bodyHtml, emptyList(), emptyList())
+        }
+    }
+
+    class ContentBlock private constructor(
+        val bodyHtml: String?,
+        private val link: ReferenceLink?,
+    ) {
+        fun isLink(): Boolean = link != null
+        fun getLink(): ReferenceLink? = link
+
+        companion object {
+            fun text(bodyHtml: String?) = ContentBlock(bodyHtml, null)
+            fun link(link: ReferenceLink?) = ContentBlock(null, link)
+        }
+    }
+
+    class ReferenceLink(
+        val number: String?,
+        val markerLabel: String?,
+        val url: String?,
+        val label: String?,
+    ) {
+        var resolvedTitle: String? = null
+        var resolvedSummary: com.simon.harmonichackernews.network.LinkSummary? = null
+
+        constructor(number: String?, url: String?, label: String?) : this(
+            number,
+            number?.let { "[$it]" },
+            url,
+            label,
+        )
+
+        fun hasNumber(): Boolean = !number.isNullOrEmpty()
+    }
+}

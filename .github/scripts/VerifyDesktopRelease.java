@@ -1,0 +1,206 @@
+import com.sun.jna.Library;
+import com.sun.jna.NativeLibrary;
+import com.sun.jna.Structure;
+import com.simon.harmonichackernews.network.HarmonicHttpClientKt;
+import com.google.ai.edge.litertlm.Backend;
+import com.google.ai.edge.litertlm.Engine;
+import com.google.ai.edge.litertlm.EngineConfig;
+import com.sun.net.httpserver.HttpServer;
+import io.ktor.client.engine.okhttp.OkHttp;
+import java.io.File;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
+import java.util.ServiceLoader;
+import java.util.jar.JarFile;
+import java.util.regex.Pattern;
+import kotlin.Unit;
+import kotlin.coroutines.EmptyCoroutineContext;
+import kotlinx.coroutines.BuildersKt;
+
+/** Run with the processed release JARs as the only classpath, using the JDK source launcher. */
+public class VerifyDesktopRelease {
+    private static final ClassLoader LOADER = VerifyDesktopRelease.class.getClassLoader();
+
+    public static void main(String[] args) throws Exception {
+        verifyApplicationBytecode();
+        verifyNetworking();
+        verifyLiteRtRuntime();
+        Properties metadata = new Properties();
+        try (InputStream input = resource("harmonic-desktop.properties")) {
+            metadata.load(input);
+        }
+        require(!metadata.getProperty("versionName", "").isBlank(), "Missing release version");
+        require(Integer.parseInt(metadata.getProperty("versionCode", "0")) > 0,
+                "Missing release version code");
+        try (InputStream ignored = resource("harmonic-app-icon.png")) {}
+        // LaTeX 1.6 moved matching math fonts into a separate optional resource artifact.
+        try (InputStream ignored = resource(
+                "composeResources/com.hrm.latex.fonts.katex.resources/font/katex_main_regular.ttf")) {}
+
+        verifyService("coil3.util.FetcherServiceLoaderTarget");
+        verifyService("coil3.util.DecoderServiceLoaderTarget");
+        verifyService("io.ktor.client.HttpClientEngineContainer");
+        verifyService("kotlinx.coroutines.internal.MainDispatcherFactory");
+
+        // Settings maps stored glass profile names through this dependency's Enum.valueOf.
+        verifyEnum(Class.forName("dev.chrisbanes.haze.glass.SurfaceProfile"));
+
+        // Exercise the tokenizer's real field access covered by the narrow warning exception.
+        Class<?> tokenizerType = Class.forName("com.hrm.latex.parser.tokenizer.LatexTokenizer");
+        Object tokenizer = tokenizerType.getConstructor(String.class, int.class)
+                .newInstance("x^2 + \\frac{1}{2} + \\text{hello world}", 0);
+        require(!((java.util.List<?>) tokenizerType.getMethod("tokenize").invoke(tokenizer)).isEmpty(),
+                "Inline math tokenization failed");
+
+        // Structure fields and their FieldOrder annotation are read reflectively by JNA,
+        // including on hosts where the Windows credential API itself cannot be loaded.
+        Structure credential = (Structure) Class.forName(
+                "com.simon.harmonichackernews.app.WindowsCredential")
+                .getConstructor().newInstance();
+        require(credential.size() > 0, "Invalid native credential layout");
+
+        String os = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT);
+        if (os.contains("mac")) {
+            verifyNativeLibrary("harmonic-mac-webview",
+                    "com.simon.harmonichackernews.desktop.MacWebViewApi");
+        } else if (os.contains("win")) {
+            // Initialize SWT's JNI layer without opening a browser or a window.
+            Class.forName("org.eclipse.swt.internal.win32.OS");
+        }
+        System.out.println("Release bytecode, networking, enums, metadata, service providers, JNA structures, and native bindings passed");
+    }
+
+    private static void verifyLiteRtRuntime() throws Exception {
+        String os = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT);
+        String arch = System.getProperty("os.arch").toLowerCase(java.util.Locale.ROOT);
+        if (os.startsWith("windows") && (arch.equals("aarch64") || arch.equals("arm64"))) {
+            // Upstream ships Windows x64 only. The app hides these models on ARM64;
+            // no downloadable local-model runtime is available on this host.
+            System.out.println("LiteRT-LM is unavailable on Windows ARM64; skipping local AI verification");
+            return;
+        }
+        Path cache = Files.createTempDirectory("harmonic-release-litert");
+        try {
+            Engine engine = new Engine(new EngineConfig(
+                    cache.resolve("missing.litertlm").toString(), new Backend.CPU()));
+            boolean rejected = false;
+            try {
+                engine.initialize();
+            } catch (Exception expected) {
+                rejected = true;
+            }
+            require(rejected && !engine.isInitialized(),
+                    "LiteRT must report a missing model through its working JNI bridge");
+            System.out.println("Verified packaged LiteRT-LM JNI initialization and model errors");
+        } finally {
+            try (var files = Files.walk(cache)) {
+                for (Path path : files.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                    Files.delete(path);
+                }
+            }
+        }
+    }
+
+    private static void verifyNetworking() throws Exception {
+        // Exercise the packaged Ktor/OkHttp/Okio stack, not a JDK URL connection.
+        // A local fixture makes this independent of external services and credentials.
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        byte[] expected = "[42,123]".getBytes(StandardCharsets.UTF_8);
+        server.createContext("/stories", exchange -> {
+            try (exchange) {
+                exchange.sendResponseHeaders(200, expected.length);
+                exchange.getResponseBody().write(expected);
+            }
+        });
+        var engine = OkHttp.INSTANCE.create(config -> Unit.INSTANCE);
+        var client = HarmonicHttpClientKt.createHarmonicHttpClient(
+                engine, "Harmonic-release-verification", config -> Unit.INSTANCE);
+        try {
+            server.start();
+            String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/stories";
+            String actual = BuildersKt.runBlocking(EmptyCoroutineContext.INSTANCE,
+                    (scope, continuation) -> HarmonicHttpClientKt.getTextOrThrow(client, url, continuation));
+            require(actual.equals(new String(expected, StandardCharsets.UTF_8)), "Release HTTP response mismatch");
+            System.out.println("Verified packaged Ktor/OkHttp networking against a local HTTP fixture");
+        } finally {
+            client.close();
+            server.stop(0);
+        }
+    }
+
+    private static void verifyApplicationBytecode() throws Exception {
+        int count = 0;
+        for (String entry : System.getProperty("java.class.path").split(Pattern.quote(File.pathSeparator))) {
+            if (!entry.endsWith(".jar")) continue;
+            try (JarFile jar = new JarFile(entry)) {
+                for (var entries = jar.entries(); entries.hasMoreElements();) {
+                    String name = entries.nextElement().getName();
+                    if (!name.startsWith("com/simon/harmonichackernews/") || !name.endsWith(".class")) continue;
+                    Class<?> type = Class.forName(name.substring(0, name.length() - 6).replace('/', '.'), false, LOADER);
+                    // Loading alone is lazy; resolving members forces JVM bytecode verification.
+                    // Do not initialize platform-specific classes on the wrong operating system.
+                    type.getDeclaredMethods();
+                    type.getDeclaredConstructors();
+                    if (type.isEnum()) verifyEnum(type);
+                    count++;
+                }
+            }
+        }
+        require(count > 0, "No processed application classes found");
+        System.out.println("Verified " + count + " processed application classes");
+    }
+
+    private static void verifyEnum(Class<?> type) throws Exception {
+        Object[] constants = type.getEnumConstants();
+        require(constants != null, "Missing enum values() for " + type.getName());
+        var valueOf = type.getMethod("valueOf", String.class);
+        valueOf.setAccessible(true);
+        for (Object constant : constants) {
+            String name = ((Enum<?>) constant).name();
+            require(valueOf.invoke(null, name) == constant,
+                    "Broken enum lookup for " + type.getName() + "." + name);
+        }
+    }
+
+    private static void verifyService(String serviceName) throws Exception {
+        Class<?> service = Class.forName(serviceName);
+        int count = 0;
+        for (Object provider : ServiceLoader.load(service, LOADER)) {
+            require(service.isInstance(provider), "Invalid provider for " + serviceName);
+            count++;
+        }
+        require(count > 0, "No release providers for " + serviceName);
+    }
+
+    private static void verifyNativeLibrary(String name, String interfaceName)
+            throws Exception {
+        Path directory = Files.createTempDirectory("harmonic-release-native-");
+        Path path = directory.resolve(System.mapLibraryName(name));
+        try (InputStream input = resource("native/" + path.getFileName())) {
+            Files.copy(input, path);
+        }
+        try (NativeLibrary library = NativeLibrary.getInstance(path.toString())) {
+            Class<? extends Library> api = Class.forName(interfaceName).asSubclass(Library.class);
+            for (var method : api.getDeclaredMethods()) {
+                library.getFunction(method.getName());
+            }
+        } finally {
+            Files.deleteIfExists(path);
+            Files.deleteIfExists(directory);
+        }
+    }
+
+    private static InputStream resource(String name) {
+        InputStream input = LOADER.getResourceAsStream(name);
+        require(input != null, "Missing release resource: " + name);
+        return input;
+    }
+
+    private static void require(boolean value, String message) {
+        if (!value) throw new IllegalStateException(message);
+    }
+}

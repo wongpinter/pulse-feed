@@ -1,0 +1,991 @@
+(function() {
+    if (window.HarmonicReaderMode && window.HarmonicReaderMode.version === 13) {
+        return;
+    }
+
+    var STATE_KEY = "__harmonicReaderModeState";
+    var THEME_KEY = "__harmonicReaderModeTheme";
+    var TRANSITION_KEY = "__harmonicReaderModeTransition";
+    var MIN_ARTICLE_TEXT_LENGTH = 250;
+    // Availability is often checked immediately before enabling. Retain only a small extraction
+    // briefly, never a clone of the whole source document, and invalidate on any source mutation.
+    var MAX_CACHED_ARTICLE_CHARS = 256 * 1024;
+    var ARTICLE_CACHE_TTL_MS = 30000;
+    var articleCache = null;
+    var articleCacheObserver = null;
+    var articleCacheTimer = null;
+    var TRANSITION_DURATION_MS = 180;
+    var TRANSITION_FALLBACK_MS = TRANSITION_DURATION_MS + 320;
+    var TRANSITION_TRANSLATE_Y = "12px";
+    var transitionScrollbarStyle = null;
+    var DEFAULT_LIGHT_READER_THEME = {
+        isLight: true,
+        backgroundColor: "#fafafa",
+        textColor: "#202124",
+        headingColor: "#202124",
+        secondaryTextColor: "#5f6368",
+        linkColor: "#1a73e8",
+        dividerColor: "#dadce0",
+        codeBackgroundColor: "#f0f2f4"
+    };
+    var DEFAULT_DARK_READER_THEME = {
+        isLight: false,
+        backgroundColor: "#151617",
+        textColor: "#e8eaed",
+        headingColor: "#e8eaed",
+        secondaryTextColor: "#aeb4ba",
+        linkColor: "#8ab4f8",
+        dividerColor: "#3d4248",
+        codeBackgroundColor: "#222528"
+    };
+    var POSITIVE_CLASS_RE = /article|body|content|entry|hentry|main|page|post|read|story|text/i;
+    var NEGATIVE_CLASS_RE = /ad-|ads|advert|banner|breadcrumb|comment|combx|contact|cookie|footer|masthead|menu|meta|modal|nav|outbrain|promo|related|scroll|share|shoutbox|sidebar|sponsor|subscribe|tag|tool|widget/i;
+    var REMOVE_SELECTOR = [
+        "script",
+        "style",
+        "noscript",
+        "template",
+        "svg",
+        "canvas",
+        "iframe",
+        "nav",
+        "header",
+        "footer",
+        "aside",
+        "form",
+        "button",
+        "input",
+        "select",
+        "textarea",
+        "dialog",
+        "[aria-hidden='true']",
+        "[hidden]"
+    ].join(",");
+
+    function getText(element) {
+        if (!element) {
+            return "";
+        }
+        return (element.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    // textContent joins adjacent blocks and <br> without a separator. Preserve those boundaries
+    // on extraction clones, without splitting words styled with inline elements (e.g. Mc<b>Donald</b>).
+    function separateBlockText(root) {
+        var blocks = root.querySelectorAll("br,p,div,section,article,header,footer,address,li,dt,dd,h1,h2,h3,h4,h5,h6,tr,td,th");
+        for (var i = 0; i < blocks.length; i++) {
+            var block = blocks[i];
+            block.parentNode.insertBefore(document.createTextNode(" "), block);
+            block.parentNode.insertBefore(document.createTextNode(" "), block.nextSibling);
+        }
+    }
+
+    function getAttributeSignature(element) {
+        if (!element) {
+            return "";
+        }
+        return ((element.getAttribute("class") || "") + " " + (element.getAttribute("id") || "")).trim();
+    }
+
+    function linkDensity(element) {
+        var textLength = getText(element).length;
+        if (textLength === 0) {
+            return 0;
+        }
+
+        var linkTextLength = 0;
+        var links = element.getElementsByTagName("a");
+        for (var i = 0; i < links.length; i++) {
+            linkTextLength += getText(links[i]).length;
+        }
+        return linkTextLength / textLength;
+    }
+
+    function scoreElement(element) {
+        var text = getText(element);
+        if (text.length < MIN_ARTICLE_TEXT_LENGTH) {
+            return 0;
+        }
+
+        var score = Math.min(90, text.length / 75);
+        var paragraphs = element.getElementsByTagName("p").length;
+        var punctuation = text.match(/[.!?]/g);
+        var tagName = element.tagName ? element.tagName.toLowerCase() : "";
+        var signature = getAttributeSignature(element);
+
+        score += Math.min(70, paragraphs * 5);
+        score += Math.min(60, punctuation ? punctuation.length * 1.5 : 0);
+        score -= linkDensity(element) * 90;
+
+        if (tagName === "article") {
+            score += 35;
+        } else if (tagName === "main") {
+            score += 25;
+        }
+
+        if (POSITIVE_CLASS_RE.test(signature)) {
+            score += 25;
+        }
+        if (NEGATIVE_CLASS_RE.test(signature)) {
+            score -= 35;
+        }
+
+        return score;
+    }
+
+    function findArticle() {
+        if (!document.body || getText(document.body).length < MIN_ARTICLE_TEXT_LENGTH) {
+            return null;
+        }
+
+        var preferred = document.querySelector("article, main, [role='main']");
+        if (preferred && getText(preferred).length >= MIN_ARTICLE_TEXT_LENGTH && linkDensity(preferred) < 0.45) {
+            return preferred;
+        }
+
+        var selectors = "article, main, section, div, td, [role='main']";
+        var candidates = [document.body];
+        var nodes = document.body.querySelectorAll(selectors);
+        for (var i = 0; i < nodes.length; i++) {
+            candidates.push(nodes[i]);
+        }
+
+        var best = null;
+        var bestScore = 0;
+        for (var j = 0; j < candidates.length; j++) {
+            var candidate = candidates[j];
+            var score = scoreElement(candidate);
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+
+        return bestScore >= 20 ? best : null;
+    }
+
+    function parseReadabilityDocument() {
+        if (typeof Readability !== "function" || !document.body) {
+            return null;
+        }
+
+        try {
+            var documentClone = document.cloneNode(true);
+            var bylines = documentClone.querySelectorAll(
+                "[rel~='author'],[itemprop~='author'],[class*='byline' i],[id*='byline' i],[class*='author' i],[id*='author' i]"
+            );
+            for (var bylineIndex = 0; bylineIndex < bylines.length; bylineIndex++) {
+                separateBlockText(bylines[bylineIndex]);
+            }
+            // Readability absolutizes URLs using <base>; keep article-local anchors local first.
+            var fragmentLinks = documentClone.querySelectorAll("a[href^='#']");
+            for (var i = 0; i < fragmentLinks.length; i++) {
+                fragmentLinks[i].setAttribute("href", new URL(fragmentLinks[i].getAttribute("href"), location.href).href);
+            }
+            var parsed = new Readability(documentClone, {
+                charThreshold: MIN_ARTICLE_TEXT_LENGTH,
+                keepClasses: false
+            }).parse();
+            if (!parsed || !parsed.content || !parsed.textContent || parsed.textContent.length < MIN_ARTICLE_TEXT_LENGTH) {
+                return null;
+            }
+            return parsed;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function parseWithReadability() {
+        var parsed = parseReadabilityDocument();
+        if (!parsed) {
+            return null;
+        }
+
+        try {
+            var container = document.createElement("div");
+            container.innerHTML = parsed.content;
+            cleanArticle(container);
+            if (getText(container).length < MIN_ARTICLE_TEXT_LENGTH) {
+                return null;
+            }
+
+            return {
+                root: container,
+                title: parsed.title || "",
+                byline: (parsed.byline || "").replace(/\s+/g, " ").trim(),
+                siteName: parsed.siteName || "",
+                publishedTime: parsed.publishedTime || ""
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function extractArticle() {
+        var parsedArticle = parseWithReadability();
+        if (parsedArticle) {
+            removeDuplicateTitle(parsedArticle.root, parsedArticle.title);
+            return parsedArticle;
+        }
+
+        var article = findArticle();
+        if (!article) {
+            return null;
+        }
+
+        var clone = article.cloneNode(true);
+        cleanArticle(clone);
+
+        var title = findTitle(article);
+        removeDuplicateTitle(clone, title);
+
+        if (getText(clone).length < MIN_ARTICLE_TEXT_LENGTH) {
+            return null;
+        }
+
+        return {
+            root: clone,
+            title: title,
+            byline: findByline(article),
+            siteName: "",
+            publishedTime: ""
+        };
+    }
+
+    function clearArticleCache() {
+        articleCache = null;
+        if (articleCacheObserver) articleCacheObserver.disconnect();
+        articleCacheObserver = null;
+        if (articleCacheTimer !== null) clearTimeout(articleCacheTimer);
+        articleCacheTimer = null;
+    }
+
+    function preparedArticle(consume) {
+        // takeRecords covers mutations made earlier in this same JavaScript task, before the
+        // observer callback has had a chance to run. URL changes can happen without DOM changes.
+        if (articleCache && (Date.now() >= articleCache.expiresAt ||
+                articleCache.url !== location.href || articleCache.baseURI !== document.baseURI ||
+                articleCache.hasReadability !== (typeof Readability === "function") ||
+                articleCacheObserver.takeRecords().length > 0)) {
+            clearArticleCache();
+        }
+        if (articleCache) {
+            var retained = articleCache.article;
+            if (consume) clearArticleCache();
+            return retained;
+        }
+        var extracted = extractArticle();
+        if (!consume && typeof MutationObserver === "function" &&
+                (!extracted || extracted.root.outerHTML.length <= MAX_CACHED_ARTICLE_CHARS)) {
+            articleCache = {
+                article: extracted,
+                url: location.href,
+                baseURI: document.baseURI,
+                hasReadability: typeof Readability === "function",
+                expiresAt: Date.now() + ARTICLE_CACHE_TTL_MS
+            };
+            articleCacheObserver = new MutationObserver(clearArticleCache);
+            articleCacheObserver.observe(document, {
+                subtree: true, childList: true, characterData: true, attributes: true
+            });
+            articleCacheTimer = setTimeout(clearArticleCache, ARTICLE_CACHE_TTL_MS);
+        }
+        return extracted;
+    }
+
+    function absolutizeUrl(value) {
+        if (!value) {
+            return value;
+        }
+        try {
+            return new URL(value, document.baseURI).href;
+        } catch (e) {
+            return value;
+        }
+    }
+
+    function absolutizeSrcset(value) {
+        if (!value) {
+            return value;
+        }
+        return String(value).split(",").map(function(part) {
+            var trimmed = part.trim();
+            var match = /^(\S+)(.*)$/.exec(trimmed);
+            if (!match) {
+                return trimmed;
+            }
+            return absolutizeUrl(match[1]) + match[2];
+        }).join(", ");
+    }
+
+    function cleanAttributes(element) {
+        var allowed = {
+            "a": ["href", "title", "name"],
+            "img": ["src", "srcset", "sizes", "alt", "title", "width", "height"],
+            "picture": [],
+            "video": ["src", "poster", "controls"],
+            "source": ["src", "srcset", "sizes", "media", "type"],
+            "td": ["colspan", "rowspan"],
+            "th": ["colspan", "rowspan"],
+            "ol": ["start"],
+            "code": ["class"],
+            "pre": ["class"]
+        };
+        var tagName = element.tagName ? element.tagName.toLowerCase() : "";
+        var keep = (allowed[tagName] || []).concat(["id", "lang", "dir"]);
+        for (var i = element.attributes.length - 1; i >= 0; i--) {
+            var name = element.attributes[i].name;
+            if (keep.indexOf(name) === -1) {
+                element.removeAttribute(name);
+            }
+        }
+    }
+
+    function pruneByClassName(root) {
+        var nodes = root.querySelectorAll("*");
+        for (var i = nodes.length - 1; i >= 0; i--) {
+            var node = nodes[i];
+            var signature = getAttributeSignature(node);
+            if (NEGATIVE_CLASS_RE.test(signature) && getText(node).length < 600) {
+                node.parentNode.removeChild(node);
+            }
+        }
+    }
+
+    function cleanArticle(root) {
+        var removals = root.querySelectorAll(REMOVE_SELECTOR);
+        for (var i = removals.length - 1; i >= 0; i--) {
+            removals[i].parentNode.removeChild(removals[i]);
+        }
+
+        pruneByClassName(root);
+
+        var nodes = root.querySelectorAll("*");
+        for (var j = 0; j < nodes.length; j++) {
+            var node = nodes[j];
+            var tagName = node.tagName ? node.tagName.toLowerCase() : "";
+
+            if (tagName === "img") {
+                var src = node.getAttribute("src") || node.getAttribute("data-src") || node.getAttribute("data-lazy-src");
+                var srcset = node.getAttribute("srcset") || node.getAttribute("data-srcset");
+                if (src) {
+                    node.setAttribute("src", absolutizeUrl(src));
+                }
+                if (srcset) {
+                    node.setAttribute("srcset", absolutizeSrcset(srcset));
+                }
+            } else if (tagName === "a") {
+                var href = node.getAttribute("href");
+                if (href) {
+                    // Fragment links refer to this article even when the source uses a <base> URL.
+                    node.setAttribute("href", href.charAt(0) === "#" ? new URL(href, location.href).href : absolutizeUrl(href));
+                }
+            } else if (tagName === "video") {
+                var videoSrc = node.getAttribute("src");
+                var poster = node.getAttribute("poster");
+                if (videoSrc) {
+                    node.setAttribute("src", absolutizeUrl(videoSrc));
+                }
+                if (poster) {
+                    node.setAttribute("poster", absolutizeUrl(poster));
+                }
+                node.setAttribute("controls", "controls");
+            } else if (tagName === "source") {
+                var sourceSrc = node.getAttribute("src");
+                var sourceSrcset = node.getAttribute("srcset") || node.getAttribute("data-srcset");
+                if (sourceSrc) {
+                    node.setAttribute("src", absolutizeUrl(sourceSrc));
+                }
+                if (sourceSrcset) {
+                    node.setAttribute("srcset", absolutizeSrcset(sourceSrcset));
+                }
+            }
+
+            cleanAttributes(node);
+        }
+
+        removeEmptyElements(root);
+    }
+
+    function removeEmptyElements(root) {
+        var keepEmpty = {
+            "br": true,
+            "hr": true,
+            "img": true,
+            "video": true,
+            "source": true,
+            "iframe": true
+        };
+        var nodes = root.querySelectorAll("*");
+        for (var i = nodes.length - 1; i >= 0; i--) {
+            var node = nodes[i];
+            var tagName = node.tagName ? node.tagName.toLowerCase() : "";
+            if (!keepEmpty[tagName] && !node.id && !node.getAttribute("name") &&
+                    getText(node).length === 0 && !node.querySelector("img, video, source, iframe")) {
+                node.parentNode.removeChild(node);
+            }
+        }
+    }
+
+    function escapeHtml(value) {
+        return String(value || "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+    }
+
+    function normalizeTitle(value) {
+        return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    }
+
+    function getMetaContent(selector) {
+        var meta = document.querySelector(selector);
+        return meta ? (meta.getAttribute("content") || "").trim() : "";
+    }
+
+    function findTitle(article) {
+        var localTitle = article.querySelector("h1");
+        var title = localTitle ? getText(localTitle) : "";
+        if (!title) {
+            title = getMetaContent("meta[property='og:title']");
+        }
+        if (!title) {
+            title = getMetaContent("meta[name='twitter:title']");
+        }
+        if (!title) {
+            title = document.title || "";
+        }
+        return title.replace(/\s+[|-]\s+[^|-]+$/, "").trim();
+    }
+
+    function removeDuplicateTitle(root, title) {
+        var titleText = normalizeTitle(title);
+        if (!titleText) {
+            return;
+        }
+        var headings = root.querySelectorAll("h1, h2");
+        for (var i = 0; i < headings.length; i++) {
+            if (normalizeTitle(getText(headings[i])) === titleText) {
+                if (headings[i].id) {
+                    var target = document.createElement("span");
+                    target.id = headings[i].id;
+                    headings[i].parentNode.insertBefore(target, headings[i]);
+                }
+                headings[i].parentNode.removeChild(headings[i]);
+                return;
+            }
+        }
+    }
+
+    function findByline(article) {
+        var selectors = [
+            "[rel='author']",
+            "[itemprop='author']",
+            ".byline",
+            ".author",
+            "[class*='byline']",
+            "[class*='author']"
+        ];
+        for (var i = 0; i < selectors.length; i++) {
+            var node = article.querySelector(selectors[i]);
+            var clone = node && node.cloneNode(true);
+            if (clone) separateBlockText(clone);
+            var text = getText(clone);
+            if (text && text.length <= 160) {
+                return text;
+            }
+        }
+        return getMetaContent("meta[name='author']");
+    }
+
+    function getAttributes(element) {
+        var attrs = {};
+        if (!element) {
+            return attrs;
+        }
+        for (var i = 0; i < element.attributes.length; i++) {
+            attrs[element.attributes[i].name] = element.attributes[i].value;
+        }
+        return attrs;
+    }
+
+    function restoreAttributes(element, attrs) {
+        if (!element) {
+            return;
+        }
+        for (var i = element.attributes.length - 1; i >= 0; i--) {
+            element.removeAttribute(element.attributes[i].name);
+        }
+        for (var name in attrs) {
+            if (Object.prototype.hasOwnProperty.call(attrs, name)) {
+                element.setAttribute(name, attrs[name]);
+            }
+        }
+    }
+
+    function sanitizeColor(value, fallback) {
+        return /^#[0-9a-f]{6}$/i.test(String(value || "")) ? value : fallback;
+    }
+
+    function sanitizeCssText(value, fallback) {
+        value = String(value || "");
+        return /[<>]/.test(value) ? fallback : value;
+    }
+
+    function sanitizeFontSize(value, fallback) {
+        var parsed = parseInt(value, 10);
+        if (!isFinite(parsed)) {
+            return fallback;
+        }
+        return Math.max(13, Math.min(24, parsed));
+    }
+
+    function getReaderTheme() {
+        var configured = window[THEME_KEY] || {};
+        var fallback = configured.isLight === false ? DEFAULT_DARK_READER_THEME : DEFAULT_LIGHT_READER_THEME;
+        return {
+            isLight: configured.isLight !== false,
+            backgroundColor: sanitizeColor(configured.backgroundColor, fallback.backgroundColor),
+            textColor: sanitizeColor(configured.textColor, fallback.textColor),
+            headingColor: sanitizeColor(configured.headingColor, fallback.headingColor),
+            secondaryTextColor: sanitizeColor(configured.secondaryTextColor, fallback.secondaryTextColor),
+            linkColor: sanitizeColor(configured.linkColor, fallback.linkColor),
+            dividerColor: sanitizeColor(configured.dividerColor, fallback.dividerColor),
+            codeBackgroundColor: sanitizeColor(configured.codeBackgroundColor, fallback.codeBackgroundColor),
+            fontFaceCss: sanitizeCssText(configured.fontFaceCss, ""),
+            fontFamily: sanitizeCssText(configured.fontFamily, "Georgia,'Times New Roman',serif"),
+            headingFontFamily: sanitizeCssText(configured.headingFontFamily, "Georgia,'Times New Roman',serif"),
+            fontSizePx: sanitizeFontSize(configured.fontSizePx, 17),
+            lineHeight: [1.4, 1.68, 2].indexOf(configured.lineHeight) >= 0 ? configured.lineHeight : 1.68
+        };
+    }
+
+    var installedFontToken = null;
+
+    function setTheme(theme, fontToken) {
+        window[THEME_KEY] = theme || {};
+        installedFontToken = fontToken || null;
+        if (window[STATE_KEY] && window[STATE_KEY].enabled) {
+            var oldStyle = document.getElementById("harmonic-reader-style");
+            if (oldStyle) {
+                var styles = document.createElement("div");
+                styles.innerHTML = readerStyles();
+                oldStyle.replaceWith(styles.firstElementChild);
+                correctReaderContrast(document.getElementById("harmonic-reader-mode"));
+            }
+        }
+        return "theme_set";
+    }
+
+    // A compact native update omits only the already-installed font bytes. Normal setTheme
+    // remains a complete replacement, including when switching back to the device font.
+    function updateTheme(theme, fontToken) {
+        if (!fontToken || fontToken !== installedFontToken || !window[THEME_KEY]) return false;
+        theme.fontFaceCss = window[THEME_KEY].fontFaceCss;
+        setTheme(theme, fontToken);
+        return true;
+    }
+
+    function readerStyles() {
+        var theme = getReaderTheme();
+        var bodyFontSize = theme.fontSizePx;
+        var titleFontSize = Math.round(bodyFontSize * 1.78);
+        var bylineFontSize = Math.max(13, bodyFontSize - 3);
+        var captionFontSize = Math.max(12, bodyFontSize - 4);
+        var codeFontSize = Math.max(12, bodyFontSize - 4);
+        return [
+            "<style id=\"harmonic-reader-style\">",
+            theme.fontFaceCss,
+            "html[data-harmonic-reader='true']{width:100%!important;min-width:0!important;overflow-x:hidden!important;}",
+            "body[data-harmonic-reader='true']{display:block!important;width:100%!important;min-width:0!important;max-width:100%!important;overflow-x:hidden!important;margin:0!important;background:" + theme.backgroundColor + "!important;color:" + theme.textColor + "!important;font-family:" + theme.fontFamily + "!important;line-height:" + theme.lineHeight + "!important;font-size:" + bodyFontSize + "px!important;-webkit-text-size-adjust:100%!important;visibility:visible!important;opacity:1!important;}",
+            "#harmonic-reader-mode{display:block!important;box-sizing:border-box!important;width:100%!important;min-width:0!important;max-width:760px!important;margin:0 auto!important;padding:32px 20px 96px!important;background:" + theme.backgroundColor + "!important;color:" + theme.textColor + "!important;visibility:visible!important;opacity:1!important;}",
+            "#harmonic-reader-mode *{box-sizing:border-box!important;min-width:0!important;max-width:100%!important;}",
+            "#harmonic-reader-kicker{font:600 13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;letter-spacing:.04em!important;text-transform:uppercase!important;color:" + theme.linkColor + "!important;margin-bottom:14px!important;}",
+            "#harmonic-reader-mode h1{overflow-wrap:anywhere!important;font:700 " + titleFontSize + "px/1.15 " + theme.headingFontFamily + "!important;margin:0 0 12px!important;color:" + theme.headingColor + "!important;}",
+            "#harmonic-reader-byline{font:500 " + bylineFontSize + "px/1.5 " + theme.fontFamily + "!important;color:" + theme.secondaryTextColor + "!important;margin:0 0 28px!important;}",
+            "#harmonic-reader-article,#harmonic-reader-article section,#harmonic-reader-article div,#harmonic-reader-article figure{overflow-wrap:anywhere!important;background:transparent!important;color:" + theme.textColor + "!important;visibility:visible!important;opacity:1!important;}",
+            "#harmonic-reader-article *{background:transparent!important;visibility:visible!important;opacity:1!important;}",
+            "#harmonic-reader-article p,#harmonic-reader-article li{font-size:" + bodyFontSize + "px!important;line-height:" + theme.lineHeight + "!important;color:" + theme.textColor + "!important;}",
+            "#harmonic-reader-article span,#harmonic-reader-article strong,#harmonic-reader-article em,#harmonic-reader-article small{color:inherit!important;}",
+            "#harmonic-reader-article p{margin:0 0 1.05em!important;}",
+            "#harmonic-reader-article ul,#harmonic-reader-article ol{display:block!important;margin:0 0 1.05em!important;padding-left:1.4em!important;list-style-position:outside!important;color:" + theme.textColor + "!important;}",
+            "#harmonic-reader-article ul{list-style-type:disc!important;}",
+            "#harmonic-reader-article ol{list-style-type:decimal!important;}",
+            "#harmonic-reader-article li{display:list-item!important;margin:.35em 0!important;padding-left:.15em!important;}",
+            "#harmonic-reader-article li::marker{color:" + theme.textColor + "!important;}",
+            "#harmonic-reader-article li p{margin:.35em 0!important;}",
+            "#harmonic-reader-article li>ul,#harmonic-reader-article li>ol{margin:.45em 0 .45em!important;padding-left:1.25em!important;}",
+            "#harmonic-reader-article li>ul{list-style-type:circle!important;}",
+            "#harmonic-reader-article li>ol{list-style-type:lower-alpha!important;}",
+            "#harmonic-reader-article h2,#harmonic-reader-article h3,#harmonic-reader-article h4,#harmonic-reader-article h5,#harmonic-reader-article h6{font-family:" + theme.headingFontFamily + "!important;line-height:1.25!important;margin:1.65em 0 .6em!important;background:transparent!important;color:" + theme.headingColor + "!important;}",
+            "#harmonic-reader-article a{color:" + theme.linkColor + "!important;text-decoration:underline!important;text-decoration-thickness:1px!important;text-underline-offset:3px!important;}",
+            "#harmonic-reader-article img,#harmonic-reader-article video{display:block;height:auto!important;margin:1.2em auto!important;border-radius:4px!important;}",
+            "#harmonic-reader-article figure{margin:1.4em 0!important;}",
+            "#harmonic-reader-article figcaption{font:" + captionFontSize + "px/1.45 " + theme.fontFamily + "!important;color:" + theme.secondaryTextColor + "!important;margin-top:.5em!important;}",
+            "#harmonic-reader-article blockquote{border-left:3px solid " + theme.linkColor + "!important;margin:1.3em 0!important;padding:.1em 0 .1em 1em!important;color:" + theme.textColor + "!important;}",
+            "#harmonic-reader-article pre{white-space:pre!important;overflow-wrap:normal!important;overflow-x:auto!important;background:" + theme.codeBackgroundColor + "!important;color:" + theme.textColor + "!important;border-radius:4px!important;padding:14px!important;font-size:" + codeFontSize + "px!important;line-height:1.5!important;}",
+            "#harmonic-reader-article code,#harmonic-reader-article pre *{font-family:ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',monospace!important;font-size:.9em!important;background:transparent!important;color:" + theme.textColor + "!important;}",
+            "#harmonic-reader-article table{overflow-wrap:normal!important;border-collapse:collapse!important;display:block!important;overflow-x:auto!important;margin:1.2em 0!important;background:transparent!important;color:" + theme.textColor + "!important;}",
+            "#harmonic-reader-article thead,#harmonic-reader-article tbody,#harmonic-reader-article tfoot,#harmonic-reader-article tr{background:transparent!important;color:" + theme.textColor + "!important;}",
+            "#harmonic-reader-article th,#harmonic-reader-article td{border:1px solid " + theme.dividerColor + "!important;padding:8px!important;background:transparent!important;color:" + theme.textColor + "!important;}",
+            "</style>"
+        ].join("");
+    }
+
+    function colorLuminance(color) {
+        var linear = color.slice(0, 3).map(function(channel) {
+            channel /= 255;
+            return channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+        });
+        return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+    }
+
+    function colorContrast(first, second) {
+        var a = colorLuminance(first);
+        var b = colorLuminance(second);
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    }
+
+    function compositeColor(foreground, background) {
+        return foreground.slice(0, 3).map(function(channel, index) {
+            return channel * foreground[3] + background[index] * (1 - foreground[3]);
+        });
+    }
+
+    function readableColor(color, background, normalText) {
+        var minimumContrast = 4.5;
+        if (colorContrast(color, background) >= minimumContrast) return null;
+        var target = normalText;
+        // A custom theme's normal text can itself be too faint on a code block's background.
+        if (colorContrast(target, background) < minimumContrast) {
+            target = colorContrast([0, 0, 0], background) > colorContrast([255, 255, 255], background)
+                ? [0, 0, 0] : [255, 255, 255];
+        }
+        var low = 0;
+        var high = 1;
+        var result = target;
+        for (var i = 0; i < 16; i++) {
+            var amount = (low + high) / 2;
+            var candidate = color.map(function(channel, index) {
+                return Math.round(channel + (target[index] - channel) * amount);
+            });
+            if (colorContrast(candidate, background) >= minimumContrast) {
+                high = amount;
+                result = candidate;
+            } else {
+                low = amount;
+            }
+        }
+        return "rgb(" + result.join(",") + ")";
+    }
+
+    var contrastCorrections = [];
+
+    function correctReaderContrast(root) {
+        if (!root) return;
+        // Re-evaluate source colors after a theme change, rather than adjusting our previous
+        // correction. Restore only reader clones; the retained original document is untouched.
+        for (var previous of contrastCorrections) {
+            if (previous.color) previous.element.style.setProperty("color", previous.color, previous.priority);
+            else previous.element.style.removeProperty("color");
+        }
+        contrastCorrections = [];
+        var theme = getReaderTheme();
+        // Let the browser resolve CSS colors, including alpha and wide-gamut syntax, into sRGB.
+        var context = document.createElement("canvas").getContext("2d", {willReadFrequently: true});
+        if (!context) return;
+        var colors = Object.create(null);
+        function parseColor(cssColor) {
+            if (!colors[cssColor]) {
+                context.clearRect(0, 0, 1, 1);
+                context.fillStyle = cssColor;
+                context.fillRect(0, 0, 1, 1);
+                var pixel = context.getImageData(0, 0, 1, 1).data;
+                colors[cssColor] = [pixel[0], pixel[1], pixel[2], pixel[3] / 255];
+            }
+            return colors[cssColor];
+        }
+        var normalText = parseColor(theme.textColor).slice(0, 3);
+        var changes = [];
+        function visit(element, parentBackground) {
+            var style = window.getComputedStyle(element);
+            var background = compositeColor(parseColor(style.backgroundColor), parentBackground);
+            for (var child = element.firstChild; child; child = child.nextSibling) {
+                if (child.nodeType === 3 && /\S/.test(child.nodeValue)) {
+                    var foreground = compositeColor(parseColor(style.color), background);
+                    var corrected = readableColor(foreground, background, normalText);
+                    if (corrected) changes.push({element: element, color: corrected});
+                    break;
+                }
+            }
+            for (var i = 0; i < element.children.length; i++) visit(element.children[i], background);
+        }
+        visit(root, parseColor(theme.backgroundColor));
+        // Read all computed styles before writing, preserving inherited source colors and avoiding
+        // a style recalculation for every text node. Original page nodes are never modified.
+        for (var i = 0; i < changes.length; i++) {
+            contrastCorrections.push({
+                element: changes[i].element,
+                color: changes[i].element.style.getPropertyValue("color"),
+                priority: changes[i].element.style.getPropertyPriority("color")
+            });
+            changes[i].element.style.setProperty("color", changes[i].color, "important");
+        }
+    }
+
+    function nextTransitionId() {
+        window[TRANSITION_KEY] = (window[TRANSITION_KEY] || 0) + 1;
+        hideTransitionScrollbar(window[TRANSITION_KEY]);
+        return window[TRANSITION_KEY];
+    }
+
+    function restoreTransitionScrollbar(transitionId) {
+        if (isCurrentTransition(transitionId) && transitionScrollbarStyle) {
+            transitionScrollbarStyle.remove();
+            transitionScrollbarStyle = null;
+        }
+    }
+
+    function hideTransitionScrollbar(transitionId) {
+        if (transitionScrollbarStyle) transitionScrollbarStyle.remove();
+        var style = document.createElement("style");
+        style.id = "harmonic-reader-transition-scrollbar";
+        // A page's custom scrollbar can briefly become viewport-sized while its body is
+        // replaced. Suppress its paint, not scrolling or overflow. Retain a classic gutter's
+        // width so hiding it cannot rewrap the article or move the saved scroll position.
+        var gutter = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+        if (gutter > 0) {
+            style.textContent = "html,body{scrollbar-color:auto!important}" +
+                "html::-webkit-scrollbar,body::-webkit-scrollbar{width:" + gutter + "px!important}";
+        } else {
+            style.textContent = "html,body{scrollbar-color:transparent transparent!important}" +
+                "html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!important}";
+        }
+        var parts = ["", "-thumb", "-track", "-track-piece", "-button", "-corner"];
+        var selectors = [];
+        for (var i = 0; i < parts.length; i++) {
+            selectors.push("html::-webkit-scrollbar" + parts[i], "body::-webkit-scrollbar" + parts[i]);
+        }
+        style.textContent += selectors.join(",") +
+            "{background:transparent!important;border-color:transparent!important;box-shadow:none!important}";
+        (document.head || document.documentElement).appendChild(style);
+        transitionScrollbarStyle = style;
+        // Also release on an interrupted/failed transition or a throttled background page.
+        setTimeout(function() { restoreTransitionScrollbar(transitionId); }, 2 * TRANSITION_FALLBACK_MS + 100);
+    }
+
+    function isCurrentTransition(transitionId) {
+        return window[TRANSITION_KEY] === transitionId;
+    }
+
+    function captureTransitionStyles(element) {
+        return {
+            opacity: element.style.getPropertyValue("opacity"),
+            opacityPriority: element.style.getPropertyPriority("opacity"),
+            transform: element.style.getPropertyValue("transform"),
+            transformPriority: element.style.getPropertyPriority("transform"),
+            transition: element.style.getPropertyValue("transition"),
+            transitionPriority: element.style.getPropertyPriority("transition"),
+            willChange: element.style.getPropertyValue("will-change"),
+            willChangePriority: element.style.getPropertyPriority("will-change")
+        };
+    }
+
+    function restoreTransitionStyles(element, styles) {
+        element.style.setProperty("opacity", styles.opacity, styles.opacityPriority);
+        element.style.setProperty("transform", styles.transform, styles.transformPriority);
+        element.style.setProperty("transition", styles.transition, styles.transitionPriority);
+        element.style.setProperty("will-change", styles.willChange, styles.willChangePriority);
+    }
+
+    function setTransitionStyle(element, opacity, translateY) {
+        element.style.setProperty("opacity", opacity, "important");
+        element.style.setProperty("transform", "translateY(" + translateY + ")", "important");
+        element.style.setProperty("transition", "opacity " + TRANSITION_DURATION_MS + "ms ease, transform " + TRANSITION_DURATION_MS + "ms ease", "important");
+        element.style.setProperty("will-change", "opacity, transform", "important");
+    }
+
+    function animateOut(element, after) {
+        var transitionId = nextTransitionId();
+        var styles = captureTransitionStyles(element);
+        var completed = false;
+        function complete() {
+            if (completed) {
+                return;
+            }
+            completed = true;
+            if (!isCurrentTransition(transitionId)) {
+                restoreTransitionStyles(element, styles);
+                return;
+            }
+            after(transitionId);
+        }
+        setTransitionStyle(element, "1", "0");
+        requestAnimationFrame(function() {
+            requestAnimationFrame(function() {
+                if (!isCurrentTransition(transitionId)) {
+                    restoreTransitionStyles(element, styles);
+                    return;
+                }
+                setTransitionStyle(element, "0", TRANSITION_TRANSLATE_Y);
+                setTimeout(complete, TRANSITION_DURATION_MS);
+            });
+        });
+        setTimeout(complete, TRANSITION_FALLBACK_MS);
+        return transitionId;
+    }
+
+    function animateIn(element, transitionId, after) {
+        var styles = captureTransitionStyles(element);
+        var completed = false;
+        function complete() {
+            if (completed) {
+                return;
+            }
+            completed = true;
+            if (!isCurrentTransition(transitionId)) {
+                restoreTransitionStyles(element, styles);
+                return;
+            }
+            restoreTransitionStyles(element, styles);
+            restoreTransitionScrollbar(transitionId);
+            if (after) {
+                after();
+            }
+        }
+        setTransitionStyle(element, "0", TRANSITION_TRANSLATE_Y);
+        requestAnimationFrame(function() {
+            requestAnimationFrame(function() {
+                if (!isCurrentTransition(transitionId)) {
+                    restoreTransitionStyles(element, styles);
+                    return;
+                }
+                setTransitionStyle(element, "1", "0");
+                setTimeout(complete, TRANSITION_DURATION_MS);
+            });
+        });
+        setTimeout(complete, TRANSITION_FALLBACK_MS);
+    }
+
+    function enable() {
+        try {
+            if (window[STATE_KEY] && window[STATE_KEY].enabled) {
+                return "enabled";
+            }
+            if (!document.body) {
+                return "unavailable";
+            }
+
+            var extractedArticle = preparedArticle(true);
+            if (!extractedArticle) {
+                return "no_article";
+            }
+
+            var title = extractedArticle.title || findTitle(extractedArticle.root);
+            var site = (extractedArticle.siteName || location.hostname || "").replace(/^www\./, "");
+            var meta = extractedArticle.byline ? extractedArticle.byline : site;
+            var originalTitle = document.title;
+
+            window[STATE_KEY] = {
+                enabled: true,
+                bodyNodes: null,
+                bodyAttrs: getAttributes(document.body),
+                htmlAttrs: getAttributes(document.documentElement),
+                title: originalTitle,
+                scrollX: window.pageXOffset || 0,
+                scrollY: window.pageYOffset || 0
+            };
+
+            var html = [
+                readerStyles(),
+                "<main id=\"harmonic-reader-mode\">",
+                site ? "<div id=\"harmonic-reader-kicker\">" + escapeHtml(site) + "</div>" : "",
+                title ? "<h1>" + escapeHtml(title) + "</h1>" : "",
+                meta ? "<div id=\"harmonic-reader-byline\">" + escapeHtml(meta) + "</div>" : "",
+                "<article id=\"harmonic-reader-article\">",
+                extractedArticle.root.id ? "<span id=\"" + escapeHtml(extractedArticle.root.id) + "\"></span>" : "",
+                extractedArticle.root.innerHTML,
+                "</article>",
+                "</main>"
+            ].join("");
+
+            animateOut(document.body, function(transitionId) {
+                var state = window[STATE_KEY];
+                if (!state || !state.enabled || !isCurrentTransition(transitionId)) {
+                    return;
+                }
+                // Keep the live nodes (including listeners and form state) for restoration.
+                // Detach only when the transition commits so a cancelled open leaves them intact.
+                state.bodyNodes = document.createDocumentFragment();
+                while (document.body.firstChild) {
+                    state.bodyNodes.appendChild(document.body.firstChild);
+                }
+                document.body.innerHTML = html;
+                document.documentElement.setAttribute("data-harmonic-reader", "true");
+                restoreAttributes(document.body, {"data-harmonic-reader": "true"});
+                correctReaderContrast(document.getElementById("harmonic-reader-mode"));
+                document.title = title || originalTitle;
+                window.scrollTo(0, 0);
+                animateIn(document.getElementById("harmonic-reader-mode") || document.body, transitionId);
+            });
+            return "enabled";
+        } catch (e) {
+            return "error";
+        }
+    }
+
+    function disable() {
+        try {
+            var state = window[STATE_KEY];
+            if (!state || !state.enabled || !document.body) {
+                return "disabled";
+            }
+            var readerElement = document.getElementById("harmonic-reader-mode") || document.body;
+            animateOut(readerElement, function(transitionId) {
+                var currentState = window[STATE_KEY];
+                if (!currentState || !currentState.enabled || !isCurrentTransition(transitionId)) {
+                    return;
+                }
+                if (currentState.bodyNodes) {
+                    while (document.body.firstChild) {
+                        document.body.removeChild(document.body.firstChild);
+                    }
+                    document.body.appendChild(currentState.bodyNodes);
+                }
+                restoreAttributes(document.body, currentState.bodyAttrs || {});
+                restoreAttributes(document.documentElement, currentState.htmlAttrs || {});
+                document.title = currentState.title || document.title;
+                var scrollX = currentState.scrollX || 0;
+                var scrollY = currentState.scrollY || 0;
+                window[STATE_KEY] = null;
+                contrastCorrections = [];
+                setTimeout(function() {
+                    window.scrollTo(scrollX, scrollY);
+                }, 0);
+                animateIn(document.body, transitionId);
+            });
+            return "disabled";
+        } catch (e) {
+            return "error";
+        }
+    }
+
+    function isAvailable() {
+        try {
+            return document.body && preparedArticle(false) ? "available" : "unavailable";
+        } catch (e) {
+            return "unavailable";
+        }
+    }
+
+    window.HarmonicReaderMode = {
+        version: 13,
+        setTheme: setTheme,
+        updateTheme: updateTheme,
+        isAvailable: isAvailable,
+        enable: enable,
+        disable: disable
+    };
+})();

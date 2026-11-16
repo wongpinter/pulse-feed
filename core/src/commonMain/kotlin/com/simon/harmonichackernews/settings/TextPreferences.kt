@@ -1,0 +1,79 @@
+package com.simon.harmonichackernews.settings
+
+import kotlin.math.roundToInt
+
+enum class AppFont(val storedValue: String, val label: String) {
+    GOOGLE_SANS_FLEX_ROUNDED("googlesansflexrounded", "Google Sans Flex Rounded"),
+    GOOGLE_SANS("googlesans", "Google Sans"),
+    PRODUCT_SANS("productsans", "Product Sans"),
+    DEVICE_DEFAULT("devicedefault", "Device default"),
+    VERDANA("verdana", "Verdana"),
+    JETBRAINS_MONO("jetbrainsmono", "JetBrains Mono"),
+    GOOGLE_SANS_CODE("googlesanscode", "Google Sans Code"),
+    GEORGIA("georgia", "Georgia"),
+    ROBOTO_SLAB("robotoslab", "Roboto Slab");
+
+    companion object {
+        fun fromStored(value: String?): AppFont =
+            entries.firstOrNull { it.storedValue == value } ?: GOOGLE_SANS_FLEX_ROUNDED
+    }
+}
+
+enum class ReaderLineHeight(val storedValue: String, val label: String, val multiplier: Double) {
+    COMPACT("compact", "Compact", 1.4),
+    STANDARD("standard", "Standard", 1.68),
+    RELAXED("relaxed", "Relaxed", 2.0);
+
+    companion object {
+        fun fromStored(value: String?): ReaderLineHeight =
+            entries.firstOrNull { it.storedValue == value } ?: STANDARD
+    }
+}
+
+object TextPreferences {
+    const val DEFAULT_STORY_TEXT_SIZE = 17.5f
+    const val DEFAULT_COMMENT_TEXT_SIZE = 15f
+    const val MIN_STORY_TEXT_SIZE = 14.5f
+    const val MAX_STORY_TEXT_SIZE = 20.5f
+    const val MIN_COMMENT_TEXT_SIZE = 12f
+    const val MAX_COMMENT_TEXT_SIZE = 18f
+    const val MIN_TEXT_SIZE_OFFSET = -6
+    const val MAX_TEXT_SIZE_OFFSET = 6
+    const val TEXT_SIZE_OFFSET_STEP = 0.5f
+    const val DEFAULT_READER_MODE_FONT_SIZE = 17
+    const val MIN_READER_MODE_FONT_SIZE = 13
+    const val MAX_READER_MODE_FONT_SIZE = 24
+
+    fun sanitizeFont(font: String?): String = AppFont.fromStored(font).storedValue
+
+    fun clampStoryTextSize(value: Float): Float =
+        if (value.isNaN()) DEFAULT_STORY_TEXT_SIZE
+        else value.coerceIn(MIN_STORY_TEXT_SIZE, MAX_STORY_TEXT_SIZE)
+
+    fun clampCommentTextSize(value: Float): Float =
+        if (value.isNaN()) DEFAULT_COMMENT_TEXT_SIZE
+        else value.coerceIn(MIN_COMMENT_TEXT_SIZE, MAX_COMMENT_TEXT_SIZE)
+
+    fun storyTextSizeOffset(value: Float): Int =
+        ((clampStoryTextSize(value) - DEFAULT_STORY_TEXT_SIZE) / TEXT_SIZE_OFFSET_STEP)
+            .roundToInt()
+            .coerceIn(MIN_TEXT_SIZE_OFFSET, MAX_TEXT_SIZE_OFFSET)
+
+    fun storyTextSizeForOffset(offset: Int): Float = clampStoryTextSize(
+        DEFAULT_STORY_TEXT_SIZE +
+            offset.coerceIn(MIN_TEXT_SIZE_OFFSET, MAX_TEXT_SIZE_OFFSET) * TEXT_SIZE_OFFSET_STEP,
+    )
+
+    fun commentTextSizeOffset(value: Float): Int =
+        ((clampCommentTextSize(value) - DEFAULT_COMMENT_TEXT_SIZE) / TEXT_SIZE_OFFSET_STEP)
+            .roundToInt()
+            .coerceIn(MIN_TEXT_SIZE_OFFSET, MAX_TEXT_SIZE_OFFSET)
+
+    fun commentTextSizeForOffset(offset: Int): Float = clampCommentTextSize(
+        DEFAULT_COMMENT_TEXT_SIZE +
+            offset.coerceIn(MIN_TEXT_SIZE_OFFSET, MAX_TEXT_SIZE_OFFSET) * TEXT_SIZE_OFFSET_STEP,
+    )
+
+    fun clampReaderModeFontSize(value: Int): Int =
+        value.coerceIn(MIN_READER_MODE_FONT_SIZE, MAX_READER_MODE_FONT_SIZE)
+}

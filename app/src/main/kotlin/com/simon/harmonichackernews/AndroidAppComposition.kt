@@ -1,0 +1,123 @@
+package com.simon.harmonichackernews
+
+import android.content.Context
+import com.simon.harmonichackernews.app.HarmonicAppComposition
+import com.simon.harmonichackernews.app.HarmonicHostConfiguration
+import com.simon.harmonichackernews.app.AppMetadata
+import com.simon.harmonichackernews.app.AppBootstrapPolicy
+import com.simon.harmonichackernews.app.HarmonicPersistentStorageFactory
+import com.simon.harmonichackernews.app.HarmonicStorageRoots
+import com.simon.harmonichackernews.network.AndroidNetworkEnvironment
+import com.simon.harmonichackernews.network.PreviewCachePolicy
+import com.simon.harmonichackernews.platform.createAndroidPlatformDependencies
+import com.simon.harmonichackernews.platform.AndroidCrc32
+import com.simon.harmonichackernews.settings.AndroidKeyValueStore
+import com.simon.harmonichackernews.platform.StorageKeyPolicy
+import com.simon.harmonichackernews.utils.AndroidActivityTheme
+import com.simon.harmonichackernews.summary.local.createAndroidLocalModelService
+import com.simon.harmonichackernews.summary.local.AndroidLocalRuntimeDelivery
+import java.io.File
+import java.util.Calendar
+import kotlinx.io.files.Path
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import com.simon.harmonichackernews.data.BufferedStoryResourceTintStore
+import com.simon.harmonichackernews.data.migrateStoryResourceTints
+
+/** Resolves the graph from its actual Android Application owner without a static locator. */
+internal val Context.harmonicAppComposition: HarmonicAppComposition
+    get() = (applicationContext as? HarmonicApplication)?.composition
+        ?: error("HarmonicApplication does not own this process")
+
+internal suspend fun Context.awaitHarmonicAppComposition(): HarmonicAppComposition =
+    (applicationContext as HarmonicApplication).awaitStartup()
+
+internal fun createAndroidAppComposition(
+    context: Context,
+    cacheScope: CoroutineScope,
+    runtimeDelivery: AndroidLocalRuntimeDelivery,
+): HarmonicAppComposition {
+    val network = AndroidNetworkEnvironment(context)
+    val settingsStore = AndroidKeyValueStore.defaults(context)
+    val appDataStore = AndroidKeyValueStore.global(context)
+    val localModels = createAndroidLocalModelService(context, runtimeDelivery)
+    val filesRoot = Path(context.filesDir.absolutePath)
+    val persistentStorage = HarmonicPersistentStorageFactory.create(
+        roots = HarmonicStorageRoots(
+            files = filesRoot,
+            pdfCache = Path(
+                (context.externalCacheDir ?: context.cacheDir).absolutePath,
+                StorageKeyPolicy.PDF_CACHE_DIRECTORY,
+            ),
+        ),
+        appDataStore = appDataStore,
+        crc32 = AndroidCrc32,
+        fileAccessStore = AndroidKeyValueStore.named(
+            context,
+            StorageKeyPolicy.FILE_ACCESS_STORE,
+        ),
+    )
+    return HarmonicAppComposition(
+        network = network.graph,
+        platform = createAndroidPlatformDependencies(
+            context,
+            localModels = localModels,
+        ),
+        host = HarmonicHostConfiguration(
+            dynamicColorAvailable = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S,
+            metadata = AppMetadata(
+                versionName = BuildConfig.VERSION_NAME,
+                versionCode = BuildConfig.VERSION_CODE,
+                buildNumber = BuildConfig.VERSION_CODE.toString(),
+                buildType = BuildConfig.BUILD_TYPE,
+                debug = BuildConfig.DEBUG,
+                debugSettingsEnabled = BuildConfig.DEBUG_SETTINGS_ENABLED,
+            ),
+            settingsStore = settingsStore,
+            appDataStore = appDataStore,
+            previewCacheStore = AndroidKeyValueStore.named(context, PreviewCachePolicy.STORE_NAME),
+            widgetConfigurationStore = AndroidKeyValueStore.named(
+                context,
+                AppBootstrapPolicy.WIDGET_CONFIGURATION_STORE,
+            ),
+            widgetRuntimeStore = AndroidKeyValueStore.named(
+                context,
+                AppBootstrapPolicy.WIDGET_RUNTIME_STORE,
+            ),
+            settingsChanges = settingsStore.changes,
+            currentMinutesFromMidnight = {
+                Calendar.getInstance().let { calendar ->
+                    AppBootstrapPolicy.minutesFromMidnight(
+                        calendar.get(Calendar.HOUR_OF_DAY),
+                        calendar.get(Calendar.MINUTE),
+                    )
+                }
+            },
+            systemDark = { AndroidActivityTheme.uiModeNight(context) },
+            localModels = localModels,
+            storyCacheRepository = persistentStorage.storyCacheRepository,
+            // Same tree as the other app-owned caches: saved and read state live in these rows, so
+            // the database has to travel with a backup rather than be treated as disposable.
+            feedDatabasePath = File(context.filesDir, "feed/pulse-feed-items.db").absolutePath,
+            articleEmbeddingCache = persistentStorage.articleEmbeddingCache,
+            articleEmbeddingEngine = com.simon.harmonichackernews.categorization.AndroidArticleEmbeddingEngine(context),
+            nativeArticleEmbeddingEngine = runCatching {
+                Class.forName("com.simon.harmonichackernews.AndroidSystemArticleEmbeddingEngine")
+                    .getDeclaredConstructor().newInstance() as com.simon.harmonichackernews.platform.NativeArticleEmbeddingEngine
+            }.getOrNull(),
+            localAiMemoryAvailable = { com.simon.harmonichackernews.summary.local.localAiMemoryAvailable(context) },
+            articleSnapshotStore = persistentStorage.articleSnapshotStore,
+            pdfDownloadStore = persistentStorage.pdfDownloadStore,
+            storyResourceTints = BufferedStoryResourceTintStore(
+                scope = cacheScope,
+                dispatcher = Dispatchers.IO,
+                openStore = {
+                    AndroidKeyValueStore.named(context, "story_resource_tints").also { tints ->
+                        tints.awaitLoaded()
+                        migrateStoryResourceTints(appDataStore, tints, tints::awaitPersisted)
+                    }
+                },
+            ),
+        ),
+    )
+}

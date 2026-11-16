@@ -1,0 +1,1052 @@
+package com.simon.harmonichackernews.ui.comments
+
+import com.simon.harmonichackernews.network.ReferenceLinkPreviewRuntime
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.text.selection.SelectionState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import com.simon.harmonichackernews.adapters.CommentDisplaySettings
+import com.simon.harmonichackernews.presentation.*
+import com.simon.harmonichackernews.network.StoryPreviewResourceState
+import com.simon.harmonichackernews.summary.StorySummaryDiagnostics
+import com.simon.harmonichackernews.utils.CollectedReferenceLinks
+
+/** One immutable rendering snapshot shared by Android, desktop, and iOS comments screens. */
+data class CommentsScreenState(
+    val story: StoryListItemSnapshot,
+    val accountUser: String? = null,
+    val comments: List<PortableCommentItem> = emptyList(),
+    val visibleComments: List<PortableVisibleComment> = emptyList(),
+    val displaySettings: CommentDisplaySettings? = null,
+    val commentsLoaded: Boolean = false,
+    val initialThreadCached: Boolean = false,
+    val showingCached: Boolean = false,
+    val commentsRefreshInProgress: Boolean = false,
+    val loadingFailed: Boolean = false,
+    val loadingFailedServerError: Boolean = false,
+    val usingOfficialApiFallback: Boolean = false,
+    val showRefreshPrompt: Boolean = false,
+    val lastRefreshed: Long = 0L,
+    val opThreadFilterEnabled: Boolean = false,
+    val hasCommentsByOp: Boolean = false,
+    val userThreadFilterEnabled: Boolean = false,
+    val hasCommentsByUser: Boolean = false,
+    val adBlockActive: Boolean = false,
+    val integratedWebView: Boolean = false,
+    val pullToOpenBrowser: Boolean = false,
+    val readerModeAvailable: Boolean = false,
+    val readerModeEnabled: Boolean = false,
+    val showSheetControls: Boolean = true,
+    val currentSorting: String = "Default",
+    val topInsetPx: Int = 0,
+    val contentInsetLeftPx: Int = 0,
+    val contentInsetRightPx: Int = 0,
+    val storyVoteLoading: Boolean = false,
+    val storyCommented: Boolean = false,
+    val storyFavoriteLoading: Boolean = false,
+    val pollVoteInFlightOptionId: Int? = null,
+    val storySummaryLoading: Boolean = false,
+    val summaryDiagnostics: StorySummaryDiagnostics? = null,
+    val headerPreviewResource: StoryPreviewResourceState? = null,
+    val commentFavoriteLoadingId: Int = -1,
+    val commentVoteLoadingId: Int = -1,
+    val commentVoteLoadingAction: CommentMenuAction? = null,
+    val downvotedCommentIds: Set<Int> = emptySet(),
+    val searchQuery: String = "",
+    val searchPreparing: Boolean = false,
+    val searchResults: List<PortableCommentItem> = emptyList(),
+)
+
+class CommentsScreenController private constructor(
+    shouldSmoothScroll: () -> Boolean,
+    private val savedItemState: SavedItemStateReader,
+    initialStory: StoryListItemSnapshot,
+    initialThreadCached: Boolean,
+    val initialShowWebsite: Boolean,
+    val openedFromCachedStories: Boolean,
+    initialScrollRestorationPending: Boolean,
+    accountUser: String?,
+    val listener: Listener,
+    val referencePreview: ReferenceLinkPreviewRuntime?,
+) {
+    var screenState by mutableStateOf(
+        CommentsScreenState(
+            story = initialStory,
+            accountUser = accountUser,
+            initialThreadCached = initialThreadCached,
+        ),
+    )
+        private set
+
+    /** True only while the current refresh was initiated by the pull-to-refresh gesture. */
+    var pullToRefreshInProgress by mutableStateOf(false)
+        private set
+
+    /** True only while the current refresh was requested from a header affordance. */
+    var headerRefreshInProgress by mutableStateOf(false)
+        private set
+    var refreshButtonInProgress by mutableStateOf(false)
+        private set
+    private var headerRefreshObserved = false
+
+    val story: StoryListItemSnapshot get() = screenState.story
+    /** Hosts observe selection so text-selection drags cannot also move the comments sheet. */
+    val summarySelectionState = SelectionState()
+    val accountUser: String? get() = screenState.accountUser
+    val comments: List<PortableCommentItem> get() = screenState.comments
+    val visibleComments: List<PortableVisibleComment> get() = screenState.visibleComments
+    val displaySettings: CommentDisplaySettings? get() = screenState.displaySettings
+    val commentsLoaded: Boolean get() = screenState.commentsLoaded
+    val initialThreadCached: Boolean get() = screenState.initialThreadCached
+    val showingCached: Boolean get() = screenState.showingCached
+    val commentsRefreshInProgress: Boolean get() = screenState.commentsRefreshInProgress
+    val loadingFailed: Boolean get() = screenState.loadingFailed
+    val loadingFailedServerError: Boolean get() = screenState.loadingFailedServerError
+    val usingOfficialApiFallback: Boolean get() = screenState.usingOfficialApiFallback
+    val showRefreshPrompt: Boolean get() = screenState.showRefreshPrompt
+    val lastRefreshed: Long get() = screenState.lastRefreshed
+    val opThreadFilterEnabled: Boolean get() = screenState.opThreadFilterEnabled
+    val hasCommentsByOp: Boolean get() = screenState.hasCommentsByOp
+    val userThreadFilterEnabled: Boolean get() = screenState.userThreadFilterEnabled
+    val hasCommentsByUser: Boolean get() = screenState.hasCommentsByUser
+    val adBlockActive: Boolean get() = screenState.adBlockActive
+    val integratedWebView: Boolean get() = screenState.integratedWebView
+    val pullToOpenBrowser: Boolean get() = screenState.pullToOpenBrowser
+    val readerModeAvailable: Boolean get() = screenState.readerModeAvailable
+    val readerModeEnabled: Boolean get() = screenState.readerModeEnabled
+    val showSheetControls: Boolean get() = screenState.showSheetControls
+    val currentSorting: String get() = screenState.currentSorting
+    val storyVoteLoading: Boolean get() = screenState.storyVoteLoading
+    val storyCommented: Boolean get() = screenState.storyCommented
+    val storyFavoriteLoading: Boolean get() = screenState.storyFavoriteLoading
+    val pollVoteInFlightOptionId: Int? get() = screenState.pollVoteInFlightOptionId
+    val storySummaryLoading: Boolean get() = screenState.storySummaryLoading
+    val summaryDiagnostics: StorySummaryDiagnostics?
+        get() = screenState.summaryDiagnostics
+    val headerPreviewResource: StoryPreviewResourceState?
+        get() = screenState.headerPreviewResource
+    val searchQuery: String get() = screenState.searchQuery
+    val searchPreparing: Boolean get() = screenState.searchPreparing
+    val searchResults: List<PortableCommentItem> get() = screenState.searchResults
+    val contentInsetLeftPx: Int get() = screenState.contentInsetLeftPx
+    val contentInsetRightPx: Int get() = screenState.contentInsetRightPx
+    var statusBarHeaderColor by mutableStateOf<Color?>(null)
+        private set
+    /** Header color before the sheet reveal, shared with the detached browser controls. */
+    var headerBackgroundColor by mutableStateOf<Color?>(null)
+        private set
+    var browserPullActive by mutableStateOf(false)
+        internal set
+    var statusBarHeaderCoverage by mutableFloatStateOf(0f)
+        private set
+    var contentVersion by mutableIntStateOf(0)
+        private set
+    var headerPreviewSuppressed by mutableStateOf(false)
+        private set
+    var headerMenuVisible by mutableStateOf(false)
+        private set
+    var headerMenuDismissRequestVersion by mutableIntStateOf(0)
+        private set
+    /** Two-pane hosts supply this capability when the integrated browser can share their panes. */
+    var sideBySideAvailable by mutableStateOf(false)
+        private set
+    var sideBySideActive by mutableStateOf(false)
+        private set
+    private var retainedListState: LazyListState? = null
+
+    /** Retain the reading position if a fold changes the host as well as the pane allocation. */
+    fun retainListState(initial: LazyListState): LazyListState =
+        retainedListState ?: initial.also { retainedListState = it }
+
+    private var sideBySideLeftExpandedSheet = false
+    var browserPaneState: com.simon.harmonichackernews.ui.navigation.BrowserPaneState? = null
+    var committedSheetBackProgress by mutableFloatStateOf(0f)
+        private set
+
+    fun updateSideBySideAvailability(available: Boolean) {
+        val next = available && integratedWebView
+        if (sideBySideAvailable == next) return
+        sideBySideAvailable = next
+        if (!next && sideBySideActive) requestExpandSheet()
+    }
+
+    fun toggleSideBySide() {
+        if (sideBySideActive) {
+            requestExpandSheet()
+        } else if (sideBySideAvailable) {
+            sideBySideActive = true
+            sideBySideLeftExpandedSheet = sheetSlideOffset < 0.999f
+            // Unlike opening the website from the story title, this must not scroll to the header.
+            listener.onCollapseSheetForWebsite()
+        }
+    }
+
+    fun leaveSideBySideHost() {
+        sideBySideAvailable = false
+        if (sideBySideActive) {
+            sideBySideActive = false
+            requestExpandSheet()
+        }
+    }
+
+    var webViewFullscreen by mutableStateOf(false)
+        private set
+    var isScrolledToTop by mutableStateOf(true)
+        private set
+    /** Prevents pane transitions from sampling item 0 before a cached position is restored. */
+    var initialScrollRestorationPending by mutableStateOf(initialScrollRestorationPending)
+        private set
+    var firstVisibleCommentId: Int = 0
+        private set
+    var firstVisibleCommentOffset: Int = 0
+        private set
+    private val interactionStore = CommentsInteractionStore(initialShowWebsite, shouldSmoothScroll)
+    private var interactionState by mutableStateOf(interactionStore.state)
+    private var commentActionSourceBounds: androidx.compose.ui.geometry.Rect? = null
+    private var pendingCommentActionSourceGeometry:
+        Pair<Int, CommentActionSourceGeometry>? = null
+    private var commentActionSourceGeometry: CommentActionSourceGeometry? = null
+    private var pendingCommentActionAfterDismiss:
+        Pair<PortableCommentItem, CommentMenuAction>? = null
+    private var sourceCoveredByCommentActionTransition by mutableStateOf(false)
+    private var linkPreviewSourceBounds by
+        mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
+    private var linkPreviewSourceIsReferenceRow by mutableStateOf(false)
+    private var linkPreviewSourceContainerColor by mutableStateOf<Color?>(null)
+    private var linkPreviewSourceContentLayer by mutableStateOf<GraphicsLayer?>(null)
+    private var linkPreviewSourceImageAspectRatio by mutableStateOf<Float?>(null)
+    private var linkPreviewSourceCovered by mutableStateOf(false)
+
+    // Sheet progress changes every frame. Observe individual values so moving the sheet does
+    // not invalidate readers of unrelated navigation, search, row or overlay state.
+    private val commentAction by derivedStateOf { interactionState.commentAction }
+    private val linkPreview by derivedStateOf { interactionState.linkPreview }
+    val sheetSlideOffset: Float by derivedStateOf { interactionState.sheetSlideOffset }
+    val topInsetPx: Int by derivedStateOf { interactionState.topInsetPx }
+    val sheetRequest: CommentSheetRequest? by derivedStateOf { interactionState.sheetRequest }
+    val navigationRequest: CommentNavigationRequest? by derivedStateOf { interactionState.navigationRequest }
+    val showWebsiteRequest: Int by derivedStateOf { interactionState.websiteRequestVersion }
+    val scrollToCommentRequest: CommentScrollRequest? by derivedStateOf { interactionState.scrollRequest }
+    val stopScrollRequest: Int by derivedStateOf { interactionState.stopScrollRequestVersion }
+    val highlightedCommentId: Int by derivedStateOf { interactionState.highlightedCommentId }
+    val searchScrollTopTargetId: Int by derivedStateOf { interactionState.searchScrollTopTargetId }
+    val predictiveBackActive: Boolean by derivedStateOf { interactionState.predictiveBackActive }
+    val predictiveBackProgress: Float by derivedStateOf { interactionState.predictiveBackProgress }
+    val suppressedCommentIds: Set<Int> by derivedStateOf { interactionState.suppressedCommentIds }
+    val searchDialogVisible: Boolean by derivedStateOf { interactionState.searchDialogVisible }
+    val commentActionOverlay: CommentActionOverlayState?
+        get() = commentAction?.let {
+            CommentActionOverlayState(it, commentActionSourceBounds, commentActionSourceGeometry)
+        }
+    val commentActionDismissRequest: Int by derivedStateOf {
+        interactionState.commentActionDismissRequestVersion
+    }
+    val commentActionPredictiveBackProgress: Float by derivedStateOf {
+        interactionState.commentActionPredictiveBackProgress
+    }
+    val commentActionPredictiveBackEdge: Int by derivedStateOf {
+        interactionState.commentActionPredictiveBackEdge
+    }
+    val commentActionFavoriteLoadingId: Int by derivedStateOf {
+        interactionState.commentActionFavoriteLoadingId
+    }
+    val commentActionVoteLoadingId: Int by derivedStateOf { interactionState.commentActionVoteLoadingId }
+    val commentActionVoteLoadingAction: CommentMenuAction? by derivedStateOf {
+        interactionState.commentActionVoteLoadingAction
+    }
+    val commentActionDownvotedIds: Set<Int> by derivedStateOf { interactionState.commentActionDownvotedIds }
+    val linkPreviewOverlay: CommentLinkPreviewOverlayState?
+        get() = when (val preview = linkPreview) {
+            is CommentLinkPreview.Reference -> CommentLinkPreviewOverlayState.Reference(
+                originalUrl = preview.originalUrl,
+                fallbackTitle = preview.fallbackTitle,
+                resolvedTitle = preview.resolvedTitle,
+                resolvedSummary = preview.resolvedSummary,
+                sourceBounds = linkPreviewSourceBounds,
+                sourceCommentId = preview.sourceCommentId,
+                headerReference = preview.headerReference,
+                sourceIsReferenceRow = linkPreviewSourceIsReferenceRow,
+                sourceContainerColor = linkPreviewSourceContainerColor,
+                sourceContentLayer = linkPreviewSourceContentLayer,
+            )
+            is CommentLinkPreview.Image -> CommentLinkPreviewOverlayState.Image(
+                imageUrl = preview.imageUrl,
+                description = preview.description,
+                sourceBounds = linkPreviewSourceBounds,
+                backgroundColor = preview.backgroundColor,
+                sourceContentLayer = linkPreviewSourceContentLayer,
+                imageAspectRatio = linkPreviewSourceImageAspectRatio,
+            )
+            null -> null
+        }
+    val linkPreviewDismissRequest: Int by derivedStateOf { interactionState.linkPreviewDismissRequestVersion }
+    val linkPreviewPredictiveBackProgress: Float by derivedStateOf {
+        interactionState.linkPreviewPredictiveBackProgress
+    }
+    val linkPreviewPredictiveBackEdge: Int by derivedStateOf {
+        interactionState.linkPreviewPredictiveBackEdge
+    }
+    val linkPreviewPredictiveBackSettleRequest: CommentPredictiveBackSettleRequest? by derivedStateOf {
+        interactionState.linkPreviewPredictiveBackSettleRequest
+    }
+    val linkPreviewVisibleUrl: String? by derivedStateOf { interactionState.linkPreviewVisibleUrl }
+    val suppressedHeaderReferenceUrl: String?
+        get() = (linkPreview as? CommentLinkPreview.Reference)
+            ?.takeIf {
+                it.headerReference && linkPreviewSourceIsReferenceRow &&
+                    linkPreviewSourceCovered
+            }
+            ?.originalUrl
+
+    private fun syncInteractionState() {
+        interactionState = interactionStore.state
+    }
+
+    fun isBookmarked(itemId: Int): Boolean = savedItemState.isBookmarked(itemId)
+
+    fun isFavorited(itemId: Int): Boolean = savedItemState.isFavorited(itemId)
+
+    fun isUpvoted(itemId: Int, isComment: Boolean): Boolean =
+        savedItemState.isUpvoted(itemId, isComment)
+
+    fun updateContent(state: CommentsScreenState) {
+        val updateBecameVisible = !screenState.showRefreshPrompt && state.showRefreshPrompt
+        val headerRefreshFinished = headerRefreshInProgress &&
+            (headerRefreshObserved || screenState.commentsRefreshInProgress) &&
+            !state.commentsRefreshInProgress
+        // CommentsScreenStateFactory already exposes immutable presentation snapshots. Copying
+        // all three thread lists here made every load and state change allocate and traverse the
+        // full thread again on the UI thread.
+        screenState = state
+        interactionStore.updateTopInset(state.topInsetPx)
+        interactionStore.synchronizeCommentActionState(
+            favoriteLoadingId = state.commentFavoriteLoadingId,
+            voteLoadingId = state.commentVoteLoadingId,
+            voteLoadingAction = state.commentVoteLoadingAction,
+            downvotedIds = state.downvotedCommentIds,
+        )
+        if (updateBecameVisible) interactionStore.clearSearchScrollTopTarget()
+        if (headerRefreshInProgress && state.commentsRefreshInProgress) {
+            headerRefreshObserved = true
+        } else if (headerRefreshFinished) {
+            finishHeaderRefresh()
+        }
+        syncInteractionState()
+        contentVersion++
+    }
+
+    fun updateHeaderMenuVisibility(visible: Boolean) {
+        headerMenuVisible = visible
+    }
+
+    fun isHeaderMenuShowing(): Boolean = headerMenuVisible
+
+    fun requestDismissHeaderMenu() {
+        if (headerMenuVisible) headerMenuDismissRequestVersion++
+    }
+
+    fun refreshContent() {
+        screenState = screenState.copy(comments = screenState.comments.toList())
+        contentVersion++
+    }
+
+    fun beginPullToRefresh() {
+        pullToRefreshInProgress = true
+    }
+
+    fun finishPullToRefresh() {
+        pullToRefreshInProgress = false
+    }
+
+    fun beginHeaderRefresh(showProgressInButton: Boolean = false) {
+        headerRefreshObserved = commentsRefreshInProgress
+        headerRefreshInProgress = true
+        refreshButtonInProgress = showProgressInButton
+    }
+
+    fun finishHeaderRefresh() {
+        headerRefreshInProgress = false
+        refreshButtonInProgress = false
+        headerRefreshObserved = false
+    }
+
+    fun updateSheet(slideOffset: Float, topInsetPx: Int) {
+        interactionStore.updateSheet(slideOffset, topInsetPx)
+        if (slideOffset >= 0.999f) committedSheetBackProgress = 0f
+        if (sideBySideActive) {
+            if (slideOffset < 0.999f) sideBySideLeftExpandedSheet = true
+            else if (sideBySideLeftExpandedSheet) sideBySideActive = false
+        }
+        syncInteractionState()
+    }
+
+    fun updateStatusBarHeaderColor(color: Color, backgroundColor: Color = color) {
+        statusBarHeaderColor = color
+        headerBackgroundColor = backgroundColor
+    }
+
+    fun updateStatusBarHeaderCoverage(coverage: Float) {
+        statusBarHeaderCoverage = coverage.coerceIn(0f, 1f)
+    }
+
+    fun requestExpandSheetFromBack() {
+        if (sideBySideActive) committedSheetBackProgress = predictiveBackProgress.coerceAtLeast(0.001f)
+        requestExpandSheet()
+    }
+
+    fun requestExpandSheet() {
+        if (sideBySideActive && predictiveBackActive) {
+            committedSheetBackProgress = predictiveBackProgress.coerceAtLeast(0.001f)
+        }
+        interactionStore.requestSheet(expanded = true)
+        syncInteractionState()
+    }
+
+    fun requestCollapseSheet() {
+        interactionStore.requestSheet(expanded = false)
+        syncInteractionState()
+    }
+
+    fun consumeSheetRequest(request: CommentSheetRequest) {
+        interactionStore.consumeSheetRequest(request)
+        syncInteractionState()
+    }
+
+    private val sheetExpanded by derivedStateOf { sheetSlideOffset >= 0.999f }
+    private val websiteVisible by derivedStateOf { integratedWebView && sheetSlideOffset <= 0.001f }
+
+    fun isSheetExpanded(): Boolean = sheetExpanded
+
+    fun isWebsiteVisible(): Boolean = websiteVisible
+
+    fun updateReaderMode(available: Boolean, enabled: Boolean) {
+        screenState = screenState.copy(
+            readerModeAvailable = available,
+            readerModeEnabled = enabled,
+        )
+    }
+
+    fun updateWebViewFullscreen(fullscreen: Boolean) {
+        webViewFullscreen = fullscreen
+    }
+
+    fun navigateNext(topLevelOnly: Boolean, scaleLongScrollSpeed: Boolean) {
+        interactionStore.navigate(
+            forward = true,
+            topLevelOnly = topLevelOnly,
+            scaleLongScrollSpeed = scaleLongScrollSpeed,
+        )
+        syncInteractionState()
+    }
+
+    fun navigatePrevious(topLevelOnly: Boolean, scaleLongScrollSpeed: Boolean) {
+        interactionStore.navigate(
+            forward = false,
+            topLevelOnly = topLevelOnly,
+            scaleLongScrollSpeed = scaleLongScrollSpeed,
+        )
+        syncInteractionState()
+    }
+
+    fun navigateFirst() {
+        interactionStore.navigate(
+            forward = false,
+            topLevelOnly = true,
+            scaleLongScrollSpeed = true,
+            edge = CommentNavigationEdge.First,
+        )
+        syncInteractionState()
+    }
+
+    fun navigateLast() {
+        interactionStore.navigate(
+            forward = true,
+            topLevelOnly = true,
+            scaleLongScrollSpeed = true,
+            edge = CommentNavigationEdge.Last,
+        )
+        syncInteractionState()
+    }
+
+    fun consumeWebsiteRequest(version: Int) {
+        interactionStore.consumeWebsiteRequest(version)
+    }
+
+    fun requestWebsite() {
+        interactionStore.requestWebsite()
+        syncInteractionState()
+    }
+
+    fun scrollToComment(commentId: Int, topOffsetPx: Int = topInsetPx, animate: Boolean = true) {
+        interactionStore.scrollToComment(
+            commentId = commentId,
+            topOffsetPx = topOffsetPx,
+            animate = animate,
+            searchResult = false,
+        )
+        syncInteractionState()
+    }
+
+    fun scrollToSearchResult(commentId: Int) {
+        interactionStore.scrollToComment(
+            commentId = commentId,
+            topOffsetPx = topInsetPx,
+            animate = true,
+            searchResult = true,
+        )
+        syncInteractionState()
+    }
+
+    fun scrollToLinkedComment(commentId: Int, topOffsetPx: Int = topInsetPx) {
+        interactionStore.scrollToComment(
+            commentId = commentId,
+            topOffsetPx = topOffsetPx,
+            animate = false,
+            highlight = true,
+        )
+        syncInteractionState()
+    }
+
+    fun highlightLinkedComment(commentId: Int) {
+        interactionStore.highlightLinkedComment(commentId)
+        syncInteractionState()
+    }
+
+    fun showCommentSearch() {
+        interactionStore.showCommentSearch()
+        syncInteractionState()
+        listener.onSearchVisibilityChanged(true)
+    }
+
+    fun showCommentActions(
+        comment: PortableCommentItem,
+        sourceBounds: androidx.compose.ui.geometry.Rect? = null,
+    ) {
+        // Long presses can arrive from multiple comments before Compose has a chance to render
+        // the overlay. Keep the overlay single-owner so a rejected second request cannot leave
+        // its source comment suppressed without a corresponding dialog.
+        if (postAsk != null || !interactionStore.showCommentActions(comment, stopScroll = true)) return
+        commentActionSourceBounds = sourceBounds
+        commentActionSourceGeometry = pendingCommentActionSourceGeometry
+            ?.takeIf { (commentId, geometry) ->
+                commentId == comment.id &&
+                    sourceBounds != null &&
+                    geometry.container == sourceBounds
+            }
+            ?.second
+        pendingCommentActionSourceGeometry = null
+        sourceCoveredByCommentActionTransition = false
+        syncInteractionState()
+        listener.onCommentActionOverlayVisibilityChanged(true)
+    }
+
+    fun restoreCommentActions(comment: PortableCommentItem) {
+        if (!interactionStore.showCommentActions(comment, stopScroll = false)) return
+        commentActionSourceBounds = null
+        commentActionSourceGeometry = null
+        sourceCoveredByCommentActionTransition = false
+        syncInteractionState()
+        listener.onCommentActionOverlayVisibilityChanged(true)
+    }
+
+    fun isCommentActionOverlayShowing(): Boolean = commentActionOverlay != null || postAsk != null
+
+    fun getVisibleCommentActionId(): Int = commentActionOverlay?.comment?.id ?: -1
+
+    // Includes the reverse transform so host controls stay beneath the returning surface.
+    var askSurfaceVisible by mutableStateOf(false)
+        internal set
+
+    /** Modal interactions own gestures until their exit animation has finished. */
+    val sheetGesturesBlocked: Boolean
+        get() = askOpen || askSurfaceVisible || predictiveBackActive ||
+            isCommentActionOverlayShowing() || isLinkPreviewOverlayShowing() ||
+            summarySelectionState.selectedTexts.isNotEmpty()
+    var askOpen by mutableStateOf(false)
+        private set
+    var askBackProgress by mutableFloatStateOf(0f)
+        private set
+
+    var postAsk by mutableStateOf<PostAskState?>(null)
+        private set
+
+    fun openPostAsk(state: PostAskState) {
+        if (isCommentActionOverlayShowing()) return
+        postAsk = state
+        askOpen = true
+        listener.onCommentActionOverlayVisibilityChanged(true)
+    }
+
+    internal fun completePostAskDismiss() {
+        if (postAsk == null || askOpen) return
+        postAsk = null
+        askSurfaceVisible = false
+        listener.onCommentActionOverlayVisibilityChanged(false)
+    }
+
+    fun openCommentAsk() {
+        if (commentActionOverlay != null && commentActionDismissRequest == 0) askOpen = true
+    }
+
+    fun closeAsk() {
+        askOpen = false
+        askBackProgress = 0f
+    }
+
+    fun requestDismissModalOverlay() {
+        if (linkPreviewOverlay != null) requestDismissLinkPreview()
+        else requestDismissCommentActions()
+    }
+
+    fun requestDismissCommentActions() {
+        if (askOpen) {
+            closeAsk()
+            return
+        }
+        interactionStore.requestDismissCommentActions()
+        syncInteractionState()
+    }
+
+    fun dismissCommentActionsThen(
+        comment: PortableCommentItem,
+        action: CommentMenuAction,
+    ) {
+        if (commentActionOverlay == null || pendingCommentActionAfterDismiss != null) return
+        pendingCommentActionAfterDismiss = comment to action
+        requestDismissCommentActions()
+    }
+
+    fun updateCommentActionPredictiveBack(progress: Float, edge: Int, touchY: Float) {
+        if (askOpen) {
+            askBackProgress = progress
+            return
+        }
+        interactionStore.updateCommentActionPredictiveBack(progress, edge, touchY)
+        syncInteractionState()
+    }
+
+    fun cancelCommentActionPredictiveBack() {
+        askBackProgress = 0f
+        interactionStore.cancelCommentActionPredictiveBack()
+        syncInteractionState()
+    }
+
+    fun isCommentActionPredictiveBackActive(): Boolean =
+        isCommentActionOverlayShowing() && (commentActionPredictiveBackProgress > 0f || askBackProgress > 0f)
+
+    fun commitCommentActionPredictiveBack() {
+        if (askOpen) {
+            closeAsk()
+            return
+        }
+        interactionStore.commitCommentActionPredictiveBack()
+        syncInteractionState()
+    }
+
+    fun completeCommentActionDismiss(dispatchPendingAction: Boolean = true) {
+        if (!interactionStore.completeCommentActionDismiss()) return
+        closeAsk()
+        val pendingAction = pendingCommentActionAfterDismiss
+        pendingCommentActionAfterDismiss = null
+        commentActionSourceBounds = null
+        commentActionSourceGeometry = null
+        sourceCoveredByCommentActionTransition = false
+        syncInteractionState()
+        listener.onCommentActionOverlayVisibilityChanged(false)
+        if (dispatchPendingAction) {
+            pendingAction?.let { (comment, action) ->
+                listener.onCommentAction(comment, action)
+            }
+        }
+    }
+
+    fun updateCommentActionSourceGeometry(
+        commentId: Int,
+        geometry: CommentActionSourceGeometry,
+    ) {
+        if (geometry.container.width <= 0f || geometry.container.height <= 0f) return
+        pendingCommentActionSourceGeometry = commentId to geometry
+    }
+
+    /** Keeps the real comment visible until a progress-zero overlay covers the same pixels. */
+    fun shouldKeepCommentActionSourceVisible(commentId: Int): Boolean =
+        commentActionOverlay?.comment?.id == commentId &&
+            !sourceCoveredByCommentActionTransition
+
+    fun setCommentActionSourceCovered(covered: Boolean) {
+        sourceCoveredByCommentActionTransition = covered
+    }
+
+    fun finishCommentActionVote(commentId: Int, downvoted: Boolean) {
+        interactionStore.finishCommentActionVote(commentId, downvoted)
+        syncInteractionState()
+        contentVersion++
+    }
+
+    fun dismissCommentSearch() {
+        interactionStore.dismissCommentSearch()
+        syncInteractionState()
+        listener.onSearchVisibilityChanged(false)
+        listener.onSearchQueryChanged("")
+    }
+
+    fun selectSearchResult(comment: PortableCommentItem) {
+        interactionStore.dismissCommentSearch()
+        syncInteractionState()
+        listener.onSearchVisibilityChanged(false)
+        listener.onSearchQueryChanged("")
+        listener.onSearchResultSelected(comment)
+    }
+
+    fun updateSearchQuery(query: String) {
+        listener.onSearchQueryChanged(query)
+    }
+
+    fun revealSearchResult(commentId: Int, visiblePosition: Int) {
+        interactionStore.revealSearchResult(commentId, visiblePosition, showRefreshPrompt)
+        syncInteractionState()
+    }
+
+    fun clearSearchHighlight(commentId: Int) {
+        interactionStore.clearSearchHighlight(commentId)
+        syncInteractionState()
+    }
+
+    fun clearSearchScrollTopTarget() {
+        interactionStore.clearSearchScrollTopTarget()
+        syncInteractionState()
+    }
+
+    fun consumeNavigationRequest(request: CommentNavigationRequest) {
+        interactionStore.consumeNavigationRequest(request)
+        syncInteractionState()
+    }
+
+    fun consumeScrollToCommentRequest(request: CommentScrollRequest) {
+        interactionStore.consumeScrollRequest(request)
+        syncInteractionState()
+    }
+
+    private fun updateLinkPreviewSource(
+        sourceBounds: Rect?,
+        sourceIsReferenceRow: Boolean,
+        sourceContainerColor: Color?,
+        sourceContentLayer: GraphicsLayer?,
+        sourceImageAspectRatio: Float?,
+    ) {
+        linkPreviewSourceBounds = sourceBounds
+        linkPreviewSourceIsReferenceRow = sourceIsReferenceRow
+        linkPreviewSourceContainerColor = sourceContainerColor
+        linkPreviewSourceContentLayer = sourceContentLayer
+        linkPreviewSourceImageAspectRatio = sourceImageAspectRatio
+        linkPreviewSourceCovered = false
+        headerPreviewSuppressed = false
+    }
+
+    fun showReferencePreview(
+        link: CollectedReferenceLinks.ReferenceLink,
+        sourceBounds: androidx.compose.ui.geometry.Rect?,
+        sourceCommentId: Int = -1,
+        headerReference: Boolean = false,
+        sourceContainerColor: Color? = null,
+        sourceContentLayer: GraphicsLayer? = null,
+    ) {
+        val url = link.url?.takeIf(String::isNotBlank) ?: return
+        showReferencePreview(
+            url = url,
+            title = firstNotBlank(link.resolvedTitle, link.label, url),
+            resolvedTitle = link.resolvedTitle,
+            resolvedSummary = link.resolvedSummary,
+            sourceBounds = sourceBounds,
+            sourceCommentId = sourceCommentId,
+            headerReference = headerReference,
+            sourceIsReferenceRow = true,
+            sourceContainerColor = sourceContainerColor,
+            sourceContentLayer = sourceContentLayer,
+        )
+    }
+
+    fun showReferencePreview(
+        url: String,
+        title: String?,
+        resolvedTitle: String? = null,
+        resolvedSummary: com.simon.harmonichackernews.network.LinkSummary? = null,
+        sourceBounds: androidx.compose.ui.geometry.Rect? = null,
+        sourceCommentId: Int = -1,
+        headerReference: Boolean = false,
+        sourceIsReferenceRow: Boolean = false,
+        sourceContainerColor: Color? = null,
+        sourceContentLayer: GraphicsLayer? = null,
+    ) {
+        if (!interactionStore.showReferencePreview(
+            originalUrl = url,
+            fallbackTitle = firstNotBlank(title, url),
+            resolvedTitle = resolvedTitle,
+            resolvedSummary = resolvedSummary,
+            sourceCommentId = sourceCommentId.takeIf { it > 0 },
+            headerReference = headerReference,
+        )) return
+        referencePreview?.load(url, firstNotBlank(title, url), resolvedTitle, resolvedSummary = resolvedSummary)
+        updateLinkPreviewSource(
+            sourceBounds = sourceBounds,
+            sourceIsReferenceRow = sourceIsReferenceRow,
+            sourceContainerColor = sourceContainerColor,
+            sourceContentLayer = sourceContentLayer,
+            sourceImageAspectRatio = null,
+        )
+        syncInteractionState()
+        listener.onLinkPreviewOverlayVisibilityChanged(true)
+    }
+
+    fun showImagePreview(
+        imageUrl: String,
+        description: String?,
+        sourceBounds: androidx.compose.ui.geometry.Rect? = null,
+        backgroundColor: Int,
+        sourceContentLayer: GraphicsLayer? = null,
+        imageAspectRatio: Float? = null,
+    ) {
+        if (!interactionStore.showImagePreview(
+            imageUrl = imageUrl,
+            description = description.orEmpty(),
+            backgroundColor = backgroundColor,
+        )) return
+        referencePreview?.dispose()
+        val validImageAspectRatio = imageAspectRatio?.takeIf { it.isFinite() && it > 0f }
+        updateLinkPreviewSource(
+            sourceBounds = sourceBounds,
+            sourceIsReferenceRow = false,
+            sourceContainerColor = null,
+            sourceContentLayer = sourceContentLayer,
+            sourceImageAspectRatio = validImageAspectRatio,
+        )
+        syncInteractionState()
+        listener.onLinkPreviewOverlayVisibilityChanged(true)
+    }
+
+    fun isLinkPreviewOverlayShowing(): Boolean = linkPreview != null
+
+    fun isLinkPreviewReferenceShowing(): Boolean =
+        linkPreview is CommentLinkPreview.Reference
+
+    fun isLinkPreviewImageShowing(): Boolean =
+        linkPreview is CommentLinkPreview.Image
+
+    fun getLinkPreviewFallbackTitle(): String? =
+        (linkPreview as? CommentLinkPreview.Reference)?.fallbackTitle
+
+    fun updateLinkPreviewVisibleUrl(originalUrl: String, resolvedUrl: String?) {
+        interactionStore.updateLinkPreviewVisibleUrl(originalUrl, resolvedUrl)
+        syncInteractionState()
+    }
+
+    fun requestDismissLinkPreview() {
+        referencePreview?.dispose()
+        interactionStore.requestDismissLinkPreview()
+        syncInteractionState()
+    }
+
+    fun coverLinkPreviewSource() {
+        if (linkPreviewSourceCovered) return
+        when {
+            linkPreviewSourceIsReferenceRow -> Unit
+            linkPreview is CommentLinkPreview.Image &&
+                linkPreviewSourceContentLayer != null -> headerPreviewSuppressed = true
+            else -> return
+        }
+        linkPreviewSourceCovered = true
+    }
+
+    fun suppressedReferenceUrlForComment(commentId: Int): String? =
+        (linkPreview as? CommentLinkPreview.Reference)
+            ?.takeIf {
+                it.sourceCommentId == commentId && linkPreviewSourceIsReferenceRow &&
+                    linkPreviewSourceCovered
+            }
+            ?.originalUrl
+
+    fun completeLinkPreviewDismiss() {
+        if (!interactionStore.completeLinkPreviewDismiss()) return
+        updateLinkPreviewSource(
+            sourceBounds = null,
+            sourceIsReferenceRow = false,
+            sourceContainerColor = null,
+            sourceContentLayer = null,
+            sourceImageAspectRatio = null,
+        )
+        syncInteractionState()
+        listener.onLinkPreviewOverlayVisibilityChanged(false)
+    }
+
+    fun startLinkPreviewPredictiveBack(progress: Float, edge: Int, touchY: Float) {
+        interactionStore.updateLinkPreviewPredictiveBack(progress, edge, touchY)
+        syncInteractionState()
+    }
+
+    fun updateLinkPreviewPredictiveBack(progress: Float, edge: Int, touchY: Float) =
+        startLinkPreviewPredictiveBack(progress, edge, touchY)
+
+    fun cancelLinkPreviewPredictiveBack() {
+        interactionStore.cancelLinkPreviewPredictiveBack()
+        syncInteractionState()
+    }
+
+    fun isLinkPreviewPredictiveBackActive(): Boolean =
+        linkPreviewOverlay != null &&
+            (linkPreviewPredictiveBackProgress > 0f ||
+                linkPreviewPredictiveBackSettleRequest != null)
+
+    fun commitLinkPreviewPredictiveBack() {
+        if (linkPreviewOverlay != null) requestDismissLinkPreview()
+    }
+
+    fun finishLinkPreviewPredictiveBackSettle(
+        request: CommentPredictiveBackSettleRequest,
+    ) {
+        interactionStore.finishLinkPreviewPredictiveBackSettle(request)
+        syncInteractionState()
+    }
+
+    fun requestStopScroll() {
+        interactionStore.requestStopScroll()
+        syncInteractionState()
+    }
+
+    fun beginPredictiveBack(progress: Float) {
+        interactionStore.beginPredictiveBack(progress)
+        syncInteractionState()
+    }
+
+    fun updatePredictiveBack(progress: Float) {
+        interactionStore.updatePredictiveBack(progress)
+        syncInteractionState()
+    }
+
+    fun endPredictiveBack() {
+        interactionStore.endPredictiveBack()
+        syncInteractionState()
+    }
+
+    fun updateScrollPosition(state: LazyListState, visibleComments: List<PortableVisibleComment>) {
+        val commentIndex = state.firstVisibleItemIndex - 1
+        firstVisibleCommentId = visibleComments.getOrNull(commentIndex)?.comment?.id ?: 0
+        firstVisibleCommentOffset = state.firstVisibleItemScrollOffset
+        isScrolledToTop = state.firstVisibleItemIndex == 0 && state.firstVisibleItemScrollOffset == 0
+        listener.onScrollPositionChanged(firstVisibleCommentId, firstVisibleCommentOffset)
+    }
+
+    fun completeInitialScrollRestoration() {
+        initialScrollRestorationPending = false
+    }
+
+    fun restoreReadingPosition(commentId: Int, topOffsetPx: Int) {
+        initialScrollRestorationPending = true
+        interactionStore.scrollToComment(
+            commentId = commentId,
+            topOffsetPx = topOffsetPx,
+            animate = false,
+            searchResult = false,
+            restorePosition = true,
+        )
+        syncInteractionState()
+    }
+
+    interface Listener {
+        fun onToggleComment(comment: PortableCommentItem, position: Int)
+        fun onScrollPositionChanged(commentId: Int, offset: Int) {}
+        fun onCommentAction(comment: PortableCommentItem, action: CommentMenuAction)
+        fun onCommentActionOverlayVisibilityChanged(showing: Boolean)
+        fun onLinkPreviewOverlayVisibilityChanged(showing: Boolean)
+        fun onHeaderClick()
+        fun onHeaderPreviewImageResult(imageUrl: String, success: Boolean)
+        fun onHeaderPreviewTintExtracted(
+            sourceUrl: String,
+            baseColorArgb: Int,
+            paletteConfigKey: String,
+            tintColorArgb: Int,
+        ): Int?
+        fun onHeaderAction(action: CommentsHeaderAction)
+        fun onShareAction(action: CommentsShareAction)
+        fun onMoreAction(action: CommentsMoreAction)
+        fun onSearchResultSelected(comment: PortableCommentItem)
+        fun onSearchQueryChanged(query: String)
+        fun onSearchVisibilityChanged(visible: Boolean) {}
+        fun onSortComments(sortType: String)
+        fun onSheetAction(action: CommentsSheetAction)
+        fun onCollapseSheetForWebsite()
+        fun onSheetProgressChanged(expandedFraction: Float)
+        fun onSheetSettled(expanded: Boolean)
+        fun onHeaderColorChanged(color: Int)
+        fun onHeaderCoverageChanged(coverage: Float)
+        fun onPollOption(optionId: Int)
+    }
+
+    companion object {
+        fun create(
+            shouldSmoothScroll: () -> Boolean,
+            story: StoryListItemSnapshot,
+            initialThreadCached: Boolean = false,
+            showWebsite: Boolean,
+            initialScrollRestorationPending: Boolean = false,
+            accountUser: String?,
+            savedItemState: SavedItemStateReader,
+            listener: Listener,
+            referencePreview: ReferenceLinkPreviewRuntime? = null,
+            openedFromCachedStories: Boolean = false,
+        ): CommentsScreenController = CommentsScreenController(
+            shouldSmoothScroll = shouldSmoothScroll,
+            savedItemState = savedItemState,
+            initialStory = story,
+            initialThreadCached = initialThreadCached,
+            initialShowWebsite = showWebsite,
+            openedFromCachedStories = openedFromCachedStories,
+            initialScrollRestorationPending = initialScrollRestorationPending,
+            accountUser = accountUser,
+            listener = listener,
+            referencePreview = referencePreview,
+        )
+
+    }
+}
+
+data class CommentActionOverlayState(
+    val comment: PortableCommentItem,
+    val sourceBounds: androidx.compose.ui.geometry.Rect?,
+    val sourceGeometry: CommentActionSourceGeometry? = null,
+)
+
+sealed interface CommentLinkPreviewOverlayState {
+    val sourceBounds: androidx.compose.ui.geometry.Rect?
+
+    data class Reference(
+        val originalUrl: String,
+        val fallbackTitle: String,
+        val resolvedTitle: String?,
+        val resolvedSummary: com.simon.harmonichackernews.network.LinkSummary?,
+        override val sourceBounds: androidx.compose.ui.geometry.Rect?,
+        val sourceCommentId: Int?,
+        val headerReference: Boolean,
+        val sourceIsReferenceRow: Boolean,
+        val sourceContainerColor: Color?,
+        val sourceContentLayer: GraphicsLayer?,
+    ) : CommentLinkPreviewOverlayState
+
+    data class Image(
+        val imageUrl: String,
+        val description: String,
+        override val sourceBounds: androidx.compose.ui.geometry.Rect?,
+        val backgroundColor: Int,
+        val sourceContentLayer: GraphicsLayer?,
+        val imageAspectRatio: Float?,
+    ) : CommentLinkPreviewOverlayState
+}
+
+private fun firstNotBlank(vararg values: String?): String =
+    values.firstOrNull { !it.isNullOrBlank() }.orEmpty()

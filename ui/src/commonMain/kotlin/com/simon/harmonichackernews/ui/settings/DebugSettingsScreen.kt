@@ -1,0 +1,461 @@
+package com.simon.harmonichackernews.ui.settings
+
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Icon
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.PaddingValues
+import com.simon.harmonichackernews.ui.common.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.resources.*
+import com.simon.harmonichackernews.ui.theme.AppUiFontFamily
+import kotlin.time.TimeMark
+import kotlin.math.roundToInt
+import kotlin.time.TimeSource
+import org.jetbrains.compose.resources.DrawableResource
+import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.stringResource
+
+enum class DebugSettingsDialog {
+    CHANGELOG,
+    NOTIFICATIONS,
+}
+
+/** Session-only fixture: never enables inference or changes category preferences. */
+internal object DebugStoryCategoryPreview {
+    var enabled by mutableStateOf(false)
+    var showTags by mutableStateOf(true)
+}
+
+data class DebugEnvironmentUiState(
+    val appVersion: String,
+    val appBuild: String,
+    val buildVersion: String,
+    val platformVersion: String,
+    val platformLabel: String = "Android version",
+    val platformIcon: DrawableResource = Res.drawable.ic_android,
+)
+
+data class DebugLink(
+    val title: String,
+    val icon: DrawableResource,
+    val url: String,
+)
+
+val DebugSampleContentLinks = listOf(
+    DebugLink(
+        "Link post",
+        Res.drawable.ic_ballot,
+        "https://news.ycombinator.com/item?id=47938184",
+    ),
+    DebugLink(
+        "Reference links post",
+        Res.drawable.ic_link,
+        "https://news.ycombinator.com/item?id=48352939",
+    ),
+    DebugLink(
+        "YouTube comment",
+        Res.drawable.ic_link,
+        "https://news.ycombinator.com/item?id=34225887",
+    ),
+    DebugLink(
+        "Very long comment",
+        Res.drawable.ic_comment,
+        "https://news.ycombinator.com/item?id=49103136",
+    ),
+    DebugLink(
+        "Poll",
+        Res.drawable.ic_ballot,
+        "https://news.ycombinator.com/item?id=39572682",
+    ),
+    DebugLink(
+        "Internal HN link",
+        Res.drawable.ic_link,
+        "https://news.ycombinator.com/item?id=30676384",
+    ),
+)
+
+@Composable
+fun DebugSettingsScreen(
+    showNavigation: Boolean,
+    contentVersion: Int,
+    alwaysShowTapToRefresh: Boolean,
+    showWidgetDebugInfo: Boolean,
+    environment: DebugEnvironmentUiState,
+    onBack: () -> Unit,
+    onAlwaysShowTapToRefreshChanged: (Boolean) -> Unit,
+    onShowWidgetDebugInfoChanged: (Boolean) -> Unit,
+    onGlassSettingsRequested: () -> Unit,
+    onOpenHnId: (Int) -> Unit,
+    onOpenUserProfile: (String) -> Unit,
+    onOpenWithoutCache: () -> Unit,
+    onCachePost: () -> Unit,
+    onOpenNewCommentsPost: () -> Unit,
+    onOpenLink: (String) -> Unit,
+    onLinkPreviewsRequested: () -> Unit,
+    onDialogRequested: (DebugSettingsDialog) -> Unit,
+    onWelcomeRequested: () -> Unit,
+    onEasterEggRequested: () -> Unit,
+    mockAiAnswers: Boolean = false,
+    onMockAiAnswersChanged: (Boolean) -> Unit = {},
+    storyLoadFailurePercent: Int = 0,
+    onStoryLoadFailurePercentChanged: (Int) -> Unit = {},
+    accountContent: (@Composable () -> Unit)? = null,
+) {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    fun navigate(action: () -> Unit) {
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+        action()
+    }
+
+    var versionTapCount by remember { mutableIntStateOf(0) }
+    var lastVersionTap by remember { mutableStateOf<TimeMark?>(null) }
+    var categoryInspectorPreview by remember { mutableStateOf(false) }
+
+    SettingsPage(
+        title = stringResource(Res.string.settings_section_debug),
+        showNavigation = showNavigation,
+        onBack = { navigate(onBack) },
+        contentVersion = contentVersion,
+    ) {
+        item {
+            SettingsCategory("Debug tools") {
+                SliderSetting(
+                    title = "Fail story loads",
+                    valueLabel = "$storyLoadFailurePercent%",
+                    value = storyLoadFailurePercent.toFloat(),
+                    valueRange = 0f..100f,
+                    steps = 19,
+                    onValueChange = { onStoryLoadFailurePercentChanged(it.roundToInt()) },
+                )
+                SettingsDivider()
+                SwitchSettingRow(
+                    title = "Always show tap to refresh",
+                    icon = Res.drawable.ic_refresh,
+                    checked = alwaysShowTapToRefresh,
+                    onCheckedChange = onAlwaysShowTapToRefreshChanged,
+                )
+                SettingsDivider()
+                SwitchSettingRow(
+                    title = "Show widget debug info",
+                    summary = "Shows detailed refresh errors on home screen widgets",
+                    icon = Res.drawable.ic_info,
+                    checked = showWidgetDebugInfo,
+                    onCheckedChange = onShowWidgetDebugInfoChanged,
+                )
+                SettingsDivider()
+                SwitchSettingRow(
+                    title = "Mock AI answers",
+                    summary = "Stream sample replies and summaries instead of calling an AI model",
+                    icon = Res.drawable.ic_auto_awesome,
+                    checked = mockAiAnswers,
+                    onCheckedChange = onMockAiAnswersChanged,
+                )
+                SettingsDivider()
+                SwitchSettingRow(
+                    title = "Mock categories in Stories settings",
+                    summary = "Preview tag placement without a model. Resets when the app restarts.",
+                    icon = Res.drawable.ic_label,
+                    checked = DebugStoryCategoryPreview.enabled,
+                    onCheckedChange = { DebugStoryCategoryPreview.enabled = it; DebugStoryCategoryPreview.showTags = true },
+                )
+                SettingsDivider()
+                DebugOpenSetting(
+                    title = "Open HN item by ID",
+                    label = "HN ID",
+                    description = "Open HN ID",
+                    icon = Res.drawable.ic_open_in_new,
+                    numeric = true,
+                    validate = { value ->
+                        when {
+                            value.isEmpty() || value.any { !it.isDigit() } -> "Enter a numeric HN ID"
+                            value.toIntOrNull() == null -> "HN ID is too large"
+                            value.toInt() <= 0 -> "Enter a positive HN ID"
+                            else -> null
+                        }
+                    },
+                    onOpen = { onOpenHnId(it.toInt()) },
+                )
+                SettingsDivider()
+                DebugOpenSetting(
+                    title = "Open user profile",
+                    label = "Username",
+                    description = "Open user profile",
+                    icon = Res.drawable.ic_person,
+                    validate = { value -> if (value.isBlank()) "Enter an HN username" else null },
+                    onOpen = onOpenUserProfile,
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "Open without cache",
+                    icon = Res.drawable.ic_cached,
+                    onClick = { navigate(onOpenWithoutCache) },
+                )
+            }
+        }
+
+        item {
+            SettingsCategory("Appearance") {
+                SettingRow(
+                    title = stringResource(Res.string.settings_section_glass),
+                    icon = Res.drawable.ic_palette,
+                    onClick = { navigate(onGlassSettingsRequested) },
+                )
+            }
+        }
+
+        item {
+            SettingsCategory("Sample content") {
+                SettingRow(
+                    title = "All comments marked as new",
+                    summary = "Open the sample story with new-comment dots",
+                    icon = Res.drawable.ic_comment,
+                    onClick = { navigate(onOpenNewCommentsPost) },
+                )
+                SettingsDivider()
+                DebugLinkRows(DebugSampleContentLinks) { url -> navigate { onOpenLink(url) } }
+                SettingsDivider()
+                SettingRow(
+                    title = "Cached post",
+                    icon = Res.drawable.ic_cached,
+                    onClick = { navigate(onCachePost) },
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "Link previews",
+                    icon = Res.drawable.ic_preview,
+                    onClick = { navigate(onLinkPreviewsRequested) },
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "Category inspector",
+                    summary = "Sample scores, chip transitions, and story click isolation",
+                    icon = Res.drawable.ic_label,
+                    onClick = { navigate { categoryInspectorPreview = true } },
+                )
+            }
+        }
+
+        item {
+            SettingsCategory("Account") {
+                accountContent?.invoke()
+                if (accountContent != null) SettingsDivider()
+                SettingRow(
+                    title = "Debug notifications",
+                    icon = Res.drawable.ic_notifications,
+                    onClick = { navigate { onDialogRequested(DebugSettingsDialog.NOTIFICATIONS) } },
+                )
+            }
+        }
+        item {
+            SettingsCategory("Dialogs") {
+                SettingRow(
+                    title = "Welcome screen",
+                    icon = Res.drawable.ic_explore,
+                    onClick = { navigate(onWelcomeRequested) },
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "Changelog",
+                    icon = Res.drawable.ic_history,
+                    onClick = { navigate { onDialogRequested(DebugSettingsDialog.CHANGELOG) } },
+                )
+            }
+        }
+
+        item {
+            SettingsCategory("Environment") {
+                SettingRow(
+                    title = "App version",
+                    summary = environment.appVersion,
+                    icon = Res.drawable.ic_deployed_code,
+                    onClick = {
+                        val now = TimeSource.Monotonic.markNow()
+                        versionTapCount = if (
+                            lastVersionTap?.elapsedNow()?.inWholeMilliseconds?.let {
+                                it in 0L..<800L
+                            } == true
+                        ) {
+                            versionTapCount + 1
+                        } else {
+                            1
+                        }
+                        lastVersionTap = now
+                        if (versionTapCount == 5) {
+                            versionTapCount = 0
+                            lastVersionTap = null
+                            navigate(onEasterEggRequested)
+                        }
+                    },
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "App build",
+                    summary = environment.appBuild,
+                    icon = Res.drawable.ic_tag,
+                    onClick = null,
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = "Build version",
+                    summary = environment.buildVersion,
+                    icon = Res.drawable.ic_build,
+                    onClick = null,
+                )
+                SettingsDivider()
+                SettingRow(
+                    title = environment.platformLabel,
+                    summary = environment.platformVersion,
+                    icon = environment.platformIcon,
+                    onClick = null,
+                )
+            }
+        }
+    }
+    if (categoryInspectorPreview) CategoryInspectorPreviewDialog(onDismiss = { categoryInspectorPreview = false })
+}
+
+@Composable
+private fun DebugOpenSetting(
+    title: String,
+    label: String,
+    description: String,
+    icon: DrawableResource,
+    numeric: Boolean = false,
+    validate: (String) -> String?,
+    onOpen: (String) -> Unit,
+) {
+    val currentOnOpen by rememberUpdatedState(onOpen)
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var value by rememberSaveable { mutableStateOf("") }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+
+    fun open() {
+        val trimmed = value.trim()
+        error = validate(trimmed)
+        if (error == null) {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+            currentOnOpen(trimmed)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(itemBackgroundColor())
+            .padding(
+                start = HarmonicDimens.compose_settings_row_horizontal_padding,
+                top = 12.dp,
+                end = HarmonicDimens.compose_settings_row_horizontal_padding,
+                bottom = 12.dp,
+            ),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                painterResource(icon),
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(32.dp))
+            Text(
+                title,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontFamily = AppUiFontFamily,
+                fontSize = 16.sp,
+                lineHeight = 20.sp,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 56.dp, top = 6.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = {
+                    value = if (numeric) it.filter(Char::isDigit) else it
+                    error = null
+                },
+                modifier = Modifier.weight(1f),
+                label = { Text(label, fontFamily = AppUiFontFamily) },
+                singleLine = true,
+                isError = error != null,
+                supportingText = error?.let { message ->
+                    { Text(message, fontFamily = AppUiFontFamily) }
+                },
+                textStyle = androidx.compose.ui.text.TextStyle(
+                    fontFamily = AppUiFontFamily,
+                    fontSize = 16.sp,
+                    lineHeight = 20.sp,
+                ),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = if (numeric) KeyboardType.Number else KeyboardType.Text,
+                    autoCorrectEnabled = false,
+                    imeAction = ImeAction.Go,
+                ),
+                keyboardActions = KeyboardActions(onGo = { open() }),
+            )
+            OutlinedButton(
+                onClick = { open() },
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f)),
+                contentPadding = PaddingValues(0.dp),
+                modifier = Modifier
+                    .padding(start = 10.dp, top = 12.dp)
+                    .size(48.dp),
+            ) {
+                Icon(
+                    painterResource(Res.drawable.ic_chevron_right),
+                    contentDescription = description,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DebugLinkRows(
+    links: List<DebugLink>,
+    onOpenLink: (String) -> Unit,
+) {
+    links.forEachIndexed { index, link ->
+        SettingRow(
+            title = link.title,
+            icon = link.icon,
+            onClick = { onOpenLink(link.url) },
+        )
+        if (index != links.lastIndex) SettingsDivider()
+    }
+}

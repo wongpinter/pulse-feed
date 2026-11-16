@@ -1,0 +1,468 @@
+package com.simon.harmonichackernews.ui.settings
+
+import com.simon.harmonichackernews.ui.theme.HarmonicTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.unit.dp
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.settings.DisplayStyle
+import com.simon.harmonichackernews.app.CommonLicenseCatalog
+import com.simon.harmonichackernews.app.HarmonicAppComposition
+import com.simon.harmonichackernews.app.HarmonicSceneComposition
+import com.simon.harmonichackernews.debug.DebugCachedPostFixture
+import com.simon.harmonichackernews.navigation.StoryDestination
+import com.simon.harmonichackernews.navigation.toDestination
+import com.simon.harmonichackernews.platform.accountOrNull
+import com.simon.harmonichackernews.network.LinkPreviewUseCase
+import com.simon.harmonichackernews.settings.ArchiveRedirectDomainCatalog
+import com.simon.harmonichackernews.settings.NighttimeSchedule
+import com.simon.harmonichackernews.settings.ThemeSelectionPolicy
+import com.simon.harmonichackernews.ui.about.AboutScreen
+import com.simon.harmonichackernews.ui.common.harmonicFilterButtonColors
+import com.simon.harmonichackernews.ui.content.SettingsStoryPreviewModel
+import com.simon.harmonichackernews.ui.licenses.LicensesScreen
+import com.simon.harmonichackernews.utils.ArchiveRedirectPolicy
+import com.simon.harmonichackernews.resources.Res
+import com.simon.harmonichackernews.resources.ic_android
+import org.jetbrains.compose.resources.DrawableResource
+import kotlinx.coroutines.launch
+import com.simon.harmonichackernews.settings.ReadingPreferences
+
+private const val OpenWithoutCacheStoryId = 49089500
+
+/** Shared settings composition for hosts whose only differences are native facilities. */
+@Composable
+fun PortableSettingsDetail(
+    section: SettingsSection,
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    singlePane: Boolean,
+    onBack: () -> Unit,
+    onNavigate: (SettingsSection, Boolean) -> Unit,
+    appIcon: Painter,
+    debugPlatformVersion: String,
+    debugNotificationsMessage: String,
+    aiSettings: @Composable () -> Unit,
+    dataSettings: @Composable () -> Unit,
+    readerPreview: @Composable (ReadingPreferences, Boolean) -> Unit,
+    webLinksCapabilities: WebLinksSettingsCapabilities = WebLinksSettingsCapabilities(),
+    debugPlatformLabel: String = "Android version",
+    debugPlatformIcon: DrawableResource = Res.drawable.ic_android,
+) {
+    when (section) {
+        SettingsSection.Search -> Unit // Shared search content belongs to SettingsNavigationShell.
+        SettingsSection.Appearance -> PortableAppearanceSettings(
+            app,
+            scene,
+            singlePane,
+            onBack,
+        ) { target ->
+            onNavigate(
+                target,
+                singlePane || target == SettingsSection.Theme || target == SettingsSection.PaletteTint ||
+                    target == SettingsSection.Font || target == SettingsSection.StoriesHeader,
+            )
+        }
+        SettingsSection.StoriesHeader -> StoriesHeaderSettingsRoute(app.settings, onBack)
+        SettingsSection.Font -> FontSettingsRoute(app.settings, onBack)
+        SettingsSection.Theme -> PortableThemeSettings(app, true, onBack)
+        SettingsSection.PaletteTint -> PaletteTintSettingsRoute(app.settings, true, onBack)
+        SettingsSection.Account -> AccountSettingsRoute(
+            accounts = app.platform.accounts,
+            debugIdentity = app.debugAccountIdentity,
+            settings = app.settings,
+            notifications = app.replyNotifications,
+            showNavigation = singlePane,
+            onBack = onBack,
+            onLogin = scene.navigation::showLoginDialog,
+            onOpenReply = { scene.links.open(com.simon.harmonichackernews.network.ReplyNotificationPresentation.deepLink(it)) },
+        )
+        SettingsSection.Stories -> PortableStoriesSettings(
+            app = app,
+            showNavigation = singlePane,
+            onBack = onBack,
+            onSpacingRequested = { onNavigate(SettingsSection.StoriesSpacing, true) },
+            onManageFrontpages = { onNavigate(SettingsSection.Frontpages, true) },
+            onPaletteTintRequested = { onNavigate(SettingsSection.PaletteTint, true) },
+            onArticleCategoriesRequested = { onNavigate(SettingsSection.ArticleCategories, true) },
+        )
+        SettingsSection.Frontpages -> {
+            val accountState by app.platform.accounts.accountState.collectAsStateWithLifecycle()
+            ManageFrontpagesSettingsRoute(app.settings, onBack, hasAccount = accountState.accountOrNull != null)
+        }
+        SettingsSection.Comments -> CommentsSettingsRoute(
+            repository = app.settings,
+            volumeNavigationSupported = false,
+            showNavigation = singlePane,
+            onBack = onBack,
+            onSpacingRequested = { onNavigate(SettingsSection.CommentsSpacing, true) },
+            onThreadDepthRequested = { onNavigate(SettingsSection.ThreadDepth, true) },
+            onQuoteHighlightingRequested = { onNavigate(SettingsSection.QuoteHighlighting, true) },
+            onUserAvatarsRequested = { onNavigate(SettingsSection.UserAvatars, true) },
+        )
+        SettingsSection.StoriesSpacing -> StoriesSpacingSettingsRoute(app.settings, app.articleCategorySettings, onBack)
+        SettingsSection.CommentsSpacing -> CommentsSpacingSettingsRoute(app.settings, onBack)
+        SettingsSection.HeaderDisplay -> HeaderDisplaySettingsRoute(app.settings, onBack)
+        SettingsSection.QuoteHighlighting -> QuoteHighlightingSettingsRoute(app.settings, onBack)
+        SettingsSection.UserAvatars -> UserAvatarSettingsRoute(app.settings, onBack)
+        SettingsSection.ThreadDepth -> ThreadDepthIndicatorsSettingsRoute(app.settings, onBack)
+        SettingsSection.WebLinks -> PortableWebLinksSettings(
+            app = app,
+            capabilities = webLinksCapabilities,
+            showNavigation = singlePane,
+            onBack = onBack,
+            onReaderModeRequested = { onNavigate(SettingsSection.ReaderMode, true) },
+        )
+        SettingsSection.ReaderMode -> ReaderModeSettingsRoute(app.settings, onBack, readerPreview)
+        SettingsSection.FiltersTags -> FiltersTagsSettingsRoute(
+            settings = app.settings,
+            filters = app.contentFilters,
+            userTags = app.userTags,
+            showNavigation = singlePane,
+            onBack = onBack,
+            onManageFrontpages = { onNavigate(SettingsSection.Frontpages, true) },
+            onProfileAccepted = { scene.userProfiles.open(it) },
+            profileDialog = { userName, dismiss, onTagChanged ->
+                PortableUserProfileDialog(app, scene, userName, dismiss, onTagChanged)
+            },
+        )
+        SettingsSection.AiSummary -> aiSettings()
+        SettingsSection.ArticleCategories -> ArticleCategorySettingsScreen(onBack,
+            onHowItWorks = { onNavigate(SettingsSection.CategoryExploration, true) })
+        SettingsSection.CategoryExploration -> ArticleCategoryExplorationScreen(onBack)
+        SettingsSection.Data -> dataSettings()
+        SettingsSection.Debug -> PortableDebugSettings(
+            onOpenAccountSettings = { onNavigate(SettingsSection.Account, true) },
+            app = app,
+            scene = scene,
+            platformVersion = debugPlatformVersion,
+            platformLabel = debugPlatformLabel,
+            platformIcon = debugPlatformIcon,
+            notificationsMessage = debugNotificationsMessage,
+            showNavigation = singlePane,
+            onBack = onBack,
+            onOpenLinkPreviews = { onNavigate(SettingsSection.DebugLinkPreviews, true) },
+            onOpenGlassSettings = { onNavigate(SettingsSection.Glass, true) },
+        )
+        SettingsSection.DebugLinkPreviews -> PortableLinkPreviewsDebugScreen(app, scene, onBack)
+        SettingsSection.Glass -> GlassSettingsRoute(app.settings, onBack)
+        SettingsSection.About -> AboutScreen(
+            versionLabel = app.metadata.versionLabel,
+            appIcon = appIcon,
+            onBack = onBack,
+            onOpenGithub = { scene.links.open(app.metadata.projectUrl) },
+            onOpenSource = { scene.links.open(app.metadata.forkUrl) },
+            onOpenChangelog = scene.navigation::showChangelogDialog,
+            onOpenLicenses = { onNavigate(SettingsSection.Licenses, true) },
+            onOpenPrivacy = { scene.links.open(app.metadata.privacyUrl) },
+            showNavigation = singlePane,
+        )
+        SettingsSection.Licenses -> LicensesScreen(
+            licenses = CommonLicenseCatalog.entries,
+            onBack = onBack,
+            onOpenLicense = { scene.links.open(it) },
+        )
+    }
+}
+
+@Composable
+private fun PortableWebLinksSettings(
+    app: HarmonicAppComposition,
+    capabilities: WebLinksSettingsCapabilities,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onReaderModeRequested: () -> Unit,
+) {
+    var dialog by rememberSaveable { mutableStateOf<WebLinksSettingsDialog?>(null) }
+    val presenter = remember(app.settings) { WebLinksSettingsPresenter(app.settings) }
+    val settings by app.settings.updates.collectAsStateWithLifecycle(initialValue = app.settings.snapshot())
+    val reading = settings.reading
+
+    WebLinksSettingsScreen(
+        state = presenter.state(reading.readerModeFont.label, settings),
+        capabilities = capabilities,
+        showNavigation = showNavigation,
+        onBack = onBack,
+        onBooleanChanged = presenter::setBoolean,
+        onReaderModeRequested = onReaderModeRequested,
+        onDialogRequested = { requested ->
+            if (
+                requested == WebLinksSettingsDialog.Preload ||
+                requested == WebLinksSettingsDialog.ArchiveDomains ||
+                requested == WebLinksSettingsDialog.LinkPreviews ||
+                requested == WebLinksSettingsDialog.NitterInstance
+            ) {
+                dialog = requested
+            }
+        },
+        contentVersion = settings.hashCode(),
+    )
+
+    if (dialog == WebLinksSettingsDialog.Preload) {
+        PreloadWebViewDialog(
+            initialMode = reading.preloadWebViewMode,
+            initialBattery = reading.preloadWebViewMinimumBattery,
+            onSave = presenter::setPreload,
+            onDismiss = { dialog = null },
+        )
+    }
+    if (dialog == WebLinksSettingsDialog.ArchiveDomains) {
+        StringListEditorDialog(
+            title = "Redirect to archive version",
+            subtitle = "Choose domains where Pulse Feed should redirect links to archive.is.",
+            inputLabel = "Domain",
+            initialItems = reading.archiveRedirectDomains,
+            emptyMessage = "No archive redirect domains",
+            suggestedItems = ArchiveRedirectDomainCatalog.suggested,
+            suggestionsLabel = "Suggested domains",
+            parseInput = ArchiveRedirectPolicy::parseDomains,
+            emptyInputError = "Enter a domain",
+            onItemsChanged = presenter::setArchiveDomains,
+            onDismiss = { dialog = null },
+        )
+    }
+    if (dialog == WebLinksSettingsDialog.NitterInstance) {
+        NitterInstanceDialog(
+            initialValue = reading.nitterInstanceUrl,
+            onSave = presenter::setNitterInstanceUrl,
+            onDismiss = { dialog = null },
+        )
+    }
+    if (dialog == WebLinksSettingsDialog.LinkPreviews) {
+        LinkPreviewsSettingsDialog(
+            enabledTypes = reading.enabledLinkPreviews,
+            previewsEnabled = reading.linkPreviewsEnabled,
+            onEnabledChanged = presenter::setLinkPreview,
+            onDismiss = { dialog = null },
+        )
+    }
+}
+
+@Composable
+private fun PortableAppearanceSettings(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onNavigate: (SettingsSection) -> Unit,
+) {
+    fun themeChanged() = app.appearance.refreshSelection()
+
+    AppearanceSettingsRoute(
+        repository = app.settings,
+        labels = AppearanceRouteLabels(
+            showTransparentStatusBar = false,
+        ),
+        showNavigation = showNavigation,
+        onBack = onBack,
+        onNavigate = onNavigate,
+        onThemeChanged = ::themeChanged,
+        onStyleRequested = { scene.navigation.openWelcome(styleChooser = true) },
+    )
+}
+
+@Composable
+private fun PortableThemeSettings(
+    app: HarmonicAppComposition,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+) {
+    fun themeChanged() = app.appearance.refreshSelection()
+    ThemeSettingsRoute(
+        repository = app.settings,
+        labels = ThemeRouteLabels(
+            nighttimeRange = ThemeSelectionPolicy.formatSchedule(
+                app.appearance.schedule,
+                app.platform.timeFormatting.uses24HourClock(),
+            ),
+            activeDark = app.appearance.selection().dark,
+            dynamicColorAvailable = false,
+        ),
+        showNavigation = showNavigation,
+        onBack = onBack,
+        onThemeChanged = ::themeChanged,
+        dialogContent = { dialog, presenter, dismiss ->
+            when (dialog) {
+                ThemeSettingsDialog.NighttimeRange -> NighttimeRangeDialog(
+                    initialHours = app.appearance.schedule.toIntArray(),
+                    is24Hour = app.platform.timeFormatting.uses24HourClock(),
+                    onRangeSelected = { fromHour, fromMinute, toHour, toMinute ->
+                        app.appearance.saveSchedule(
+                            NighttimeSchedule(fromHour, fromMinute, toHour, toMinute),
+                        )
+                        themeChanged()
+                    },
+                    onDismiss = dismiss,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun PortableStoriesSettings(
+    app: HarmonicAppComposition,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onManageFrontpages: () -> Unit,
+    onPaletteTintRequested: () -> Unit,
+    onArticleCategoriesRequested: () -> Unit,
+    onSpacingRequested: () -> Unit,
+) {
+    val story = app.settings.snapshot().story
+    StoriesSettingsRoute(
+        repository = app.settings,
+        categorySettings = app.articleCategorySettings,
+        previewModel = SettingsStoryPreviewModel.copy(
+            tintFallbackArgb = HarmonicTheme.targetColorScheme.cardBackground.toArgb(),
+        ),
+        faviconIcon = faviconProviderPainter(story.faviconProvider),
+        onManageFrontpages = onManageFrontpages,
+        onPaletteTintRequested = onPaletteTintRequested,
+        onArticleCategoriesRequested = onArticleCategoriesRequested,
+        onSpacingRequested = onSpacingRequested,
+        categoryAvailability = storyCategoryAvailability(),
+        showNavigation = showNavigation,
+        onBack = onBack,
+        onPlatformEffect = { effect ->
+            when (effect) {
+                SettingsPlatformEffect.RefreshStoryWidgets -> Unit
+                SettingsPlatformEffect.ThemeChanged -> app.appearance.refreshSelection()
+            }
+        },
+        faviconDialog = { selected, _, onSelected, dismiss ->
+            FaviconProviderRoute(selected, onSelected, dismiss)
+        },
+    )
+}
+
+@Composable
+private fun PortableDebugSettings(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    platformVersion: String,
+    platformLabel: String,
+    platformIcon: DrawableResource,
+    notificationsMessage: String,
+    showNavigation: Boolean,
+    onBack: () -> Unit,
+    onOpenLinkPreviews: () -> Unit,
+    onOpenGlassSettings: () -> Unit,
+    onOpenAccountSettings: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    DebugSettingsRoute(
+        repository = app.settings,
+        debugAccountIdentity = app.debugAccountIdentity,
+        onOpenAccountSettings = onOpenAccountSettings,
+        environment = DebugEnvironmentUiState(
+            appVersion = app.metadata.versionName,
+            appBuild = app.metadata.buildNumber,
+            buildVersion = app.metadata.buildType,
+            platformVersion = platformVersion,
+            platformLabel = platformLabel,
+            platformIcon = platformIcon,
+        ),
+        showNavigation = showNavigation,
+        onBack = onBack,
+        onOpenHnId = { scene.navigation.openStory(StoryDestination(it)) },
+        onOpenUserProfile = { scene.navigation.showUserDialog(it) },
+        onOpenWithoutCache = {
+            scope.launch {
+                app.storyCache.remove(OpenWithoutCacheStoryId)
+                app.network.removeCachedStoryResponses(OpenWithoutCacheStoryId)
+                scene.navigation.openStory(StoryDestination(OpenWithoutCacheStoryId))
+            }
+        },
+        onCachePost = {
+            scope.launch {
+                if (DebugCachedPostFixture.seed(app.storyCache::storeStory)) {
+                    scene.navigation.openStory(DebugCachedPostFixture.story().toDestination())
+                }
+            }
+        },
+        onOpenNewCommentsPost = {
+            scope.launch {
+                if (DebugCachedPostFixture.seed(app.storyCache::storeStory)) {
+                    scene.navigation.openStory(DebugCachedPostFixture.story().toDestination().copy(debugMarkAllCommentsNew = true))
+                }
+            }
+        },
+        onOpenLink = scene.links::open,
+        onOpenLinkPreviews = onOpenLinkPreviews,
+        onOpenGlassSettings = onOpenGlassSettings,
+        onEasterEggRequested = scene.navigation::openCoulombGas,
+        onWelcomeRequested = { scene.navigation.openWelcome() },
+        dialogContent = { dialog, dismiss ->
+            when (dialog) {
+                DebugSettingsDialog.CHANGELOG -> SettingsChangelogDialog(
+                    onDismiss = dismiss,
+                    onOpenGithub = { scene.links.open(app.metadata.projectUrl) },
+                )
+                DebugSettingsDialog.NOTIFICATIONS -> PortableDebugNotificationsDialog(app.replyNotifications, app.accountActivityUsername, dismiss, notificationsMessage)
+            }
+        },
+    )
+}
+
+@Composable
+private fun PortableLinkPreviewsDebugScreen(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    onBack: () -> Unit,
+) {
+    val useCase = remember(app.network.linkPreviewRepository) {
+        LinkPreviewUseCase(app.network.linkPreviewRepository)
+    }
+    LinkPreviewsDebugScreen(
+        comments = app.userSettings.comments,
+        loadPreview = useCase::load,
+        onOpenLink = scene.links::open,
+        onBack = onBack,
+    )
+}
+
+@Composable
+fun PortableWelcomeScreen(
+    app: HarmonicAppComposition,
+    appIcon: Painter,
+    onDismiss: () -> Unit,
+    styleChooser: Boolean = false,
+    contentWindowInsets: WindowInsets = WindowInsets.safeDrawing,
+) {
+    WelcomeScreen(
+        styleChooser = styleChooser,
+        initialExpressive = !styleChooser || app.settings.snapshot().story.displayStyle != DisplayStyle.FLAT,
+        storyPreferences = app.settings.snapshot().story,
+        commentPreferences = app.settings.snapshot().comments,
+        onApplyPreset = { expressive ->
+            app.settings.applyWelcomePreset(expressive)
+            app.appearance.refreshSelection()
+            if (!styleChooser) app.launchState.completeWelcome()
+            onDismiss()
+        },
+        filterButtonColors = harmonicFilterButtonColors(),
+        contentWindowInsets = contentWindowInsets,
+        launcherIcon = {
+            Image(
+                painter = appIcon,
+                contentDescription = null,
+                modifier = Modifier.size(72.dp),
+            )
+        },
+    )
+}

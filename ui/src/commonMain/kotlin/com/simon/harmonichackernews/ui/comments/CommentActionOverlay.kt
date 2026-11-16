@@ -1,0 +1,862 @@
+package com.simon.harmonichackernews.ui.comments
+
+import com.simon.harmonichackernews.ui.common.statusBarScrollToTop
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
+import com.simon.harmonichackernews.ui.content.CommentAuthorBadge
+import kotlin.time.Duration.Companion.milliseconds
+
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.ui.common.ScrollableTextScrollbar
+import com.simon.harmonichackernews.ui.common.fadingScrollEdges
+import com.simon.harmonichackernews.resources.*
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
+import androidx.compose.foundation.verticalScroll
+import com.simon.harmonichackernews.ui.common.Button
+import com.simon.harmonichackernews.ui.common.modalCardTapBoundary
+import com.simon.harmonichackernews.ui.common.predictiveBackVisualProgress
+import com.simon.harmonichackernews.ui.common.rememberGraphicsLayerSnapshot
+import com.simon.harmonichackernews.ui.common.shouldUpdateRestingTargetGeometry
+import androidx.compose.material3.ButtonDefaults
+import com.simon.harmonichackernews.ui.common.HarmonicLoadingIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
+import com.simon.harmonichackernews.ui.common.TextButton
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.computedStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.LinkInteractionListener
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.adapters.CommentDisplaySettings
+import com.simon.harmonichackernews.presentation.PortableCommentItem
+import com.simon.harmonichackernews.presentation.CommentMenuAction
+import com.simon.harmonichackernews.ui.LocalHarmonicUiDependencies
+import com.simon.harmonichackernews.ui.settings.HideCommentsSettingsRoute
+import com.simon.harmonichackernews.ui.content.UserAvatar
+import com.simon.harmonichackernews.ui.content.htmlAnnotatedString
+import com.simon.harmonichackernews.ui.content.commentSurfaceColor
+import com.simon.harmonichackernews.ui.content.rememberContentTypography
+import com.simon.harmonichackernews.ui.common.AnimatedBookmarkIcon
+import com.simon.harmonichackernews.ui.theme.AppUiFontFamily
+import com.simon.harmonichackernews.utils.AgePolicy
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import org.jetbrains.compose.resources.DrawableResource
+import org.jetbrains.compose.resources.painterResource
+
+@Composable
+fun CommentActionOverlay(
+    controller: CommentsScreenController,
+    settings: CommentDisplaySettings,
+    hasAccount: Boolean,
+    bookmarksEnabled: Boolean,
+    textStyle: TextStyle,
+    onOpenLink: (String) -> Unit,
+    onScrimAlphaChanged: (Float) -> Unit = {},
+) {
+    PostAskOverlay(controller, settings, onOpenLink)
+    val state = controller.commentActionOverlay ?: return
+    val commentsHazeState = currentCommentsHazeState()
+    val comment = state.comment
+    val discussionProgress = rememberAskProgress(controller.askOpen, controller.askBackProgress)
+    val discussionVisible by remember(discussionProgress, controller) {
+        computedStateOf { discussionProgress.value > 0f || controller.askOpen }
+    }
+    val discussionSource = rememberGraphicsLayer()
+    var discussionCreated by remember(comment.id) { mutableStateOf(false) }
+    SideEffect {
+        if (controller.askOpen) discussionCreated = true
+        controller.askSurfaceVisible = discussionVisible
+    }
+    DisposableEffect(controller, comment.id) {
+        onDispose {
+            controller.askSurfaceVisible = false
+            controller.closeAsk()
+        }
+    }
+    var rootBounds by remember(comment.id) { mutableStateOf(Rect.Zero) }
+    val cardColor = if (settings.hasBackground) {
+        MaterialTheme.colorScheme.cardBackground
+    } else {
+        MaterialTheme.colorScheme.pageBackground
+    }
+    // Android retains this composition across rotation. The opening gesture's bounds and
+    // layer dimensions can therefore describe a different layout by the time we animate back.
+    // Query the live coordinates on recomposition (including viewport changes and dismissal).
+    // A detached row must use the fade fallback instead of returning to stale window pixels.
+    val sourceGeometry = state.sourceGeometry?.let { captured ->
+        val currentGeometry = captured.currentGeometry
+        if (currentGeometry != null) currentGeometry() else captured
+    }
+    val source = sourceGeometry?.copy(
+        containerColor = commentSurfaceColor(
+            cardColor,
+            MaterialTheme.colorScheme.onSurface,
+            highlighted = controller.highlightedCommentId == comment.id,
+        ),
+        containerBorderColor = MaterialTheme.colorScheme.outlineVariant,
+    )?.takeIf {
+        it.contentLayer?.let { layer ->
+            !layer.isReleased && layer.size.width > 0 && layer.size.height > 0
+        } == true
+    }
+    val density = LocalDensity.current
+    val transformProgress = remember(comment.id) { Animatable(0f) }
+    var targetContainer by remember(comment.id) { mutableStateOf<Rect?>(null) }
+    var targetUserBounds by remember(comment.id) { mutableStateOf<Rect?>(null) }
+    var targetBodyBounds by remember(comment.id) { mutableStateOf<Rect?>(null) }
+    var targetSupplementaryBounds by remember(comment.id) { mutableStateOf<Rect?>(null) }
+    var targetUserLayer by remember(comment.id) { mutableStateOf<GraphicsLayer?>(null) }
+    var targetBodyLayer by remember(comment.id) { mutableStateOf<GraphicsLayer?>(null) }
+    var targetSupplementaryLayer by remember(comment.id) { mutableStateOf<GraphicsLayer?>(null) }
+    var overlayActive by remember(comment.id) { mutableStateOf(false) }
+    var hideTargetContent by remember(comment.id) { mutableStateOf(source != null) }
+    var drawOverlayShadows by remember(comment.id) { mutableStateOf(false) }
+    var openingCompleted by remember(comment.id) { mutableStateOf(false) }
+    var closingStarted by remember(comment.id) { mutableStateOf(false) }
+    var useLiveContent by remember(comment.id) { mutableStateOf(false) }
+    val dismissRequest = controller.commentActionDismissRequest
+    val updateRestingTargetGeometry by remember(controller) {
+        computedStateOf {
+            shouldUpdateRestingTargetGeometry(
+                predictiveBackProgress = controller.commentActionPredictiveBackProgress,
+                dismissRequestVersion = controller.commentActionDismissRequest,
+            )
+        }
+    }
+    val dismissCaptureVersion = if (dismissRequest != 0 && !openingCompleted) 0 else dismissRequest
+    // The same graphics layers are re-recorded at new sizes after rotation. A theme/dismiss
+    // key alone reuses their old bitmaps and stretches them into the new bounds.
+    val snapshotRefreshKey = Triple(MaterialTheme.colorScheme, rootBounds.size, dismissCaptureVersion)
+    val sourceCapture = rememberGraphicsLayerSnapshot(
+        source?.contentLayer,
+        // Re-record the returning row as well as the dialog: its text/depth colors may have changed.
+        snapshotRefreshKey,
+        downsampleOversizedLayer = true,
+    )
+    val targetUserCapture = rememberGraphicsLayerSnapshot(targetUserLayer, snapshotRefreshKey)
+    val targetBodyCapture = rememberGraphicsLayerSnapshot(targetBodyLayer, snapshotRefreshKey)
+    val targetSupplementaryCapture = rememberGraphicsLayerSnapshot(
+        targetSupplementaryLayer,
+        snapshotRefreshKey,
+    )
+    val snapshotsUnavailable = sourceCapture.isUnavailable(snapshotRefreshKey) ||
+        targetUserCapture.isUnavailable(snapshotRefreshKey) ||
+        targetBodyCapture.isUnavailable(snapshotRefreshKey) ||
+        targetSupplementaryCapture.isUnavailable(snapshotRefreshKey)
+    val transitionSource = source?.takeUnless { snapshotsUnavailable || useLiveContent }
+    val snapshotsReady = transitionSource != null &&
+        sourceCapture.isCurrent(snapshotRefreshKey) &&
+        targetContainer != null &&
+        targetUserBounds != null &&
+        targetBodyBounds != null &&
+        targetSupplementaryBounds != null &&
+        targetUserCapture.isCurrent(snapshotRefreshKey) &&
+        targetBodyCapture.isCurrent(snapshotRefreshKey) &&
+        targetSupplementaryCapture.isCurrent(snapshotRefreshKey)
+
+    val canAnimate by rememberUpdatedState(transitionSource != null && snapshotsReady)
+    val openingReady by rememberUpdatedState(targetContainer != null && (transitionSource == null || snapshotsReady))
+    // Geometry and graphics captures may change after backgrounding or during layout. They must
+    // not cancel an in-flight effect after it has hidden the live dialog.
+    LaunchedEffect(comment.id) {
+        val ready = withTimeoutOrNull(600.milliseconds) {
+            snapshotFlow { openingReady }.first { it }
+        } != null
+        if (controller.commentActionDismissRequest != 0) return@LaunchedEffect
+        val sharedOpening = ready && canAnimate
+        if (sharedOpening) {
+            // Cover the still-live row before suppression, eliminating the opening handoff flash.
+            overlayActive = true
+            withFrameNanos { }
+            controller.setCommentActionSourceCovered(true)
+            drawOverlayShadows = true
+            withFrameNanos { }
+        } else {
+            // A restored dialog or failed capture uses a fade over the still-visible source row.
+            useLiveContent = true
+            hideTargetContent = false
+            withFrameNanos { }
+            controller.setCommentActionSourceCovered(false)
+        }
+        transformProgress.animateTo(1f, tween(280, easing = FastOutSlowInEasing))
+        if (sharedOpening) {
+            hideTargetContent = false
+            drawOverlayShadows = false
+            withFrameNanos { }
+            overlayActive = false
+        }
+        openingCompleted = true
+    }
+    LaunchedEffect(dismissRequest) {
+        if (dismissRequest == 0 || closingStarted) {
+            return@LaunchedEffect
+        }
+        withTimeoutOrNull(300.milliseconds) {
+            snapshotFlow { openingReady }.first { it }
+        }
+        closingStarted = true
+        if (canAnimate) {
+            // Put an identical progress-one overlay over the dialog before hiding live content.
+            overlayActive = true
+            withFrameNanos { }
+            hideTargetContent = true
+            drawOverlayShadows = true
+            withFrameNanos { }
+        } else {
+            useLiveContent = true
+            hideTargetContent = false
+            overlayActive = false
+        }
+        transformProgress.animateTo(0f, tween(280, easing = FastOutSlowInEasing))
+        controller.setCommentActionSourceCovered(false)
+        drawOverlayShadows = false
+        withFrameNanos { }
+        controller.completeCommentActionDismiss()
+    }
+    LaunchedEffect(dismissRequest) {
+        if (dismissRequest == 0) return@LaunchedEffect
+        delay(CommentActionDismissFallbackDelayMillis.milliseconds)
+        if (
+            !closingStarted &&
+            controller.commentActionDismissRequest == dismissRequest
+        ) {
+            closingStarted = true
+            controller.setCommentActionSourceCovered(false)
+            controller.completeCommentActionDismiss()
+        }
+    }
+
+    val scrimAlpha = {
+        val progress = transformProgress.value
+        val predictive = predictiveBackVisualProgress(controller.commentActionPredictiveBackProgress, progress)
+        0.32f * progress * (1f - 0.55f * predictive)
+    }
+    val currentOnScrimAlphaChanged by rememberUpdatedState(onScrimAlphaChanged)
+    LaunchedEffect(controller, transformProgress) {
+        snapshotFlow { scrimAlpha() }.collect { currentOnScrimAlphaChanged(it) }
+    }
+    val shape = RoundedCornerShape(HarmonicDimens.compose_comment_action_corner_radius)
+    val sharedTransition = CommentActionSharedTransitionState(
+        progress = { transformProgress.value },
+        active = overlayActive,
+        hideTargetContent = hideTargetContent,
+        drawOverlayShadows = drawOverlayShadows,
+        source = transitionSource,
+        sourceSnapshot = sourceCapture.image,
+        targetContainer = targetContainer,
+        predictiveBackProgress = { controller.commentActionPredictiveBackProgress },
+        predictiveBackEdge = controller.commentActionPredictiveBackEdge,
+        rootBounds = rootBounds,
+        targetBounds = { element ->
+            when (element) {
+                CommentActionTargetElement.User -> targetUserBounds
+                CommentActionTargetElement.Body -> targetBodyBounds
+                CommentActionTargetElement.Supplementary -> targetSupplementaryBounds
+            }
+        },
+        targetSnapshot = { element ->
+            when (element) {
+                CommentActionTargetElement.User -> targetUserCapture.image
+                CommentActionTargetElement.Body -> targetBodyCapture.image
+                CommentActionTargetElement.Supplementary -> targetSupplementaryCapture.image
+            }
+        },
+        updateTargetBounds = { element, bounds ->
+            if (updateRestingTargetGeometry) {
+                when (element) {
+                    CommentActionTargetElement.User -> if (targetUserBounds != bounds) {
+                        targetUserBounds = bounds
+                    }
+                    CommentActionTargetElement.Body -> if (targetBodyBounds != bounds) {
+                        targetBodyBounds = bounds
+                    }
+                    CommentActionTargetElement.Supplementary ->
+                        if (targetSupplementaryBounds != bounds) {
+                            targetSupplementaryBounds = bounds
+                        }
+                }
+            }
+        },
+        updateTargetLayer = { element, layer ->
+            when (element) {
+                CommentActionTargetElement.User -> if (targetUserLayer !== layer) {
+                    targetUserLayer = layer
+                }
+                CommentActionTargetElement.Body -> if (targetBodyLayer !== layer) {
+                    targetBodyLayer = layer
+                }
+                CommentActionTargetElement.Supplementary ->
+                    if (targetSupplementaryLayer !== layer) {
+                        targetSupplementaryLayer = layer
+                    }
+            }
+        },
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { rootBounds = it.boundsInWindow() },
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .drawBehind { drawRect(Color.Black.copy(alpha = scrimAlpha())) }
+                // This scrim owns the touch sequence. An additional gesture consumer would
+                // cancel clickable on even a tiny move between the finger going down and up.
+                .clickable(
+                    enabled = dismissRequest == 0,
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = controller::requestDismissCommentActions,
+                ),
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .commentsHazeSource(
+                    hazeState = commentsHazeState,
+                    zIndex = CommentsModalHazeSourceZIndex,
+                ),
+        ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(
+                    horizontal = HarmonicDimens.compose_comment_action_screen_padding_horizontal,
+                    vertical = HarmonicDimens.compose_comment_action_screen_padding_vertical,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            val fallbackPresentation = Modifier.graphicsLayer {
+                val progress = transformProgress.value
+                val predictive = predictiveBackVisualProgress(controller.commentActionPredictiveBackProgress, progress)
+                val direction = if (controller.commentActionPredictiveBackEdge == 1) -1f else 1f
+                val scale = 1f - 0.1f * predictive
+                val fallbackScale = if (transitionSource == null) 0.96f + 0.04f * progress else 1f
+                scaleX = fallbackScale * scale
+                scaleY = scaleX
+                if (transitionSource == null) alpha = progress
+                translationX = 56.dp.toPx() * predictive * direction
+                translationY = 18.dp.toPx() * predictive
+                transformOrigin = TransformOrigin(if (direction > 0f) 0f else 1f, 0.5f)
+            }
+            Box(
+                modifier = Modifier
+                    .widthIn(
+                        max = if (settings.isTablet) {
+                            HarmonicDimens.compose_comment_action_tablet_max_width
+                        } else {
+                            HarmonicDimens.compose_comment_action_max_width
+                        },
+                    )
+                    .fillMaxWidth()
+                    .onGloballyPositioned {
+                        if (updateRestingTargetGeometry) {
+                            targetContainer = it.boundsInWindow()
+                        }
+                    }
+                    .then(fallbackPresentation)
+                    .drawWithContent {
+                        if (discussionProgress.value > 0f) {
+                            clipRect(0f, 0f, 0f, 0f) { this@drawWithContent.drawContent() }
+                        } else {
+                            drawContent()
+                        }
+                    }
+                    .then(if (discussionVisible) Modifier.clearAndSetSemantics { } else Modifier)
+                    .modalCardTapBoundary(
+                        cornerRadius = HarmonicDimens.compose_comment_action_corner_radius,
+                        onOutsideTap = controller::requestDismissCommentActions,
+                    ),
+            ) {
+                CompositionLocalProvider(
+                    LocalCommentActionSharedTransition provides
+                        sharedTransition.takeIf { source != null },
+                ) {
+                    CommentActionContainerBackground(cardColor)
+                    // Capture content only. A captured rounded background produces a second
+                    // bottom edge when width-fit content is shorter than the moving container.
+                    Box(Modifier.fillMaxWidth().clip(shape).drawWithContent {
+                        discussionSource.record { this@drawWithContent.drawContent() }
+                        drawLayer(discussionSource)
+                    }) {
+                        CommentActionCardContent(
+                            controller = controller,
+                            settings = settings,
+                            comment = comment,
+                            hasAccount = hasAccount,
+                            bookmarksEnabled = bookmarksEnabled,
+                            textStyle = textStyle,
+                            onOpenLink = onOpenLink,
+                            onAsk = {
+                                if (openingCompleted && !closingStarted) {
+                                    discussionCreated = true
+                                    controller.openCommentAsk()
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        CommentActionTransitionOverlay(sharedTransition, cardColor)
+        if (discussionCreated) {
+            AskSurface(
+                controller = controller,
+                subject = remember(comment.id) {
+                    com.simon.harmonichackernews.summary.AskSource.Comment(
+                        controller.story, comment, controller.comments.toList(),
+                    )
+                },
+                origin = targetContainer?.translate(-rootBounds.left, -rootBounds.top) ?: Rect.Zero,
+                progress = { discussionProgress.value },
+                source = discussionSource,
+                settings = settings,
+                color = cardColor,
+                onOpenLink = onOpenLink,
+            )
+        }
+        }
+    }
+}
+
+@Composable
+private fun CommentActionCardContent(
+    controller: CommentsScreenController,
+    settings: CommentDisplaySettings,
+    comment: PortableCommentItem,
+    hasAccount: Boolean,
+    bookmarksEnabled: Boolean,
+    textStyle: TextStyle,
+    onOpenLink: (String) -> Unit,
+    onAsk: () -> Unit,
+) {
+    val bookmarked = remember(controller.contentVersion, comment.id, bookmarksEnabled) {
+        bookmarksEnabled && controller.isBookmarked(comment.id)
+    }
+    val favorited = remember(controller.contentVersion, comment.id) {
+        controller.isFavorited(comment.id)
+    }
+    val upvoted = remember(controller.contentVersion, comment.id) {
+        controller.isUpvoted(comment.id, isComment = true)
+    }
+    val downvoted = !upvoted && comment.id in controller.commentActionDownvotedIds
+    val voteLoading = controller.commentActionVoteLoadingId == comment.id
+    val favoriteLoading = controller.commentActionFavoriteLoadingId == comment.id
+    val canReply = hasAccount && !AgePolicy.isOlderThanTwoWeeks(comment.time)
+    val typography = rememberContentTypography(settings.font, settings.preferredTextSize)
+    val commentTextSize = settings.preferredTextSize - 1f
+    val largeUserLabel = LocalDensity.current.fontScale > 1f
+    val author = comment.by?.takeIf(String::isNotBlank)
+    val linkListener = remember(onOpenLink) {
+        LinkInteractionListener { link ->
+            val url = (link as? LinkAnnotation.Url)?.url ?: return@LinkInteractionListener
+            onOpenLink(url)
+        }
+    }
+    val linkColor = MaterialTheme.colorScheme.primary
+    val body = remember(comment.expandedAnchorText, linkColor, linkListener) {
+        htmlAnnotatedString(
+            comment.expandedAnchorText.orEmpty(),
+            linkColor,
+            linkListener,
+            highlightQuotes = false,
+        )
+    }
+    val bodyScrollState = rememberScrollState()
+
+    val cardScrollState = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .statusBarScrollToTop(enabled = !controller.askSurfaceVisible, priority = 1) {
+                cardScrollState.animateScrollTo(0)
+                bodyScrollState.animateScrollTo(0)
+            }
+            .verticalScroll(cardScrollState)
+            .padding(HarmonicDimens.compose_comment_action_card_padding),
+    ) {
+        CommentActionTarget(CommentActionTargetElement.User) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(
+                    onClick = {
+                        controller.dismissCommentActionsThen(
+                            comment,
+                            CommentMenuAction.USER,
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    ),
+                    contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
+                    modifier = Modifier.weight(1f, fill = false).padding(end = 12.dp).then(if (largeUserLabel) Modifier.heightIn(min = 40.dp) else Modifier.height(40.dp)),
+                ) {
+                    if (settings.userAvatarsEnabled && author != null) {
+                        UserAvatar(
+                            author = author,
+                            options = settings.userAvatarOptions,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    } else {
+                        Icon(painterResource(Res.drawable.ic_account_circle), contentDescription = null)
+                    }
+                    Text(
+                        author ?: "Unknown user",
+                        modifier = Modifier.weight(1f, fill = false).padding(start = 8.dp),
+                        fontFamily = AppUiFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = if (largeUserLabel) Int.MAX_VALUE else 1,
+                    )
+                    if (author != null && author == controller.story.by) {
+                        CommentAuthorBadge("OP", LocalContentColor.current, AppUiFontFamily)
+                    }
+                }
+                if (settings.canAsk) {
+                    TextButton(
+                        onClick = onAsk,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                    ) {
+                        Icon(painterResource(Res.drawable.ic_auto_awesome), contentDescription = null,
+                            modifier = Modifier.size(20.dp))
+                        Text("Ask", modifier = Modifier.padding(start = 6.dp), fontFamily = AppUiFontFamily)
+                    }
+                }
+            }
+        }
+
+        CommentActionTarget(
+            element = CommentActionTargetElement.Body,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            // Handles are separate popup windows, so they cannot share the card's scale.
+            // Fade them before the card moves appreciably, retaining the selected range so
+            // cancelling the gesture brings the same handles back at their resting positions.
+            val selectionColors = LocalTextSelectionColors.current
+            val handlesAlpha = if (controller.commentActionDismissRequest != 0) 0f else
+                (1f - controller.commentActionPredictiveBackProgress / 0.08f).coerceIn(0f, 1f)
+            CompositionLocalProvider(LocalTextSelectionColors provides TextSelectionColors(
+                handleColor = selectionColors.handleColor.copy(alpha = selectionColors.handleColor.alpha * handlesAlpha),
+                backgroundColor = selectionColors.backgroundColor,
+            )) {
+                SelectionContainer {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = HarmonicDimens.compose_comment_action_text_max_height),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .fadingScrollEdges(bodyScrollState)
+                                .verticalScroll(bodyScrollState)
+                                .padding(start = 6.dp, top = 14.dp, end = 12.dp, bottom = 14.dp),
+                        ) {
+                            Text(
+                                text = body,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontFamily = typography.family,
+                                fontSize = commentTextSize.sp,
+                                lineHeight = androidx.compose.ui.unit.TextUnit.Unspecified,
+                                style = textStyle,
+                            )
+                        }
+                        ScrollableTextScrollbar(
+                            state = bodyScrollState,
+                            modifier = Modifier.matchParentSize(),
+                        )
+                    }
+                }
+            }
+        }
+
+        CommentActionTarget(
+            element = CommentActionTargetElement.Supplementary,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                val placeholder = comment.text?.trim()
+                if (placeholder in setOf("[flagged]", "[dead]", "[delayed]", "[deleted]", "[removed]")) {
+                    val navigation = LocalHarmonicUiDependencies.current.navigation
+                    Button(
+                        // Keep the dialog and its source alive beneath Settings so Back restores it.
+                        onClick = { navigation.openSettings(HideCommentsSettingsRoute) },
+                        modifier = Modifier.align(Alignment.End).padding(bottom = 10.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                        elevation = null,
+                        contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
+                    ) {
+                        Icon(painterResource(Res.drawable.ic_settings), contentDescription = null,
+                            modifier = Modifier.size(20.dp))
+                        Text("Toggle visibility of $placeholder",
+                            modifier = Modifier.padding(start = 8.dp), fontFamily = AppUiFontFamily)
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (hasAccount) {
+                        CommentActionIcon(
+                            icon = if (upvoted) Res.drawable.ic_thumb_up_filled else Res.drawable.ic_thumb_up,
+                            description = if (upvoted) "Upvoted" else "Vote up",
+                            loading = voteLoading &&
+                                controller.commentActionVoteLoadingAction ==
+                                CommentMenuAction.UPVOTE,
+                            enabled = !voteLoading,
+                        ) {
+                            controller.listener.onCommentAction(
+                                comment,
+                                CommentMenuAction.UPVOTE,
+                            )
+                        }
+                        CommentActionIcon(
+                            icon = if (downvoted) Res.drawable.ic_thumb_down_filled else Res.drawable.ic_thumb_down,
+                            description = if (downvoted) "Downvoted" else "Vote down",
+                            loading = voteLoading &&
+                                controller.commentActionVoteLoadingAction ==
+                                CommentMenuAction.DOWNVOTE,
+                            enabled = !voteLoading,
+                        ) {
+                            controller.listener.onCommentAction(
+                                comment,
+                                CommentMenuAction.DOWNVOTE,
+                            )
+                        }
+                        CommentActionIcon(
+                            icon = Res.drawable.ic_thumbs_up_down_unvote,
+                            description = "Unvote",
+                            loading = voteLoading &&
+                                controller.commentActionVoteLoadingAction ==
+                                CommentMenuAction.UNVOTE,
+                            enabled = !voteLoading,
+                        ) {
+                            controller.listener.onCommentAction(
+                                comment,
+                                CommentMenuAction.UNVOTE,
+                            )
+                        }
+                    }
+                    if (bookmarksEnabled) {
+                        CommentActionIcon(
+                            icon = if (bookmarked) Res.drawable.ic_bookmark_filled else Res.drawable.ic_bookmark,
+                            description = if (bookmarked) "Remove bookmark" else "Bookmark",
+                            iconContent = { AnimatedBookmarkIcon(bookmarked, comment.id) },
+                        ) {
+                            controller.listener.onCommentAction(
+                                comment,
+                                CommentMenuAction.BOOKMARK,
+                            )
+                        }
+                    }
+                    if (hasAccount) {
+                        CommentActionIcon(
+                            icon = if (favorited) Res.drawable.ic_star_filled else Res.drawable.ic_star,
+                            description = if (favorited) "Remove favorite" else "Favorite",
+                            loading = favoriteLoading,
+                            enabled = !favoriteLoading,
+                        ) {
+                            controller.listener.onCommentAction(
+                                comment,
+                                CommentMenuAction.FAVORITE,
+                            )
+                        }
+                    }
+                    CommentActionIcon(Res.drawable.ic_content_copy, "Copy text") {
+                        controller.listener.onCommentAction(
+                            comment,
+                            CommentMenuAction.COPY,
+                        )
+                    }
+                    CommentActionIcon(Res.drawable.ic_share, "Share link") {
+                        controller.listener.onCommentAction(
+                            comment,
+                            CommentMenuAction.SHARE,
+                        )
+                    }
+                }
+
+                if (canReply) {
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            controller.dismissCommentActionsThen(
+                                comment,
+                                CommentMenuAction.REPLY,
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                    ) {
+                        Icon(painterResource(Res.drawable.ic_reply), contentDescription = null)
+                        Text(
+                            "Reply",
+                            modifier = Modifier.padding(start = 8.dp),
+                            fontFamily = AppUiFontFamily,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.CommentActionIcon(
+    icon: DrawableResource,
+    description: String,
+    loading: Boolean = false,
+    enabled: Boolean = true,
+    iconContent: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .weight(1f)
+            .height(48.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (iconContent != null) {
+            CommentsTooltip(description) {
+                IconButton(onClick = onClick, enabled = enabled) { iconContent() }
+            }
+            return@Box
+        }
+        AnimatedContent(
+            targetState = CommentActionVisual(icon, description, loading),
+            transitionSpec = {
+                (
+                    fadeIn(
+                        tween(
+                            durationMillis = CommentActionIconSwapInDurationMillis,
+                            delayMillis = CommentActionIconSwapOutDurationMillis,
+                        ),
+                    ) + scaleIn(
+                        animationSpec = tween(
+                            durationMillis = CommentActionIconSwapInDurationMillis,
+                            delayMillis = CommentActionIconSwapOutDurationMillis,
+                        ),
+                        initialScale = CommentActionIconSwapMinScale,
+                    )
+                ).togetherWith(
+                    fadeOut(tween(CommentActionIconSwapOutDurationMillis)) + scaleOut(
+                        animationSpec = tween(CommentActionIconSwapOutDurationMillis),
+                        targetScale = CommentActionIconSwapMinScale,
+                    ),
+                )
+            },
+            contentAlignment = Alignment.Center,
+            label = "comment action icon",
+        ) { visual ->
+            if (visual.loading) {
+                HarmonicLoadingIndicator(Modifier.size(28.dp))
+            } else {
+                CommentsTooltip(visual.description) {
+                    IconButton(onClick = onClick, enabled = enabled) {
+                        Icon(
+                            painterResource(visual.icon),
+                            contentDescription = visual.description,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private const val CommentActionIconSwapOutDurationMillis = 90
+private const val CommentActionIconSwapInDurationMillis = 150
+private const val CommentActionIconSwapMinScale = 0.72f
+private const val CommentActionDismissFallbackDelayMillis = 460L
+
+private data class CommentActionVisual(
+    val icon: DrawableResource,
+    val description: String,
+    val loading: Boolean,
+)

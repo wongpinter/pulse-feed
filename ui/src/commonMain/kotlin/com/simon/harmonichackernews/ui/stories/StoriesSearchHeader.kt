@@ -1,0 +1,271 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
+package com.simon.harmonichackernews.ui.stories
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import com.simon.harmonichackernews.ui.content.HarmonicDropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.simon.harmonichackernews.resources.Res
+import com.simon.harmonichackernews.resources.ic_arrow_back
+import com.simon.harmonichackernews.resources.ic_close
+import com.simon.harmonichackernews.resources.ic_history
+import com.simon.harmonichackernews.presentation.StorySearchOption
+import org.jetbrains.compose.resources.painterResource
+
+data class StorySearchPresentationState(
+    val active: Boolean,
+    val draft: String,
+    val suppressAutoFocus: Boolean,
+    val sortLabel: String,
+    val dateLabel: String,
+    val pointsLabel: String,
+    val commentsLabel: String,
+    val sortLabels: List<String>,
+    val dateLabels: List<String>,
+    val pointsLabels: List<String>,
+    val commentsLabels: List<String>,
+    val onlyRead: Boolean,
+)
+
+@Composable
+fun StorySearchHeader(
+    state: StorySearchPresentationState,
+    sideStart: Dp,
+    sideEnd: Dp,
+    iconColor: Color,
+    menuColor: Color,
+    menuTextColor: Color,
+    fontFamily: FontFamily,
+    onDraftChanged: (String) -> Unit,
+    onSearch: (String) -> Unit,
+    onClose: () -> Unit,
+    consumeFocusRequest: () -> Boolean,
+    onOptionSelected: (kind: StorySearchOption, index: Int) -> Unit,
+    onToggleOnlyRead: () -> Unit,
+) {
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val focusRequester = remember { FocusRequester() }
+    val chipListState = rememberLazyListState()
+    val submission = remember(state.active) { SearchQuerySubmission(state.draft) }
+    SideEffect { submission.synchronizeDraft(state.draft) }
+    val colorScheme = MaterialTheme.colorScheme
+    val searchContainerColor = if (colorScheme.surface.luminance() > 0.5f) {
+        colorScheme.onSurface.copy(alpha = 0.04f).compositeOver(colorScheme.surfaceContainerHighest)
+    } else {
+        colorScheme.surfaceContainerHighest
+    }
+    LaunchedEffect(state.active, state.suppressAutoFocus) {
+        if (state.active && !state.suppressAutoFocus) {
+            if (consumeFocusRequest()) {
+                focusRequester.requestFocus()
+                keyboard?.show()
+            }
+        } else {
+            keyboard?.hide()
+            focusManager.clearFocus(force = true)
+        }
+    }
+
+    Column {
+        TextField(
+            value = state.draft,
+            onValueChange = { value ->
+                val correctedQuery = submission.updateDraft(value)
+                onDraftChanged(value)
+                correctedQuery?.let(onSearch)
+            },
+            placeholder = { Text("Search posts") },
+            leadingIcon = {
+                IconButton(
+                    onClick = {
+                        submission.startEditing()
+                        keyboard?.hide()
+                        focusManager.clearFocus()
+                        onClose()
+                    },
+                ) {
+                    Icon(painterResource(Res.drawable.ic_arrow_back), "Back", tint = iconColor)
+                }
+            },
+            trailingIcon = {
+                AnimatedVisibility(
+                    visible = state.draft.isNotEmpty(),
+                    enter = fadeIn(tween(100)),
+                    exit = fadeOut(tween(100)),
+                    label = "clear search button",
+                ) {
+                    IconButton(
+                        onClick = {
+                            submission.startEditing()
+                            submission.updateDraft("")
+                            onDraftChanged("")
+                            focusRequester.requestFocus()
+                            keyboard?.show()
+                        },
+                    ) {
+                        Icon(painterResource(Res.drawable.ic_close), "Clear search", tint = iconColor)
+                    }
+                }
+            },
+            singleLine = true,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = {
+                // IME text updates can arrive before recomposition or after this action when
+                // focus is cleared. Submit the current draft and follow any final correction.
+                onSearch(submission.submit())
+                keyboard?.hide()
+                focusManager.clearFocus()
+            }),
+            shape = RoundedCornerShape(32.dp),
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = searchContainerColor,
+                unfocusedContainerColor = searchContainerColor,
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = sideStart, end = sideEnd)
+                .focusRequester(focusRequester)
+                .onFocusChanged { if (it.isFocused) submission.startEditing() },
+        )
+        HeaderChipRow(
+            state = chipListState,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            contentPadding = PaddingValues(start = sideStart + 4.dp, end = sideEnd),
+        ) {
+            item { SearchOptionChip(state.sortLabel, state.sortLabels, iconColor, menuColor, menuTextColor, fontFamily) { onOptionSelected(StorySearchOption.SORT, it) } }
+            item { SearchOptionChip(state.dateLabel, state.dateLabels, iconColor, menuColor, menuTextColor, fontFamily) { onOptionSelected(StorySearchOption.DATE, it) } }
+            item { SearchOptionChip(state.pointsLabel, state.pointsLabels, iconColor, menuColor, menuTextColor, fontFamily) { onOptionSelected(StorySearchOption.POINTS, it) } }
+            item { SearchOptionChip(state.commentsLabel, state.commentsLabels, iconColor, menuColor, menuTextColor, fontFamily) { onOptionSelected(StorySearchOption.COMMENTS, it) } }
+            item {
+                FilterChip(
+                    selected = state.onlyRead,
+                    onClick = onToggleOnlyRead,
+                    elevation = FilterChipDefaults.filterChipElevation(hoveredElevation = 0.dp),
+                    label = { Text("From history") },
+                    leadingIcon = { Icon(painterResource(Res.drawable.ic_history), null, Modifier.size(18.dp)) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchOptionChip(
+    label: String,
+    labels: List<String>,
+    iconColor: Color,
+    menuColor: Color,
+    menuTextColor: Color,
+    fontFamily: FontFamily,
+    onSelected: (Int) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        FilterChip(
+            selected = false,
+            onClick = { expanded = true },
+            // A hover shadow bleeds through the transparent chip around its animated label.
+            // Keep the chip flat; Material's hover state layer still provides feedback.
+            elevation = FilterChipDefaults.filterChipElevation(hoveredElevation = 0.dp),
+            label = {
+                // Resize the label inside the chip so its border follows every frame. Resizing
+                // an outer box instead clips a fully sized chip at the old trailing edge.
+                AnimatedContent(
+                    targetState = label,
+                    transitionSpec = {
+                        (fadeIn(tween(60, delayMillis = 140)) togetherWith fadeOut(tween(35)))
+                            .using(SizeTransform(clip = false) { initialSize, targetSize ->
+                                // Let a long outgoing label disappear before the surface contracts;
+                                // reveal the incoming label only once its complete width is ready.
+                                if (targetSize.width < initialSize.width) {
+                                    tween(105, delayMillis = 35)
+                                } else {
+                                    tween(140)
+                                }
+                            })
+                    },
+                    contentAlignment = Alignment.CenterStart,
+                    label = "search filter label",
+                ) { visibleLabel ->
+                    Text(visibleLabel, maxLines = 1, softWrap = false)
+                }
+            },
+            border = BorderStroke(1.dp, iconColor),
+        )
+        HarmonicDropdownMenu(
+            expanded = expanded,
+            onDismiss = { expanded = false },
+            modifier = Modifier.width(196.dp),
+            containerColor = menuColor,
+        ) {
+            labels.forEachIndexed { index, option ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = option,
+                            color = menuTextColor,
+                            fontFamily = fontFamily,
+                            fontSize = 16.sp,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelected(index)
+                    },
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    trailingIcon = { RadioButton(selected = option == label, onClick = null) },
+                )
+            }
+        }
+    }
+}

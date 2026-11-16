@@ -1,0 +1,408 @@
+package com.simon.harmonichackernews.ui.settings
+
+import com.simon.harmonichackernews.settings.ColorSchemeStyle
+
+import androidx.compose.ui.graphics.painter.Painter
+import com.simon.harmonichackernews.settings.CollectedLinksMode
+import com.simon.harmonichackernews.settings.CommentDepthPreferences
+import com.simon.harmonichackernews.settings.CommentIndicatorThickness
+import com.simon.harmonichackernews.settings.DisplayStyle
+import com.simon.harmonichackernews.data.LinkPreviewType
+import com.simon.harmonichackernews.settings.AppFont
+import com.simon.harmonichackernews.settings.AppSettings
+import com.simon.harmonichackernews.settings.AppSettingsRepository
+import com.simon.harmonichackernews.settings.AppearanceBooleanPreference
+import com.simon.harmonichackernews.settings.CommentSortingPreference
+import com.simon.harmonichackernews.settings.CommentVolumeNavigationMode
+import com.simon.harmonichackernews.settings.CommentsProvider
+import com.simon.harmonichackernews.settings.ContentFilterRepository
+import com.simon.harmonichackernews.settings.ContentFilterType
+import com.simon.harmonichackernews.settings.PaletteTintPreferences
+import com.simon.harmonichackernews.settings.StoryBooleanPreference
+import com.simon.harmonichackernews.settings.StoryPreviewMode
+import com.simon.harmonichackernews.settings.StoryStringPreference
+import com.simon.harmonichackernews.settings.TextPreferences
+import com.simon.harmonichackernews.settings.UserTagsRepository
+import com.simon.harmonichackernews.settings.WebViewPreloadMode
+import com.simon.harmonichackernews.ui.content.StoryRowModel
+
+/** Platform work requested by a portable settings action. */
+enum class SettingsPlatformEffect { RefreshStoryWidgets, ThemeChanged }
+
+class StoriesSettingsPresenter(
+    private val repository: AppSettingsRepository,
+) {
+    fun state(
+        settings: AppSettings = repository.snapshot(),
+        previewModel: StoryRowModel,
+        faviconIcon: Painter,
+    ): StoriesSettingsUiState {
+        val story = settings.story
+        return StoriesSettingsUiState(
+            previewModel = previewModel,
+            spacing = story.spacing,
+            showDividers = story.showDividers,
+            categoryTagLocation = story.categoryTagLocation,
+            previewImageMode = story.previewImageMode,
+            borderlessLargeImage = story.borderlessLargePreviewImage,
+            compact = story.compactView,
+            showPreviewText = story.showPreviewText,
+            showFavicons = story.showFavicons,
+            showPoints = story.showPoints,
+            compactPoints = story.compactPoints,
+            includeTopLevelDomain = story.includeTopLevelDomain,
+            showComments = story.showCommentsCount,
+            showIndex = story.showIndex,
+            commentsButtonOnLeft = story.commentsButtonOnLeft,
+            tint = story.tintCardsFromImages,
+            displayStyle = story.displayStyle.storedValue,
+            textSize = story.storyTextSize,
+            textSizeOffset = TextPreferences.storyTextSizeOffset(story.storyTextSize),
+            minTextSizeOffset = TextPreferences.MIN_TEXT_SIZE_OFFSET,
+            maxTextSizeOffset = TextPreferences.MAX_TEXT_SIZE_OFFSET,
+            hotnessEnabled = story.hotnessThreshold != -1,
+            hotnessLabel = hotnessLabel(story.hotnessThreshold),
+            preferredFont = story.font,
+            paletteTintConfigKey = story.paletteTintConfigKey,
+            startingPage = story.preferredStoryType,
+            alwaysOpenComments = story.alwaysOpenComments,
+            pagination = story.pagination,
+            hideRead = story.hideRead,
+            swipeToHide = story.swipeToHide,
+            dimReadStories = story.dimReadStories,
+            markScrolledPostsRead = story.markScrolledPostsRead,
+            faviconProvider = story.faviconProvider,
+            faviconIcon = faviconIcon,
+        )
+    }
+
+    fun setBoolean(
+        setting: StoriesBooleanSetting,
+        value: Boolean,
+    ): Set<SettingsPlatformEffect> {
+        repository.setStoryBoolean(setting.preference, value)
+        return buildSet {
+            if (setting == StoriesBooleanSetting.IncludeTopLevelDomain ||
+                setting == StoriesBooleanSetting.ShowIndex
+            ) add(SettingsPlatformEffect.RefreshStoryWidgets)
+        }
+    }
+
+    fun setString(setting: StoriesStringSetting, value: String) =
+        repository.setStoryString(setting.preference, value)
+
+    fun setPreviewImageMode(value: StoryPreviewMode) = repository.setStoryPreviewMode(value)
+
+    fun setTextSizeOffset(offset: Int) =
+        repository.setStoryTextSize(TextPreferences.storyTextSizeForOffset(offset))
+
+    fun setHotness(value: String) = repository.setHotness(value.toIntOrNull() ?: -1)
+
+    fun setStartingPage(value: String): Set<SettingsPlatformEffect> {
+        repository.setPreferredStoryType(value)
+        return emptySet()
+    }
+
+    fun setAdditionalFrontpages(value: Set<String>): Set<SettingsPlatformEffect> {
+        repository.setAdditionalFrontpages(value)
+        return emptySet()
+    }
+
+    fun setFaviconProvider(value: String) = repository.setFaviconProvider(value)
+
+    fun resetLayout(): Set<SettingsPlatformEffect> {
+        repository.resetStoryLayout()
+        return setOf(SettingsPlatformEffect.RefreshStoryWidgets)
+    }
+
+    val snapshot: AppSettings get() = repository.snapshot()
+}
+
+class CommentsSettingsPresenter(
+    private val repository: AppSettingsRepository,
+) {
+    fun state(settings: AppSettings = repository.snapshot()): CommentsSettingsUiState {
+        val comments = settings.comments
+        return CommentsSettingsUiState(
+            spacing = comments.spacing,
+            displayStyle = comments.displayStyle,
+            textSize = comments.textSize,
+            textSizeOffset = TextPreferences.commentTextSizeOffset(comments.textSize),
+            minTextSizeOffset = TextPreferences.MIN_TEXT_SIZE_OFFSET,
+            maxTextSizeOffset = TextPreferences.MAX_TEXT_SIZE_OFFSET,
+            collectLinks = comments.collectReferenceLinks,
+            expandedReferenceLinks = comments.expandedReferenceLinks,
+            emphasizeMetadata = comments.highlightMetadata,
+            depthMode = comments.depthIndicatorMode,
+            indicatorThickness = comments.indicatorThickness,
+            highlightQuotes = comments.highlightQuotes,
+            quoteSpacing = comments.quoteSpacing,
+            quoteHighlightColor = comments.quoteHighlightColor,
+            quoteHighlightStyle = comments.quoteHighlightStyle,
+            quotePadding = comments.quotePadding,
+            roundedDepthIndicators = comments.roundedDepthIndicators,
+            continuousDepthIndicators = comments.continuousDepthIndicators,
+            userAvatarsEnabled = comments.userAvatarsEnabled,
+            userAvatarOptions = comments.userAvatarOptions,
+            depthModeLabel = CommentDepthPreferences
+                .modeLabel(comments.depthIndicatorMode),
+            showDividers = comments.showDividers,
+            markNewComments = comments.markNewComments,
+            preferredFont = comments.font,
+            topLevelIndicators = comments.showTopLevelDepthIndicator,
+            showScrollbar = comments.showScrollbar,
+            animateChanges = comments.animateChanges,
+            storyTintEnabled = settings.story.tintCardsFromImages,
+            showUpButton = comments.showUpButton,
+            peekStoryHeader = comments.peekStoryHeader,
+            headerTint = comments.headerTintEnabled,
+            storyPreviewEnabled = settings.story.previewImageMode != StoryPreviewMode.OFF,
+            headerPreviewImage = comments.headerPreviewImageEnabled,
+            collapseParent = comments.collapseParent,
+            collapseTopLevel = comments.collapseTopLevel,
+            hideDelayedComments = comments.hideDelayedComments,
+            hideDeadComments = comments.hideDeadComments,
+            hideFlaggedComments = comments.hideFlaggedComments,
+            preloadCommentsSummary = comments.preloadCommentsMode.summary(
+                comments.preloadCommentsMinimumBattery,
+            ),
+            swapTap = comments.swapLongPressTap,
+            swipeBack = comments.swipeBack,
+            sorting = comments.sorting,
+            provider = settings.reading.commentsProvider,
+            showNavigationButtons = comments.showNavigationButtons,
+            volumeNavigation = comments.volumeNavigationMode,
+            smoothScroll = comments.smoothScroll,
+        )
+    }
+
+    fun setCollectedLinksMode(mode: CollectedLinksMode) =
+        repository.setCollectedLinksMode(mode)
+
+    fun setDisplayStyle(value: DisplayStyle) = repository.setCommentDisplayStyle(value)
+    fun setTextSizeOffset(offset: Int) =
+        repository.setCommentTextSize(TextPreferences.commentTextSizeForOffset(offset))
+
+    fun setBoolean(setting: CommentsBooleanSetting, value: Boolean) =
+        repository.setCommentBoolean(setting.preference, value)
+
+    fun setSorting(value: String) =
+        repository.setCommentSorting(CommentSortingPreference.fromStored(value))
+
+    fun setProvider(value: String) =
+        repository.setCommentsProvider(CommentsProvider.fromStored(value))
+
+    fun setVolumeNavigation(value: String) = repository.setCommentsVolumeNavigation(
+        CommentVolumeNavigationMode.fromStored(value),
+    )
+
+    fun setDepthIndicatorMode(value: String) = repository.setCommentDepthIndicatorMode(value)
+    fun setIndicatorThickness(value: CommentIndicatorThickness) =
+        repository.setCommentIndicatorThickness(value)
+    fun setPreload(mode: WebViewPreloadMode, minimumBattery: Int) =
+        repository.setCommentsPreload(mode, minimumBattery)
+}
+
+class WebLinksSettingsPresenter(
+    private val repository: AppSettingsRepository,
+) {
+    fun state(
+        fontLabel: String,
+        settings: AppSettings = repository.snapshot(),
+    ): WebLinksSettingsUiState {
+        val reading = settings.reading
+        return WebLinksSettingsUiState(
+            integratedWebView = reading.integratedWebView,
+            closeWebViewOnBack = reading.closeWebViewOnBack,
+            preloadSummary = reading.preloadWebViewMode.summary(reading.preloadWebViewMinimumBattery),
+            matchWebViewTheme = reading.matchWebViewTheme,
+            blockWebViewAds = reading.blockAds,
+            readerModeEnabled = reading.readerModeEnabled,
+            readerModeDefault = reading.readerModeDefault,
+            readerModeFontLabel = fontLabel,
+            readerModeFontSize = reading.readerModeFontSize,
+            readerModeFontSizeDefault = TextPreferences.DEFAULT_READER_MODE_FONT_SIZE,
+            readerModeFontSizeRange = TextPreferences.MIN_READER_MODE_FONT_SIZE..
+                TextPreferences.MAX_READER_MODE_FONT_SIZE,
+            pullToOpenBrowser = reading.pullToOpenBrowser,
+            externalBrowser = reading.externalBrowser,
+            redirectNitter = reading.redirectNitter,
+            nitterInstanceUrl = reading.nitterInstanceUrl,
+            archiveDomainCount = reading.archiveRedirectDomains.size,
+            enabledLinkPreviews = reading.enabledLinkPreviews,
+            linkPreviewsEnabled = reading.linkPreviewsEnabled,
+        )
+    }
+
+    fun setBoolean(setting: WebLinksBooleanSetting, value: Boolean) =
+        repository.setReadingBoolean(setting.preference, value)
+
+    fun setLinkPreview(type: LinkPreviewType, enabled: Boolean) =
+        repository.setLinkPreviewEnabled(type, enabled)
+
+    fun setReaderFontSize(value: Int) = repository.setReaderModeFontSize(value)
+    fun setReaderFont(value: AppFont) = repository.setReaderModeFont(value)
+    fun setPreload(mode: WebViewPreloadMode, minimumBattery: Int) =
+        repository.setWebViewPreload(mode, minimumBattery)
+
+    fun setNitterInstanceUrl(value: String): Boolean = repository.setNitterInstanceUrl(value)
+
+    fun setArchiveDomains(domains: List<String>) = repository.setArchiveRedirectDomains(domains)
+    val snapshot: AppSettings get() = repository.snapshot()
+}
+
+class AppearanceSettingsPresenter(
+    private val repository: AppSettingsRepository,
+) {
+    fun state(
+        themeLabel: String,
+        fontLabel: String,
+        showTransparentStatusBar: Boolean,
+        settings: AppSettings = repository.snapshot(),
+    ): AppearanceSettingsUiState {
+        val tintEnabled = settings.story.tintCardsFromImages
+        return AppearanceSettingsUiState(
+            themeLabel = themeLabel,
+            fontLabel = fontLabel,
+            paletteTintSummary = if (tintEnabled) {
+                PaletteTintPreferences.summary(settings.story.paletteTintConfigKey)
+            } else {
+                "Enable in Stories settings"
+            },
+            paletteTintEnabled = tintEnabled,
+            showTransparentStatusBar = showTransparentStatusBar,
+            transparentStatusBar = settings.general.transparentStatusBar,
+            compactHeader = settings.story.compactHeader,
+            storyListSelector = settings.story.listSelector,
+            surfaceEffectMode = settings.appearance.surfaceEffectMode,
+        )
+    }
+
+    fun setBoolean(
+        setting: AppearanceBooleanSetting,
+        value: Boolean,
+    ): Set<SettingsPlatformEffect> {
+        repository.setAppearanceBoolean(setting.preference, value)
+        return if (setting == AppearanceBooleanSetting.CompactHeader) {
+            emptySet()
+        } else {
+            setOf(SettingsPlatformEffect.ThemeChanged)
+        }
+    }
+
+    fun themeState(
+        nighttimeRangeLabel: String,
+        activeDark: Boolean,
+        dynamicColorAvailable: Boolean,
+        settings: AppSettings = repository.snapshot(),
+    ): ThemeSettingsUiState = ThemeSettingsUiState(
+        followSystem = settings.appearance.followSystem,
+        manualDark = settings.appearance.manualDark,
+        schemes = settings.appearance.colorSchemes,
+        activeDark = activeDark,
+        specialNighttime = settings.general.specialNighttimeTheme,
+        nighttimeRangeLabel = nighttimeRangeLabel,
+        dynamicColorAvailable = dynamicColorAvailable,
+    )
+
+    fun setFollowSystem(value: Boolean) = themeEffect { repository.setFollowSystemTheme(value) }
+    fun setManualDark(value: Boolean) = themeEffect { repository.setManualDarkTheme(value) }
+    fun setColorScheme(value: String) = themeEffect { repository.setColorScheme(value) }
+    fun setColorStyle(value: ColorSchemeStyle) = themeEffect { repository.setColorStyle(value) }
+    fun setNighttimeColorStyle(value: ColorSchemeStyle) = themeEffect { repository.setNighttimeColorStyle(value) }
+    fun setNighttimeColorScheme(value: String) = themeEffect { repository.setNighttimeColorScheme(value) }
+    fun setSpecialNighttime(value: Boolean) = themeEffect {
+        repository.setAppearanceBoolean(AppearanceBooleanPreference.SPECIAL_NIGHTTIME, value)
+    }
+
+    private inline fun themeEffect(change: () -> Unit): Set<SettingsPlatformEffect> {
+        change()
+        return setOf(SettingsPlatformEffect.ThemeChanged)
+    }
+
+    fun setFont(value: AppFont) = repository.setFont(value)
+    fun applyWelcomePreset(expressive: Boolean) = repository.applyWelcomePreset(expressive)
+    fun setPaletteTint(
+        mode: String?,
+        strength: Int,
+        colorfulness: Int,
+        tone: Int,
+        avoidBackgroundColor: Boolean = PaletteTintPreferences.DEFAULT_AVOID_BACKGROUND_COLOR,
+    ): Boolean = repository.setPaletteTint(mode, strength, colorfulness, tone, avoidBackgroundColor)
+
+    fun clearPaletteTint(): Boolean = repository.clearPaletteTint()
+    val snapshot: AppSettings get() = repository.snapshot()
+}
+
+class FiltersTagsSettingsPresenter(
+    private val settings: AppSettingsRepository,
+    private val filters: ContentFilterRepository,
+    private val userTags: UserTagsRepository,
+) {
+    fun state(snapshot: AppSettings = settings.snapshot()): FiltersTagsSettingsUiState =
+        FiltersTagsSettingsUiState(
+            tags = userTags.tags()
+                .map { TaggedUserUi(it.key, it.value, userTags.colorFor(it.key)) }
+                .sortedWith(compareBy<TaggedUserUi> { it.username.lowercase() }.thenBy { it.username }),
+            legacyTags = userTags.legacyTags().map { TaggedUserUi(it.username, it.tag, it.color) },
+            blockedUserCount = filters.items(ContentFilterType.USER).size,
+            legacyBlockedUserCount = filters.legacyUsers().size,
+            titleFilterCount = filters.titleRules().size,
+            domainFilterCount = filters.domainRules().size,
+            hideJobs = snapshot.story.hideJobs,
+        )
+
+    fun setHideJobs(value: Boolean) =
+        settings.setStoryBoolean(StoryBooleanPreference.HIDE_JOBS, value)
+
+    fun filterItems(type: ContentFilterType): List<String> = filters.items(type)
+    fun setFilterItems(type: ContentFilterType, items: List<String>) = filters.setItems(type, items)
+    fun tagFor(userName: String): String = userTags.tagFor(userName)
+    fun setTag(userName: String, tag: String, color: com.simon.harmonichackernews.settings.UserTagColor? = null) =
+        userTags.setTag(userName, tag, color)
+}
+
+data class FilterDialogContent(
+    val type: ContentFilterType,
+    val title: String,
+    val subtitle: String,
+    val inputLabel: String,
+    val emptyMessage: String,
+)
+
+val ContentFilterDialog.content: FilterDialogContent
+    get() = when (this) {
+        ContentFilterDialog.StoryTitle -> FilterDialogContent(
+            ContentFilterType.STORY_TITLE,
+            "Filter by story title",
+            "Hide stories containing these words or phrases in the title. Matching ignores capitalization.",
+            "Word or phrase",
+            "No story title filters",
+        )
+        ContentFilterDialog.Domain -> FilterDialogContent(
+            ContentFilterType.DOMAIN,
+            "Filter by domain",
+            "Hide stories from these domains. Matching ignores capitalization.",
+            "Domain",
+            "No domain filters",
+        )
+        ContentFilterDialog.User -> FilterDialogContent(
+            ContentFilterType.USER,
+            "Blocked users",
+            "Use the account’s exact HN spelling. Only that spelling is blocked. " +
+                "Older entries need capitalization review before they become active.",
+            "Username",
+            "No blocked users",
+        )
+    }
+
+private val StoriesStringSetting.preference: StoryStringPreference
+    get() = when (this) {
+        StoriesStringSetting.DisplayStyle -> StoryStringPreference.DISPLAY_STYLE
+        StoriesStringSetting.CategoryTagLocation -> StoryStringPreference.CATEGORY_TAG_LOCATION
+    }
+
+private fun hotnessLabel(value: Int): String = when (value) {
+    100, 200, 300, 400 -> "Points + comments > $value"
+    else -> "Never"
+}

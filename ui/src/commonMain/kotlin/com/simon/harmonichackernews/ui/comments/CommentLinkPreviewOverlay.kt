@@ -1,0 +1,898 @@
+package com.simon.harmonichackernews.ui.comments
+
+import kotlin.time.Duration.Companion.milliseconds
+
+import com.simon.harmonichackernews.ui.theme.cardBackground
+import com.simon.harmonichackernews.ui.theme.pageBackground
+import com.simon.harmonichackernews.resources.*
+import androidx.compose.animation.BoundsTransform
+import androidx.compose.animation.animateBounds
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import com.simon.harmonichackernews.ui.common.Button
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ButtonDefaults
+import com.simon.harmonichackernews.ui.common.ElevatedButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import com.simon.harmonichackernews.ui.common.shimmerBackground
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.LookaheadScope
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import com.simon.harmonichackernews.network.LinkSummary
+import com.simon.harmonichackernews.network.LinkSummaryParser
+import com.simon.harmonichackernews.network.ReferenceLinkPreviewState
+import com.simon.harmonichackernews.ui.common.TransformOverlay
+import com.simon.harmonichackernews.ui.content.rememberContentTypography
+import com.simon.harmonichackernews.ui.content.StoryTitleText
+import com.simon.harmonichackernews.ui.content.storyTitlePresentation
+import com.simon.harmonichackernews.data.Story
+import com.simon.harmonichackernews.network.StoryTextProcessor
+import com.simon.harmonichackernews.ui.theme.AppUiFontFamily
+import com.simon.harmonichackernews.utils.DomainNamePolicy
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.painterResource
+import org.jetbrains.compose.resources.stringResource
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+private const val ReferenceContentDurationMillis = 240
+private const val ReferenceContentFadeOutDurationMillis = 80
+private const val ReferenceContentFadeInDurationMillis =
+    ReferenceContentDurationMillis - ReferenceContentFadeOutDurationMillis
+private const val ReferenceImageDurationMillis = 360
+private const val ReferenceImageMetadataFadeOutDurationMillis = 100
+private const val ReferenceImageMetadataFadeInDurationMillis = 140
+private const val ReferenceImageCollapsedSizeDp = 104
+private const val ReferenceImageStandardMarginDp = 20
+private const val ReferenceImageCollapsedGapDp = 16
+private const val ReferenceImageExpandedGapDp = 18
+
+@Composable
+fun CommentLinkPreviewOverlay(
+    controller: CommentsScreenController,
+    tablet: Boolean,
+    referenceContent: @Composable (CommentLinkPreviewOverlayState.Reference) -> Unit,
+    onScrimAlphaChanged: (Float) -> Unit = {},
+) {
+    val state = controller.linkPreviewOverlay ?: return
+    val predictiveProgressAnimation = remember(state) { Animatable(0f) }
+    val settleRequest = controller.linkPreviewPredictiveBackSettleRequest
+
+    LaunchedEffect(controller.linkPreviewPredictiveBackProgress, settleRequest) {
+        if (settleRequest == null) {
+            predictiveProgressAnimation.snapTo(
+                controller.linkPreviewPredictiveBackProgress.coerceIn(0f, 1f),
+            )
+        }
+    }
+    LaunchedEffect(settleRequest?.serial) {
+        val request = settleRequest ?: return@LaunchedEffect
+        predictiveProgressAnimation.animateTo(
+            request.target,
+            tween(180, easing = FastOutSlowInEasing),
+        )
+        controller.finishLinkPreviewPredictiveBackSettle(request)
+    }
+
+    val imageOnly = state is CommentLinkPreviewOverlayState.Image
+    val referenceRowSource =
+        (state as? CommentLinkPreviewOverlayState.Reference)?.sourceIsReferenceRow == true
+    val sharedSourceLayer = when (state) {
+        is CommentLinkPreviewOverlayState.Reference ->
+            state.sourceContentLayer.takeIf { referenceRowSource }
+        is CommentLinkPreviewOverlayState.Image -> state.sourceContentLayer
+    }
+    val previewContainerColor = if (imageOnly) {
+        Color.Transparent
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    TransformOverlay(
+        contentKey = state,
+        sourceBounds = state.sourceBounds,
+        dismissRequestVersion = controller.linkPreviewDismissRequest,
+        predictiveBackProgress = predictiveProgressAnimation.value,
+        predictiveBackEdge = controller.linkPreviewPredictiveBackEdge,
+        maxWidth = if (tablet) {
+            HarmonicDimens.compose_comment_action_tablet_max_width
+        } else {
+            HarmonicDimens.compose_comment_action_max_width
+        },
+        horizontalPadding = HarmonicDimens.compose_comment_action_screen_padding_horizontal,
+        verticalPadding = HarmonicDimens.compose_comment_action_screen_padding_vertical,
+        targetCornerRadius = 28.dp,
+        sourceCornerRadius = when {
+            imageOnly -> 8.dp
+            referenceRowSource -> 6.dp
+            else -> 0.dp
+        },
+        containerColor = previewContainerColor,
+        sourceContainerColor = if (referenceRowSource) {
+            state.sourceContainerColor
+                ?: MaterialTheme.colorScheme.pageBackground
+        } else {
+            previewContainerColor.copy(alpha = 0f)
+        },
+        sourceBorderColor = MaterialTheme.colorScheme.outlineVariant,
+        sourceBorderWidth = if (referenceRowSource) 1.dp else 0.dp,
+        sourceAnchorSize = if (imageOnly || referenceRowSource) null else 8.dp,
+        shadowElevation = if (imageOnly) 0.dp else 8.dp,
+        scaleContentWithContainer = imageOnly,
+        preserveContentAspectRatio = imageOnly,
+        keepContentOpaqueWithSource = imageOnly || referenceRowSource,
+        consumeAllGestures = false,
+        verticalSwipeDismissEnabled = imageOnly,
+        sourceContentLayer = sharedSourceLayer,
+        sharedHazeSourceZIndex = CommentsModalHazeSourceZIndex,
+        glassBackground = !imageOnly,
+        onSourceReadyToCover = if (sharedSourceLayer != null) {
+            controller::coverLinkPreviewSource
+        } else {
+            null
+        },
+        onDismissRequest = controller::requestDismissLinkPreview,
+        onDismissAnimationFinished = controller::completeLinkPreviewDismiss,
+        onScrimAlphaChanged = onScrimAlphaChanged,
+    ) {
+        when (state) {
+            is CommentLinkPreviewOverlayState.Reference -> referenceContent(state)
+            is CommentLinkPreviewOverlayState.Image -> ZoomablePreviewImage(
+                state = state,
+                onDismissRequest = controller::requestDismissLinkPreview,
+            )
+        }
+    }
+}
+
+data class ReferenceSummaryUiState(
+    val loading: Boolean = false,
+    val showFallback: Boolean = false,
+    val result: LinkSummary? = null,
+    val error: String? = null,
+)
+
+fun referenceSummaryUiState(
+    runtime: ReferenceLinkPreviewState,
+    knownSummary: LinkSummary?,
+): ReferenceSummaryUiState {
+    val displayedSummary = runtime.summary ?: knownSummary.takeIf {
+        runtime.loading || runtime.url.isBlank()
+    }
+    return ReferenceSummaryUiState(
+        loading = runtime.loading && displayedSummary == null,
+        showFallback = runtime.showFallback,
+        result = displayedSummary,
+        error = runtime.error,
+    )
+}
+
+private data class ReferenceSummaryContentState(
+    val loading: Boolean,
+    val showFallback: Boolean,
+    val result: LinkSummary?,
+    val error: String?,
+)
+
+@Composable
+fun ReferenceCardContent(
+    url: String,
+    fallbackTitle: String,
+    summary: ReferenceSummaryUiState,
+    preferredFont: String,
+    commentTextSize: Float,
+    favicon: String?,
+    offline: Boolean,
+    textStyle: TextStyle,
+    referenceImage: @Composable (
+        imageUrl: String?,
+        loading: Boolean,
+        expanded: Boolean,
+        shape: Shape,
+        imageRatio: Float,
+        onImageRatio: (Float) -> Unit,
+        onClick: () -> Unit,
+        modifier: Modifier,
+    ) -> Unit,
+    onOpen: () -> Unit,
+) {
+    val coroutineScope = rememberCoroutineScope()
+    val typography = rememberContentTypography(
+        preferredFont = preferredFont,
+        commentTextSize = commentTextSize,
+    )
+    val requestedSummaryContent = ReferenceSummaryContentState(
+        loading = summary.loading,
+        showFallback = summary.showFallback,
+        result = summary.result,
+        error = summary.error,
+    )
+    var summaryContent by remember(url) { mutableStateOf(requestedSummaryContent) }
+    val summaryContentAlpha = remember(url) { Animatable(1f) }
+    LaunchedEffect(requestedSummaryContent) {
+        if (requestedSummaryContent == summaryContent) return@LaunchedEffect
+        summaryContentAlpha.animateTo(
+            0f,
+            tween(
+                ReferenceContentFadeOutDurationMillis,
+                easing = FastOutSlowInEasing,
+            ),
+        )
+        summaryContent = requestedSummaryContent
+        summaryContentAlpha.animateTo(
+            1f,
+            tween(
+                ReferenceContentFadeInDurationMillis,
+                easing = FastOutSlowInEasing,
+            ),
+        )
+    }
+
+    val result = summaryContent.result
+    val hnStory = result?.takeIf(LinkSummaryParser::isHackerNewsStory)
+    val title = firstNotBlank(result?.title, fallbackTitle, url)
+    val description = result?.description?.takeIf(String::isNotBlank)
+    val domain = if (
+        result != null &&
+        result.contentType == LinkSummaryParser.HACKER_NEWS_ITEM_CONTENT_TYPE &&
+        result.siteName.isNotBlank()
+    ) {
+        result.siteName
+    } else {
+        DomainNamePolicy.fromUrl(url) ?: url
+    }
+    // Loading -> content: create the eventual painter now, behind the existing content fade.
+    // Retain the current image when replacing already visible content.
+    val imageUrl = (result ?: requestedSummaryContent.result)?.imageUrl?.takeIf(String::isNotBlank)
+    val directImage = result?.contentType?.startsWith("image/", ignoreCase = true) == true
+    val expandImageInitially = directImage ||
+        result?.contentType == LinkSummaryParser.XKCD_COMIC_CONTENT_TYPE
+    var imageExpanded by remember(url, imageUrl, expandImageInitially) {
+        mutableStateOf(expandImageInitially)
+    }
+    var imageBoundsAnimating by remember(url, imageUrl) { mutableStateOf(false) }
+    val metadataAlpha = remember(url, imageUrl) { Animatable(1f) }
+    var imageRatio by remember(url, imageUrl) { mutableFloatStateOf(1f) }
+    val imageTopCornerRadius by animateDpAsState(
+        targetValue = if (imageExpanded) 28.dp else 8.dp,
+        animationSpec = tween(ReferenceImageDurationMillis, easing = FastOutSlowInEasing),
+        label = "reference image top corners",
+    )
+    val imageBottomCornerRadius by animateDpAsState(
+        targetValue = if (imageExpanded) 0.dp else 8.dp,
+        animationSpec = tween(ReferenceImageDurationMillis, easing = FastOutSlowInEasing),
+        label = "reference image bottom corners",
+    )
+    val imageShape = RoundedCornerShape(
+        topStart = imageTopCornerRadius,
+        topEnd = imageTopCornerRadius,
+        bottomStart = imageBottomCornerRadius,
+        bottomEnd = imageBottomCornerRadius,
+    )
+    val offlineMessage = stringResource(Res.string.link_summary_offline_message)
+    val genericErrorMessage = stringResource(Res.string.link_summary_error_message)
+    val errorMessage = summaryContent.error?.let {
+        referenceErrorMessage(offline, it, offlineMessage, genericErrorMessage)
+    }
+    val showImage = (summaryContent.loading && !summaryContent.showFallback) || imageUrl != null
+    val onImageClick = {
+        if (imageUrl != null && !imageBoundsAnimating) {
+            val expanded = !imageExpanded
+            coroutineScope.launch {
+                metadataAlpha.animateTo(
+                    0f,
+                    tween(
+                        ReferenceImageMetadataFadeOutDurationMillis,
+                        easing = FastOutSlowInEasing,
+                    ),
+                )
+                imageBoundsAnimating = true
+                imageExpanded = expanded
+                delay(
+                    (ReferenceImageDurationMillis - ReferenceImageMetadataFadeInDurationMillis)
+                        .toLong().milliseconds,
+                )
+                metadataAlpha.animateTo(
+                    1f,
+                    tween(
+                        ReferenceImageMetadataFadeInDurationMillis,
+                        easing = FastOutSlowInEasing,
+                    ),
+                )
+                imageBoundsAnimating = false
+            }
+        }
+    }
+
+    LookaheadScope {
+        val rootBoundsTransform = BoundsTransform { _, _ ->
+            tween(
+                durationMillis = if (imageBoundsAnimating) {
+                    ReferenceImageDurationMillis
+                } else {
+                    ReferenceContentDurationMillis
+                },
+                easing = FastOutSlowInEasing,
+            )
+        }
+        val headerBoundsTransform = BoundsTransform { _, _ ->
+            tween(
+                durationMillis = if (imageBoundsAnimating) {
+                    ReferenceImageDurationMillis
+                } else {
+                    ReferenceContentDurationMillis
+                },
+                easing = FastOutSlowInEasing,
+            )
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 720.dp)
+                .animateBounds(
+                    lookaheadScope = this@LookaheadScope,
+                    boundsTransform = rootBoundsTransform,
+                )
+                .verticalScroll(rememberScrollState()),
+        ) {
+            if (hnStory != null) {
+                HackerNewsStoryCard(
+                    summary = hnStory,
+                    favicon = favicon,
+                    fontFamily = typography.family,
+                    textSize = typography.commentTextSize,
+                    onOpen = onOpen,
+                    modifier = Modifier.graphicsLayer { alpha = summaryContentAlpha.value },
+                )
+            } else {
+                ReferenceImageHeader(
+                    showImage = showImage,
+                    imageUrl = imageUrl,
+                    loading = summaryContent.loading,
+                    expanded = imageExpanded,
+                    imageShape = imageShape,
+                    imageRatio = imageRatio,
+                    metadataAlpha = metadataAlpha.value,
+                    summaryContentAlpha = summaryContentAlpha.value,
+                    domain = domain,
+                    favicon = favicon,
+                    title = title,
+                    metadataLoading = summaryContent.loading && !summaryContent.showFallback,
+                    fontFamily = typography.family,
+                    metaSize = typography.storyMetaSize,
+                    titleSize = typography.storyTitleSize + 0.5f,
+                    lookaheadScope = this@LookaheadScope,
+                    boundsTransform = headerBoundsTransform,
+                    referenceImage = referenceImage,
+                    onImageRatio = { imageRatio = it },
+                    onImageClick = onImageClick,
+                )
+
+                Column(
+                    modifier = Modifier
+                        .animateBounds(
+                            lookaheadScope = this@LookaheadScope,
+                            boundsTransform = headerBoundsTransform,
+                        )
+                        .padding(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 18.dp),
+                ) {
+                    Box(Modifier.graphicsLayer { alpha = summaryContentAlpha.value }) {
+                        when {
+                            !description.isNullOrBlank() -> SelectionContainer {
+                                Text(
+                                    text = description,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontFamily = typography.family,
+                                    fontSize = typography.commentTextSize.sp,
+                                    lineHeight = (typography.commentTextSize + 2f).sp,
+                                    style = textStyle,
+                                )
+                            }
+                            summaryContent.loading && !summaryContent.showFallback ->
+                                ReferenceDescriptionShimmer()
+                            summaryContent.error != null -> ReferenceErrorContent(
+                                offline = offline,
+                                message = errorMessage.orEmpty(),
+                                fontFamily = typography.family,
+                                errorTextSize = typography.commentTextSize - 1f,
+                            )
+                            else -> Spacer(Modifier.height(0.dp))
+                        }
+                    }
+
+                    ElevatedButton(
+                        onClick = onOpen,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 18.dp)
+                            .height(52.dp),
+                        colors = ButtonDefaults.elevatedButtonColors(
+                            containerColor = MaterialTheme.colorScheme.cardBackground,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                        ),
+                    ) {
+                        Icon(
+                            painterResource(Res.drawable.ic_link),
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            stringResource(Res.string.link_summary_open_short),
+                            fontFamily = AppUiFontFamily,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A compact discussion card with one reading column and a separate action footer. */
+@Composable
+private fun HackerNewsStoryCard(
+    summary: LinkSummary,
+    favicon: String?,
+    fontFamily: FontFamily,
+    textSize: Float,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    val domain = summary.storyUrl.takeIf(String::isNotBlank)?.let(DomainNamePolicy::fromUrl)
+    val title = remember(summary.title, summary.storyUrl) {
+        val story = Story().apply {
+            this.title = summary.title
+            url = summary.storyUrl
+            StoryTextProcessor.applyTitleBadges(this)
+        }
+        storyTitlePresentation(story.title, story.pdfTitle, story.videoTitle)
+    }
+    Column(modifier.padding(24.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AsyncImage(
+                model = favicon,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp).clip(RoundedCornerShape(4.dp)),
+                fallback = tintedPainterResource(Res.drawable.ic_public, colors.onSurfaceVariant),
+                error = tintedPainterResource(Res.drawable.ic_public, colors.onSurfaceVariant),
+            )
+            Text(
+                "Hacker News",
+                modifier = Modifier.padding(start = 8.dp),
+                color = colors.onSurface,
+                fontFamily = AppUiFontFamily,
+                fontWeight = FontWeight.Medium,
+                fontSize = 13.sp,
+                lineHeight = 16.sp,
+            )
+            Spacer(Modifier.width(16.dp))
+            if (!domain.isNullOrBlank()) {
+                Text(
+                    domain,
+                    modifier = Modifier.weight(1f),
+                    color = colors.onSurfaceVariant,
+                    fontFamily = AppUiFontFamily,
+                    fontSize = 12.sp,
+                    lineHeight = 14.sp,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        SelectionContainer {
+            StoryTitleText(
+                text = title.text,
+                badge = title.badge,
+                modifier = Modifier.padding(top = 20.dp),
+                color = colors.onSurface,
+                fontFamily = fontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = (textSize + 5f).sp,
+                lineHeight = (textSize + 10f).sp,
+            )
+        }
+        val byline = listOfNotNull(
+            summary.author.takeIf(String::isNotBlank)?.let { "by $it" },
+            summary.publishedTime.takeIf(String::isNotBlank),
+        ).joinToString(" · ")
+        if (byline.isNotBlank()) {
+            Text(
+                byline,
+                modifier = Modifier.padding(top = 4.dp),
+                color = colors.onSurfaceVariant,
+                fontFamily = AppUiFontFamily,
+                fontSize = 13.sp,
+                lineHeight = 16.sp,
+            )
+        }
+        if (summary.description.isNotBlank()) {
+            SelectionContainer {
+                Text(
+                    summary.description,
+                    modifier = Modifier.padding(top = 14.dp),
+                    color = colors.onSurface,
+                    fontFamily = fontFamily,
+                    fontSize = textSize.sp,
+                    lineHeight = (textSize + 4f).sp,
+                )
+            }
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(top = 22.dp, bottom = 16.dp),
+            color = colors.outlineVariant.copy(alpha = 0.5f),
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.padding(end = 16.dp).heightIn(min = 44.dp),
+                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (summary.storyPoints >= 0) HnStoryStat(summary.storyPoints, "point", "points")
+                if (summary.storyComments >= 0) HnStoryStat(summary.storyComments, "comment", "comments")
+            }
+            Button(
+                onClick = onOpen,
+                modifier = Modifier.heightIn(min = 44.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = colors.cardBackground,
+                    contentColor = colors.onSurface,
+                ),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                Text(stringResource(Res.string.link_summary_open_short), fontFamily = AppUiFontFamily, fontWeight = FontWeight.Bold)
+                Icon(painterResource(Res.drawable.ic_chevron_right), null, Modifier.padding(start = 4.dp).size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun HnStoryStat(count: Int, singular: String, plural: String) {
+    Column {
+        Text(
+            count.toString(),
+            color = MaterialTheme.colorScheme.onSurface,
+            fontFamily = AppUiFontFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = 17.sp,
+            lineHeight = 20.sp,
+        )
+        Text(
+            if (count == 1) singular else plural,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontFamily = AppUiFontFamily,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+        )
+    }
+}
+
+@Composable
+private fun ReferenceImageHeader(
+    showImage: Boolean,
+    imageUrl: String?,
+    loading: Boolean,
+    expanded: Boolean,
+    imageShape: Shape,
+    imageRatio: Float,
+    metadataAlpha: Float,
+    summaryContentAlpha: Float,
+    domain: String,
+    favicon: String?,
+    title: String,
+    metadataLoading: Boolean,
+    fontFamily: FontFamily,
+    metaSize: Float,
+    titleSize: Float,
+    lookaheadScope: LookaheadScope,
+    boundsTransform: BoundsTransform,
+    referenceImage: @Composable (
+        imageUrl: String?,
+        loading: Boolean,
+        expanded: Boolean,
+        shape: Shape,
+        imageRatio: Float,
+        onImageRatio: (Float) -> Unit,
+        onClick: () -> Unit,
+        modifier: Modifier,
+    ) -> Unit,
+    onImageRatio: (Float) -> Unit,
+    onImageClick: () -> Unit,
+) {
+    Layout(
+        modifier = Modifier.fillMaxWidth(),
+        content = {
+            if (showImage) {
+                Box(
+                    modifier = Modifier.animateBounds(
+                        lookaheadScope = lookaheadScope,
+                        boundsTransform = boundsTransform,
+                    ),
+                ) {
+                    referenceImage(
+                        imageUrl,
+                        loading,
+                        expanded,
+                        imageShape,
+                        imageRatio,
+                        onImageRatio,
+                        onImageClick,
+                        Modifier.fillMaxSize().graphicsLayer { alpha = summaryContentAlpha },
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .animateBounds(
+                        lookaheadScope = lookaheadScope,
+                        boundsTransform = boundsTransform,
+                    )
+                    .graphicsLayer { alpha = metadataAlpha },
+            ) {
+                ReferenceMetadata(
+                    domain = domain,
+                    favicon = favicon,
+                    title = title,
+                    loading = metadataLoading,
+                    contentAlpha = summaryContentAlpha,
+                    fontFamily = fontFamily,
+                    metaSize = metaSize,
+                    titleSize = titleSize,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+    ) { measurables, constraints ->
+        val width = constraints.maxWidth
+        val standardMargin = ReferenceImageStandardMarginDp.dp.roundToPx()
+        val imageMeasurable = measurables.firstOrNull().takeIf { showImage }
+        val metadataMeasurable = measurables.last()
+        val imageSize = ReferenceImageCollapsedSizeDp.dp.roundToPx()
+        val imageHeight = if (expanded) {
+            (width / imageRatio.coerceIn(0.45f, 3f)).roundToInt().coerceAtLeast(1)
+        } else {
+            imageSize
+        }
+        val imageWidth = if (expanded) width else imageSize
+        val imagePlaceable = imageMeasurable?.measure(
+            androidx.compose.ui.unit.Constraints.fixed(imageWidth, imageHeight),
+        )
+        val metadataWidth = when {
+            !showImage || expanded -> (width - standardMargin * 2).coerceAtLeast(1)
+            else -> (width - standardMargin * 2 - imageSize -
+                ReferenceImageCollapsedGapDp.dp.roundToPx()).coerceAtLeast(1)
+        }
+        val metadataPlaceable = metadataMeasurable.measure(
+            androidx.compose.ui.unit.Constraints(
+                minWidth = metadataWidth,
+                maxWidth = metadataWidth,
+                minHeight = 0,
+                maxHeight = constraints.maxHeight,
+            ),
+        )
+        val imageTop = if (expanded) 0 else standardMargin
+        val metadataTop = when {
+            expanded -> imageHeight + ReferenceImageExpandedGapDp.dp.roundToPx()
+            else -> standardMargin
+        }
+        val targetHeight = when {
+            expanded -> metadataTop + metadataPlaceable.height
+            showImage -> standardMargin + max(imageHeight, metadataPlaceable.height)
+            else -> standardMargin + metadataPlaceable.height
+        }
+        layout(width, targetHeight.coerceIn(constraints.minHeight, constraints.maxHeight)) {
+            imagePlaceable?.placeRelative(
+                x = if (expanded) 0 else standardMargin,
+                y = imageTop,
+            )
+            metadataPlaceable.placeRelative(
+                x = when {
+                    expanded || !showImage -> standardMargin
+                    else -> standardMargin + imageSize +
+                        ReferenceImageCollapsedGapDp.dp.roundToPx()
+                },
+                y = metadataTop,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReferenceMetadata(
+    domain: String,
+    favicon: String?,
+    title: String,
+    loading: Boolean,
+    contentAlpha: Float,
+    fontFamily: FontFamily,
+    metaSize: Float,
+    titleSize: Float,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AsyncImage(
+                model = favicon,
+                fallback = tintedPainterResource(Res.drawable.ic_public, MaterialTheme.colorScheme.onSurfaceVariant),
+                error = tintedPainterResource(Res.drawable.ic_public, MaterialTheme.colorScheme.onSurfaceVariant),
+                contentDescription = null,
+                modifier = Modifier.size(17.dp).clip(RoundedCornerShape(3.dp)),
+            )
+            Text(
+                text = domain,
+                modifier = Modifier.padding(start = 6.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = fontFamily,
+                fontSize = metaSize.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box(Modifier.graphicsLayer { alpha = contentAlpha }) {
+            if (loading) {
+                Column(
+                    modifier = Modifier.padding(top = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    LinkPreviewShimmer(Modifier.fillMaxWidth().height(18.dp).clip(RoundedCornerShape(6.dp)))
+                    LinkPreviewShimmer(Modifier.width(140.dp).height(18.dp).clip(RoundedCornerShape(6.dp)))
+                }
+            } else {
+                SelectionContainer {
+                    Text(
+                        text = title,
+                        modifier = Modifier.padding(top = 5.dp),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontFamily = fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = titleSize.sp,
+                        lineHeight = (titleSize + 3f).sp,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReferenceDescriptionShimmer() {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        LinkPreviewShimmer(Modifier.fillMaxWidth().height(16.dp).clip(RoundedCornerShape(6.dp)))
+        LinkPreviewShimmer(Modifier.fillMaxWidth(0.65f).height(16.dp).clip(RoundedCornerShape(6.dp)))
+    }
+}
+
+@Composable
+private fun ReferenceErrorContent(
+    offline: Boolean,
+    message: String,
+    fontFamily: FontFamily,
+    errorTextSize: Float,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp, bottom = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        if (offline) {
+            Icon(
+                painterResource(Res.drawable.ic_cloud_off),
+                contentDescription = null,
+                modifier = Modifier.size(44.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            text = stringResource(
+                if (offline) Res.string.link_summary_offline_title else Res.string.link_summary_error_title,
+            ),
+            modifier = Modifier.padding(top = if (offline) 12.dp else 0.dp),
+            color = MaterialTheme.colorScheme.onSurface,
+            fontFamily = fontFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = (errorTextSize + 4f).sp,
+        )
+        Text(
+            text = message,
+            modifier = Modifier.padding(top = 4.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontFamily = fontFamily,
+            fontSize = errorTextSize.sp,
+            lineHeight = (errorTextSize + 2f).sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+fun LinkPreviewShimmer(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "link preview shimmer")
+    val progress by transition.animateFloat(
+        initialValue = -1f,
+        targetValue = 2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2000),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "link preview shimmer progress",
+    )
+    val base = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.15f)
+    val highlight = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.22f)
+    Box(modifier.shimmerBackground(base, highlight) { progress })
+}
+
+private fun referenceErrorMessage(
+    offline: Boolean,
+    loaderMessage: String,
+    offlineMessage: String,
+    genericErrorMessage: String,
+): String {
+    if (offline) return offlineMessage
+    return if (
+        loaderMessage.startsWith("The page returned HTTP ") ||
+        loaderMessage.startsWith("This link contains ") ||
+        loaderMessage.startsWith("This link does not use ") ||
+        loaderMessage.startsWith("The page is too large ")
+    ) {
+        loaderMessage
+    } else {
+        genericErrorMessage
+    }
+}
+
+private fun firstNotBlank(vararg values: String?): String =
+    values.firstOrNull { !it.isNullOrBlank() }.orEmpty()

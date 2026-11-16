@@ -1,0 +1,198 @@
+package com.simon.harmonichackernews.ui.settings
+
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
+import com.simon.harmonichackernews.app.HarmonicAppComposition
+import com.simon.harmonichackernews.app.HarmonicSceneComposition
+import com.simon.harmonichackernews.navigation.MainNavigationSnapshot
+import com.simon.harmonichackernews.network.HackerNewsCaptchaChallenge
+import androidx.compose.runtime.key
+import com.simon.harmonichackernews.presentation.UserProfileLoadState
+import com.simon.harmonichackernews.presentation.UserProfileSessionEffect
+import com.simon.harmonichackernews.ui.common.FailureDetailDialog
+import com.simon.harmonichackernews.ui.common.LoginDialog
+import com.simon.harmonichackernews.ui.common.UserMessageSnackbarHost
+import com.simon.harmonichackernews.ui.stories.CacheStoriesDialog
+import com.simon.harmonichackernews.ui.stories.StoriesScreenController
+
+@Composable
+fun BoxScope.PortableAppForeground(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    navigation: MainNavigationSnapshot,
+    storiesController: StoriesScreenController?,
+    captchaDialog: @Composable (HackerNewsCaptchaChallenge, () -> Unit, (String) -> Unit) -> Unit,
+    showAccountCreation: Boolean = true,
+) {
+    if (navigation.changelogDialogVisible) {
+        SettingsChangelogDialog(
+            onDismiss = scene.navigation::dismissChangelogDialog,
+            onOpenGithub = { scene.links.open(app.metadata.projectUrl) },
+        )
+    }
+    if (navigation.cacheStoriesDialogVisible) {
+        CacheStoriesDialog(
+            initialStoryCount = app.userSettings.cache.storiesToCache,
+            integratedWebView = app.supportsArticleSnapshots && app.userSettings.reading.integratedWebView,
+            onDismiss = scene.navigation::dismissCacheStoriesDialog,
+            onConfirm = { count, downloadWebViewContents ->
+                scene.navigation.dismissCacheStoriesDialog()
+                storiesController?.cacheStories(count, downloadWebViewContents)
+                    ?: scene.userMessages.show("Return to the stories screen to cache posts")
+            },
+        )
+    }
+    if (navigation.loginDialogVisible) {
+        LoginDialog(
+            onDismiss = scene.navigation::dismissLoginDialog,
+            workflow = app.login,
+            onLoginSucceeded = {
+                scene.navigation.dismissLoginDialog()
+                scene.userMessages.show("Logged in to Hacker News")
+            },
+            onCreateAccount = if (showAccountCreation) {
+                { scene.links.open("https://news.ycombinator.com/login?goto=news") }
+            } else null,
+            captchaDialog = captchaDialog,
+        )
+    }
+    navigation.captchaRequest?.let { request ->
+        key(request.serial) {
+            captchaDialog(
+                request.challenge,
+                { scene.captchaRequests.cancel(request.serial) },
+                { scene.captchaRequests.complete(request.serial, it) },
+            )
+        }
+    }
+    navigation.userRequest?.let { request ->
+        PortableUserProfileDialog(
+            app = app,
+            scene = scene,
+            userName = request.userName,
+            onDismiss = scene.navigation::dismissUserDialog,
+            onTagChanged = {},
+        )
+    }
+    navigation.failureRequest?.let { request ->
+        FailureDetailDialog(
+            title = request.title,
+            message = request.message,
+            showCopyComment = request.clipboardText != null,
+            onCopyComment = {
+                request.clipboardText?.let {
+                    app.platform.clipboard.copy("Hacker News comment", it)
+                    scene.userMessages.show("Comment copied to clipboard")
+                }
+                scene.navigation.dismissFailureDetailDialog()
+            },
+            onDismiss = scene.navigation::dismissFailureDetailDialog,
+        )
+    }
+    UserMessageSnackbarHost(
+        messages = scene.userMessages,
+        modifier = Modifier.align(Alignment.BottomCenter).zIndex(100f),
+    )
+}
+
+@Composable
+fun PortableUserProfileDialog(
+    app: HarmonicAppComposition,
+    scene: HarmonicSceneComposition,
+    userName: String,
+    onDismiss: () -> Unit,
+    onTagChanged: () -> Unit,
+) {
+    val session = remember(scene, userName) { scene.userProfiles.open(userName) }
+    val runtimeState by session.runtime.state.collectAsStateWithLifecycle()
+    val settings by app.settings.updates.collectAsStateWithLifecycle(initialValue = app.settings.snapshot())
+    var tagDialogOpen by rememberSaveable(userName) { mutableStateOf(false) }
+    var currentTag by remember(userName) { mutableStateOf(app.userTags.tagFor(userName)) }
+    var currentTagColor by remember(userName) { mutableStateOf(app.userTags.colorFor(userName)) }
+
+    LaunchedEffect(session) {
+        session.start()
+        session.effects.collect { effect ->
+            when (effect) {
+                is UserProfileSessionEffect.OpenSubmissions -> {
+                    onDismiss()
+                    scene.navigation.openSubmissions(effect.username)
+                }
+                is UserProfileSessionEffect.ComposeReportEmail -> {
+                    val subject = "Reporting%20user%20${effect.username}"
+                    scene.links.open("mailto:hn@ycombinator.com?subject=$subject")
+                }
+                is UserProfileSessionEffect.Message -> scene.userMessages.show(effect.text)
+                UserProfileSessionEffect.Dismiss -> onDismiss()
+            }
+        }
+    }
+    DisposableEffect(session) {
+        onDispose {
+            // Navigation owns global dialogs across host recreation; local settings dialogs
+            // release their session when their composition leaves.
+            if (scene.navigation.state.value.userRequest?.userName != userName) {
+                scene.userProfiles.release(session)
+            }
+        }
+    }
+
+    val state = when (val loadState = runtimeState.loadState) {
+        UserProfileLoadState.Loading -> UserDialogUiState.Loading
+        UserProfileLoadState.Error -> UserDialogUiState.Error
+        is UserProfileLoadState.Loaded -> UserDialogUiState.Loaded(
+            UserInfoUi(
+                id = loadState.profile.id,
+                meta = loadState.profile.meta,
+                about = loadState.profile.about,
+                hasSubmissions = loadState.profile.hasSubmissions,
+            ),
+        )
+    }
+    SynchronizedSettingsDialogs {
+        UserSettingsDialog(
+            requestedUserName = userName,
+            state = state,
+            tag = currentTag,
+            tagColor = currentTagColor,
+            blocked = runtimeState.blocked,
+            ownProfile = runtimeState.ownProfile,
+            identityResolved = runtimeState.identityResolved,
+            userAvatarsEnabled = settings.comments.userAvatarsEnabled,
+            userAvatarOptions = settings.comments.userAvatarOptions,
+            onDismiss = onDismiss,
+            onRetry = session::retry,
+            onOpenSubmissions = session::openSubmissions,
+            onEditTag = { tagDialogOpen = true },
+            onToggleBlocked = { session.toggleBlocked() },
+            onReport = session::report,
+            onOpenLink = { scene.links.open(it) },
+            nestedDialog = {
+                if (tagDialogOpen) {
+                    UserTagRoute(
+                        userName = userName,
+                        currentTag = currentTag,
+                        onDismiss = { tagDialogOpen = false },
+                        onSaved = { saved ->
+                            currentTag = saved
+                            currentTagColor = app.userTags.colorFor(userName)
+                            tagDialogOpen = false
+                            onTagChanged()
+                        },
+                    )
+                }
+            },
+        )
+    }
+}

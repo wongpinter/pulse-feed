@@ -1,0 +1,11 @@
+<resources>
+
+    <style name="AppThemeMaterialDayNight" parent="AppThemeMaterialDark" />
+
+    <style name="AppThemeMaterialFixedDayNight" parent="AppThemeMaterialFixedDark" />
+
+    <style name="AppThemeDarkLightDayNight" parent="AppTheme" />
+
+    <style name="AppThemeAmoledWhiteDayNight" parent="AppThemeAmoledDark" />
+
+</resources>

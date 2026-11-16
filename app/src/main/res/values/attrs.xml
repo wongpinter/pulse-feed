@@ -1,0 +1,4 @@
+<resources>
+    <!-- Tint for Android vector drawables still used by native integrations. -->
+    <attr name="iconTintColor" format="reference|color" />
+</resources>

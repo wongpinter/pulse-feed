@@ -1,0 +1,78 @@
+package com.simon.harmonichackernews.ui.settings
+
+import com.simon.harmonichackernews.resources.settings_section_user_avatars
+import com.simon.harmonichackernews.resources.settings_section_quote_highlighting
+import com.simon.harmonichackernews.resources.settings_section_spacing
+import com.simon.harmonichackernews.resources.Res
+import com.simon.harmonichackernews.resources.settings_search_title
+import com.simon.harmonichackernews.resources.settings_section_about
+import com.simon.harmonichackernews.resources.settings_section_ai_summary
+import com.simon.harmonichackernews.resources.settings_section_article_categories
+import com.simon.harmonichackernews.resources.settings_section_category_exploration
+import com.simon.harmonichackernews.resources.settings_section_appearance
+import com.simon.harmonichackernews.resources.settings_section_font
+import com.simon.harmonichackernews.resources.settings_section_comments
+import com.simon.harmonichackernews.resources.settings_section_header_display
+import com.simon.harmonichackernews.resources.settings_section_thread_depth
+import com.simon.harmonichackernews.resources.settings_section_data
+import com.simon.harmonichackernews.resources.settings_section_debug
+import com.simon.harmonichackernews.resources.settings_section_debug_link_previews
+import com.simon.harmonichackernews.resources.settings_section_glass
+import com.simon.harmonichackernews.resources.settings_section_filters_tags
+import com.simon.harmonichackernews.resources.settings_section_licenses
+import com.simon.harmonichackernews.resources.settings_section_stories
+import com.simon.harmonichackernews.resources.settings_section_stories_header
+import com.simon.harmonichackernews.resources.settings_section_frontpages
+import com.simon.harmonichackernews.resources.settings_section_account
+import com.simon.harmonichackernews.resources.settings_section_palette_tint
+import com.simon.harmonichackernews.resources.settings_section_theme
+import com.simon.harmonichackernews.resources.settings_section_web_links
+import com.simon.harmonichackernews.resources.settings_section_reader_mode
+import org.jetbrains.compose.resources.StringResource
+
+const val HideCommentsSettingsRoute = "comments/hide_comments"
+
+enum class SettingsSection(
+    val route: String,
+    val titleResource: StringResource,
+) {
+    Search("search", Res.string.settings_search_title),
+    Appearance("appearance", Res.string.settings_section_appearance),
+    Font("font", Res.string.settings_section_font),
+    Theme("theme", Res.string.settings_section_theme),
+    PaletteTint("palette_tint", Res.string.settings_section_palette_tint),
+    StoriesSpacing("stories_spacing", Res.string.settings_section_spacing),
+    CommentsSpacing("comments_spacing", Res.string.settings_section_spacing),
+    Stories("stories", Res.string.settings_section_stories),
+    StoriesHeader("stories_header", Res.string.settings_section_stories_header),
+    Frontpages("frontpages", Res.string.settings_section_frontpages),
+    Comments("comments", Res.string.settings_section_comments),
+    HeaderDisplay("header_display", Res.string.settings_section_header_display),
+    ThreadDepth("thread_depth", Res.string.settings_section_thread_depth),
+    QuoteHighlighting("quote_highlighting", Res.string.settings_section_quote_highlighting),
+    UserAvatars("user_avatars", Res.string.settings_section_user_avatars),
+    WebLinks("web_links", Res.string.settings_section_web_links),
+    ReaderMode("reader_mode", Res.string.settings_section_reader_mode),
+    FiltersTags("filters_tags", Res.string.settings_section_filters_tags),
+    AiSummary("ai_summary", Res.string.settings_section_ai_summary),
+    ArticleCategories("article_categories", Res.string.settings_section_article_categories),
+    CategoryExploration("category_exploration", Res.string.settings_section_category_exploration),
+    Account("account", Res.string.settings_section_account),
+    Data("data", Res.string.settings_section_data),
+    Debug("debug", Res.string.settings_section_debug),
+    DebugLinkPreviews("debug_link_previews", Res.string.settings_section_debug_link_previews),
+    Glass("glass", Res.string.settings_section_glass),
+    About("about", Res.string.settings_section_about),
+    Licenses("licenses", Res.string.settings_section_licenses),
+    ;
+
+    companion object {
+        fun fromRoute(route: String): SettingsSection? =
+            when (route) {
+                "notifications" -> Account
+                "frontpage" -> StoriesHeader
+                HideCommentsSettingsRoute -> Comments
+                else -> entries.firstOrNull { it.route == route }
+            }
+    }
+}

@@ -1,0 +1,108 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+
+plugins {
+    alias(libs.plugins.android.dynamic.feature)
+}
+
+android {
+    namespace = "com.simon.harmonichackernews.localai.runtime"
+    ndkVersion = "28.2.13676358"
+    compileSdk {
+        version = release(37) { minorApiLevel = 1 }
+    }
+    testBuildType = providers.gradleProperty("harmonic.testBuildType").getOrElse("debug")
+
+    defaultConfig {
+        minSdk = 26
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    buildTypes {
+        debugFast {
+            initWith(release)
+            matchingFallbacks.add("release")
+        }
+
+        debugLLM {
+            initWith(debug)
+            matchingFallbacks.add("debug")
+        }
+
+        debugLLMFast {
+            initWith(debugFast)
+            matchingFallbacks.add("release")
+        }
+
+        benchmark {
+            initWith(release)
+            matchingFallbacks.add("release")
+        }
+        nonMinifiedBenchmark {
+            initWith(benchmark)
+            matchingFallbacks.add("benchmark")
+            matchingFallbacks.add("release")
+        }
+
+        fossRelease {
+            initWith(release)
+            matchingFallbacks.add("release")
+        }
+
+        playRelease {
+            initWith(release)
+            matchingFallbacks.add("release")
+        }
+    }
+
+    sourceSets {
+        debugLLM {
+            kotlin.srcDirs += "src/play/kotlin"
+        }
+        debugLLMFast {
+            kotlin.srcDirs += "src/play/kotlin"
+        }
+        playRelease {
+            kotlin.srcDirs += "src/play/kotlin"
+        }
+    }
+}
+
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variantBuilder ->
+        variantBuilder.enable = false
+    }
+}
+
+kotlin {
+    compilerOptions {
+        languageVersion = KotlinVersion.KOTLIN_2_4
+        jvmTarget = JvmTarget.JVM_11
+    }
+}
+
+dependencies {
+    implementation project(":app")
+    implementation project(":core")
+    debugLLMImplementation(libs.litertlm)
+    debugLLMFastImplementation(libs.litertlm)
+    playReleaseImplementation(libs.litertlm)
+    testImplementation(libs.junit)
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
