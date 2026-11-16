@@ -1,5 +1,7 @@
 version: 2
-updates:
+updates: []
+
+# Dependabot disabled for this repository.
   - package-ecosystem: "gradle"
     directory: "/"
     schedule:
