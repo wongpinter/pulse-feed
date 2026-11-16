@@ -77,7 +77,7 @@ class AndroidThemeMigrationTest {
             }
             if (Build.VERSION.SDK_INT >= 31) {
                 assertTrue(themed.theme.resolveAttribute(android.R.attr.windowSplashScreenAnimatedIcon, value, true))
-                assertEquals(R.drawable.ic_harmonic_splash_gather, value.resourceId)
+                assertEquals(R.mipmap.ic_launcher_splash, value.resourceId)
             }
         }
     }
