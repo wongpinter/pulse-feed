@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from desktop_identity import APP_NAME, FILE_STEM
 from package_windows_arm64 import package, require_arm64_pe, verify_image
 
 
@@ -23,10 +24,10 @@ class WindowsArm64PackageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / 'native image'
-            for name in ['Harmonic.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
+            for name in [f'{APP_NAME}.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
                 executable(image / name)
             (image / 'app').mkdir()
-            (image / 'app/Harmonic.cfg').write_text('[JavaOptions]\n')
+            (image / f'app/{APP_NAME}.cfg').write_text('[JavaOptions]\n')
             metadata = root / 'metadata.properties'
             metadata.write_text('versionName=3.2.1\n')
             installer = package(image, metadata, root / 'installer')
@@ -34,7 +35,7 @@ class WindowsArm64PackageTest(unittest.TestCase):
 
     def test_x64_emulation_cannot_silently_pass_as_a_native_build(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'Harmonic.exe'
+            path = Path(directory) / f'{APP_NAME}.exe'
             executable(path)
             require_arm64_pe(path)
             executable(path, 0x8664)
@@ -44,10 +45,10 @@ class WindowsArm64PackageTest(unittest.TestCase):
     def test_entire_runtime_must_match_the_launcher_architecture(self):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory)
-            for name in ['Harmonic.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
+            for name in [f'{APP_NAME}.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
                 executable(image / name)
             (image / 'app').mkdir()
-            (image / 'app/Harmonic.cfg').write_text('[JavaOptions]\n')
+            (image / f'app/{APP_NAME}.cfg').write_text('[JavaOptions]\n')
             verify_image(image)
             (image / 'runtime/bin/java.exe').unlink()
             verify_image(image)
@@ -58,10 +59,10 @@ class WindowsArm64PackageTest(unittest.TestCase):
     def test_non_relocatable_archive_cannot_be_shipped_in_the_installer(self):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory)
-            for name in ['Harmonic.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
+            for name in [f'{APP_NAME}.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
                 executable(image / name)
             (image / 'app').mkdir()
-            (image / 'app/Harmonic.cfg').write_text('java-options=-XX:SharedArchiveFile=$APPDIR/app.jsa\n')
+            (image / f'app/{APP_NAME}.cfg').write_text('java-options=-XX:SharedArchiveFile=$APPDIR/app.jsa\n')
             with self.assertRaisesRegex(ValueError, 'do not relocate'):
                 verify_image(image)
 
@@ -69,10 +70,10 @@ class WindowsArm64PackageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             image = root / 'image with spaces'
-            for name in ['Harmonic.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
+            for name in [f'{APP_NAME}.exe', 'runtime/bin/java.exe', 'runtime/bin/server/jvm.dll']:
                 executable(image / name)
             (image / 'app').mkdir()
-            (image / 'app/Harmonic.cfg').write_text('[JavaOptions]\n')
+            (image / f'app/{APP_NAME}.cfg').write_text('[JavaOptions]\n')
             metadata = root / 'metadata.properties'
             metadata.write_text('versionName=3.2.1\n')
             destination = root / 'output'
@@ -80,10 +81,10 @@ class WindowsArm64PackageTest(unittest.TestCase):
                 self.assertIn(f'/DAppImage={image.resolve()}', command)
                 self.assertIn('/DAppVersion=3.2.1', command)
                 self.assertTrue(kwargs['check'])
-                (destination / 'Harmonic-3.2.1-windows-arm64.exe').write_bytes(b'installer')
+                (destination / f'{FILE_STEM}-3.2.1-windows-arm64.exe').write_bytes(b'installer')
             with patch('package_windows_arm64.subprocess.run', side_effect=compile_installer):
                 result = package(image, metadata, destination, compiler='ISCC.exe')
-            self.assertEqual(result.name, 'Harmonic-3.2.1-windows-arm64.exe')
+            self.assertEqual(result.name, f'{FILE_STEM}-3.2.1-windows-arm64.exe')
 
 
 if __name__ == '__main__':

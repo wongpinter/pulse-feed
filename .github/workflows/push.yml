@@ -229,6 +229,23 @@ jobs:
             throw "WiX Toolset 3.x is required to build the MSI"
           }
           $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Install Inno Setup
+        if: matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          # The Windows ARM64 job runs the Windows-only Inno Setup test and packaging step,
+          # and the hosted image does not ship ISCC.exe.
+          choco install innosetup --no-progress -y
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            throw "Inno Setup 6 is required to package the Windows ARM64 installer"
+          }
+          Split-Path $iscc | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Test Windows ARM64 installer scripts
         if: matrix.os == 'windows-11-arm'
         run: python -B -m unittest discover -s .github/scripts -p 'test_package_windows_arm64.py'

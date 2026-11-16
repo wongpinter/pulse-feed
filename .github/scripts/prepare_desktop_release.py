@@ -6,6 +6,8 @@ import re
 import shutil
 import sys
 
+from desktop_identity import FILE_STEM, METADATA_PATH
+
 
 EXTENSIONS = {"macos": ".dmg", "windows": ".msi", "windows-arm64": ".exe",
               "linux": ".deb", "linux-arm64": ".deb"}
@@ -23,10 +25,10 @@ def prepare(package_pattern, platform, metadata, destination):
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+(?:-[A-Za-z0-9.-]+)?", version):
         raise ValueError(f"Invalid desktop release version: {version!r}")
     destination.mkdir(parents=True, exist_ok=True)
-    output = destination / f"Harmonic-{version}-{platform}{extension}"
+    output = destination / f"{FILE_STEM}-{version}-{platform}{extension}"
     # The tag workflow uploads both names. GitHub's /releases/latest/download/
     # redirect keeps the website current without API requests or bot commits.
-    alias = destination / f"Harmonic-{platform}{extension}"
+    alias = destination / f"{FILE_STEM}-{platform}{extension}"
     for target in (output, alias):
         if target.exists():
             raise FileExistsError(target)
@@ -38,5 +40,5 @@ def prepare(package_pattern, platform, metadata, destination):
 
 if __name__ == "__main__":
     prepare(sys.argv[1], sys.argv[2],
-            Path("desktop_app/build/generated/desktopMetadata/harmonic-desktop.properties"),
+            Path(METADATA_PATH),
             Path("desktop-release"))

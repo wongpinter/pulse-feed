@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from desktop_identity import FILE_STEM
 from prepare_desktop_release import EXTENSIONS, prepare
 
 
@@ -15,9 +16,9 @@ class DesktopReleaseFilenameTest(unittest.TestCase):
                 metadata = root / "metadata.properties"
                 metadata.write_text("# generated\nversionName=3.2.1\nversionCode=99\n")
                 output = prepare(str(package), platform, metadata, root / "public")
-                self.assertEqual(output.name, f"Harmonic-3.2.1-{platform}{extension}")
+                self.assertEqual(output.name, f"{FILE_STEM}-3.2.1-{platform}{extension}")
                 self.assertEqual(output.read_bytes(), package.read_bytes())
-                alias = root / "public" / f"Harmonic-{platform}{extension}"
+                alias = root / "public" / f"{FILE_STEM}-{platform}{extension}"
                 self.assertEqual(alias.read_bytes(), package.read_bytes())
 
     def test_missing_or_ambiguous_packages_fail(self):
@@ -38,12 +39,12 @@ class DesktopReleaseFilenameTest(unittest.TestCase):
             metadata.write_text("versionName=3.2.1\n")
             destination = root / "public"
             destination.mkdir()
-            alias = destination / "Harmonic-linux.deb"
+            alias = destination / f"{FILE_STEM}-linux.deb"
             alias.write_bytes(b"existing installer")
             with self.assertRaises(FileExistsError):
                 prepare(str(package), "linux", metadata, destination)
             self.assertEqual(alias.read_bytes(), b"existing installer")
-            self.assertFalse((destination / "Harmonic-3.2.1-linux.deb").exists())
+            self.assertFalse((destination / f"{FILE_STEM}-3.2.1-linux.deb").exists())
 
     def test_existing_release_file_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:

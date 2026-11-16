@@ -8,6 +8,8 @@ import shutil
 import struct
 import subprocess
 
+from desktop_identity import APP_NAME, ARM64_IMAGE_PATH, ARM64_INSTALLER_PATH, FILE_STEM, METADATA_PATH
+
 
 def require_arm64_pe(path):
     with path.open("rb") as source:
@@ -21,14 +23,14 @@ def require_arm64_pe(path):
         raise ValueError(f"Expected a native ARM64 executable, not machine {machine:#x}: {path}")
 
 
-def verify_image(image):
-    require_arm64_pe(image / "Harmonic.exe")
+def verify_image(image, app_name=APP_NAME):
+    require_arm64_pe(image / f"{app_name}.exe")
     require_arm64_pe(image / "runtime/bin/server/jvm.dll")
     # jlink omits command-line launchers unless AppCDS needs them during training.
     java = image / "runtime/bin/java.exe"
     if java.is_file():
         require_arm64_pe(java)
-    config = image / "app/Harmonic.cfg"
+    config = image / f"app/{app_name}.cfg"
     if not config.is_file():
         raise ValueError("The release image is missing its launcher configuration")
     if "-XX:SharedArchiveFile=" in config.read_text(encoding="utf-8"):
@@ -49,19 +51,20 @@ def find_compiler():
     raise FileNotFoundError("Install Inno Setup 6 or put ISCC.exe on PATH")
 
 
-def package(image, metadata, destination, compiler=None):
-    verify_image(image)
+def package(image, metadata, destination, compiler=None, app_name=APP_NAME):
+    verify_image(image, app_name)
     properties = dict(line.split("=", 1) for line in metadata.read_text().splitlines()
                       if line and not line.startswith("#") and "=" in line)
     version = properties["versionName"]
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+(?:-[A-Za-z0-9.-]+)?", version):
         raise ValueError(f"Invalid desktop release version: {version!r}")
     destination.mkdir(parents=True, exist_ok=True)
-    script = Path(__file__).resolve().parents[2] / "desktop_app/native/windows/harmonic-arm64.iss"
+    script = Path(__file__).resolve().parents[2] / "desktop_app/native/windows/pulsefeed-arm64.iss"
     subprocess.run([compiler or find_compiler(), "/Qp", f"/DAppImage={image.resolve()}",
-                    f"/DAppVersion={version}", f"/DInstallerOutput={destination.resolve()}",
+                    f"/DAppVersion={version}", f"/DLauncherName={app_name}",
+                    f"/DInstallerOutput={destination.resolve()}",
                     str(script)], check=True)
-    installer = destination / f"Harmonic-{version}-windows-arm64.exe"
+    installer = destination / f"{FILE_STEM}-{version}-windows-arm64.exe"
     if not installer.is_file():
         raise FileNotFoundError(installer)
     print(f"Built Windows ARM64 installer: {installer}")
@@ -70,11 +73,8 @@ def package(image, metadata, destination, compiler=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", type=Path,
-                        default=Path("desktop_app/build/compose/binaries/main-release/app/Harmonic"))
-    parser.add_argument("--metadata", type=Path,
-                        default=Path("desktop_app/build/generated/desktopMetadata/harmonic-desktop.properties"))
-    parser.add_argument("--destination", type=Path,
-                        default=Path("desktop_app/build/compose/binaries/main-release/exe"))
+    parser.add_argument("--image", type=Path, default=Path(ARM64_IMAGE_PATH))
+    parser.add_argument("--metadata", type=Path, default=Path(METADATA_PATH))
+    parser.add_argument("--destination", type=Path, default=Path(ARM64_INSTALLER_PATH))
     args = parser.parse_args()
     package(args.image, args.metadata, args.destination)

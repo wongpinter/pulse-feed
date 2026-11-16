@@ -6,13 +6,16 @@ $ErrorActionPreference = 'Stop'
 $installers = @(Get-ChildItem $InstallerDirectory -Filter '*-windows-arm64.exe')
 if ($installers.Count -ne 1) { throw 'Expected one Windows ARM64 installer' }
 $diagnostics = Join-Path $env:RUNNER_TEMP 'harmonic-arm64-verification'
+$appName = 'Pulse Feed'
+$displayName = 'Pulse Feed (ARM64)'
+$shortcutName = 'Pulse Feed ARM64'
 $installDirectory = Join-Path $diagnostics 'installed app'
-$installedLauncher = Join-Path $installDirectory 'Harmonic.exe'
+$installedLauncher = Join-Path $installDirectory "$appName.exe"
 New-Item -ItemType Directory -Force $diagnostics | Out-Null
 if (Test-Path $installDirectory) { throw "Verification directory already exists: $installDirectory" }
 $oldJavaOptions = $env:JAVA_TOOL_OPTIONS
 $app = $null
-$originalImage = Join-Path (Get-Location) 'desktop_app/build/compose/binaries/main-release/app/Harmonic'
+$originalImage = Join-Path (Get-Location) "desktop_app/build/compose/binaries/main-release/app/$appName"
 $hiddenImage = "$originalImage-verification"
 $imageHidden = $false
 $userFile = Join-Path $installDirectory 'user-file-to-preserve.txt'
@@ -28,10 +31,10 @@ try {
 
     # Installation must register an uninstaller and a Start menu shortcut.
     $registration = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
-        Where-Object { $_.DisplayName -eq 'Harmonic (ARM64)' -and
+        Where-Object { $_.DisplayName -eq $displayName -and
             $_.InstallLocation.TrimEnd('\') -eq $installDirectory })
     if ($registration.Count -ne 1) { throw 'Missing installed application registration' }
-    $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Harmonic ARM64\Harmonic (ARM64).lnk'
+    $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) "$shortcutName\$displayName.lnk"
     if (-not (Test-Path $shortcut)) { throw 'Missing Start menu shortcut' }
 
     # Reinstallation must replace obsolete payload without deleting other files.
@@ -67,12 +70,12 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while (-not $app.HasExited -and [DateTime]::UtcNow -lt $deadline) {
         $app.Refresh()
-        # jpackage's launcher waits for a child Harmonic.exe running the JVM.
+        # jpackage's launcher waits for a child process running the JVM.
         # Match the installed path so the parent or an unrelated app cannot pass.
-        foreach ($process in (Get-Process -Name Harmonic -ErrorAction SilentlyContinue)) {
+        foreach ($process in (Get-Process -Name $appName -ErrorAction SilentlyContinue)) {
             if ($process.Path -eq $installedLauncher -and
                 $process.MainWindowHandle -ne [IntPtr]::Zero -and
-                $process.MainWindowTitle -eq 'Harmonic') { $windowObserved = $true }
+                $process.MainWindowTitle -eq 'Pulse Feed') { $windowObserved = $true }
         }
         Start-Sleep -Milliseconds 100
     }
@@ -85,7 +88,7 @@ try {
 } finally {
     $env:JAVA_TOOL_OPTIONS = $oldJavaOptions
     if ($app -and -not $app.HasExited) {
-        Get-Process -Name Harmonic -ErrorAction SilentlyContinue |
+        Get-Process -Name $appName -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -eq $installedLauncher -and $_.Id -ne $app.Id } |
             Stop-Process -Force
         Stop-Process -Id $app.Id -Force
@@ -98,7 +101,7 @@ try {
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
             "/LOG=`"$(Join-Path $diagnostics 'uninstall.log')`""
         )
-        if ($uninstall.ExitCode -ne 0 -or (Test-Path (Join-Path $installDirectory 'Harmonic.exe'))) {
+        if ($uninstall.ExitCode -ne 0 -or (Test-Path (Join-Path $installDirectory "$appName.exe"))) {
             throw "Uninstallation failed: $($uninstall.ExitCode)"
         }
         if ($userFileCreated -and (Get-Content $userFile) -ne 'preserve this file') {

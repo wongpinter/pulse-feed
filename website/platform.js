@@ -12,20 +12,20 @@ function detectDesktopPlatform({ platform = '', userAgent = '', maxTouchPoints =
 
 if (typeof document !== 'undefined') {
   // Stable aliases published by the tag workflow; GitHub redirects to the latest release.
-  const releaseRoot = 'https://github.com/SimonHalvdansson/Harmonic-HN/releases/latest/download/';
+  const releaseRoot = 'https://github.com/wongpinter/pulse-feed/releases/latest/download/';
   const downloads = {
     macos: {
-      href: `${releaseRoot}Harmonic-macos.dmg`,
+      href: `${releaseRoot}PulseFeed-macos.dmg`,
       label: 'Download for macOS',
       note: 'macOS app · .dmg',
     },
     windows: {
-      href: `${releaseRoot}Harmonic-windows.msi`,
+      href: `${releaseRoot}PulseFeed-windows.msi`,
       label: 'Download for Windows',
       note: 'Windows installer · .msi',
     },
     linux: {
-      href: `${releaseRoot}Harmonic-linux.deb`,
+      href: `${releaseRoot}PulseFeed-linux.deb`,
       label: 'Download for Linux',
       note: 'Linux package · .deb',
     },
@@ -43,7 +43,7 @@ if (typeof document !== 'undefined') {
     maxTouchPoints: browser.maxTouchPoints,
   });
   const selected = downloads[platform] || {
-    href: 'https://github.com/SimonHalvdansson/Harmonic-HN/releases/latest',
+    href: 'https://github.com/wongpinter/pulse-feed/releases/latest',
     label: 'Download for desktop',
     note: 'macOS, Windows & Linux',
   };
